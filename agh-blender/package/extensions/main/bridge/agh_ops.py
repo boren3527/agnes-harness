@@ -1,0 +1,633 @@
+"""P1 (第 ④ 环): structured opcode whitelist for the Blender side.
+
+The whole point of this module is that nothing outside the table below can run.
+`/op` accepts JSON, this module validates it against a small declarative schema,
+and only then does a fixed function run. There is no eval, no getattr by name,
+and no way for the caller to name a Python symbol.
+
+Every op runs on Blender's main thread and is expected to be small, reversible by
+Ctrl+Z (the caller pushes an undo step) and cheap to re-apply (ops are written to
+be idempotent when their target already exists, unless `replace` says otherwise).
+"""
+
+import math
+import os
+
+import bpy
+
+# --------------------------------------------------------------------------- schema
+
+MAX_OPS_PER_BATCH = 64
+MAX_OBJECTS = 512
+
+
+class OpError(Exception):
+    """Rejection with a machine-readable code; never a traceback to the caller."""
+
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def _num(value, path):
+    # bool is an int in Python; reject it explicitly so True never becomes 1.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise OpError('E_ARG_TYPE', '%s must be a number' % path)
+    if not math.isfinite(value):
+        raise OpError('E_ARG_TYPE', '%s must be finite' % path)
+    return float(value)
+
+
+def _vec(value, path, length, minimum=None, maximum=None):
+    if not isinstance(value, (list, tuple)) or len(value) != length:
+        raise OpError('E_ARG_TYPE', '%s must be a list of %d numbers' % (path, length))
+    out = []
+    for index, item in enumerate(value):
+        number = _num(item, '%s[%d]' % (path, index))
+        if minimum is not None and number < minimum:
+            raise OpError('E_ARG_RANGE', '%s[%d] below %s' % (path, index, minimum))
+        if maximum is not None and number > maximum:
+            raise OpError('E_ARG_RANGE', '%s[%d] above %s' % (path, index, maximum))
+        out.append(number)
+    return out
+
+
+def _name(value, path):
+    if not isinstance(value, str):
+        raise OpError('E_ARG_TYPE', '%s must be a string' % path)
+    text = value.strip()
+    if not text or len(text) > 96:
+        raise OpError('E_ARG_RANGE', '%s must be 1..96 characters' % path)
+    if not all(character.isalnum() or character in '_-.' for character in text):
+        raise OpError('E_ARG_CHARSET', '%s allows letters, digits, _ - . only' % path)
+    return text
+
+
+def _enum(value, path, allowed):
+    if value not in allowed:
+        raise OpError('E_ARG_ENUM', '%s must be one of %s' % (path, ', '.join(sorted(allowed))))
+    return value
+
+
+def _flag(value, path):
+    if not isinstance(value, bool):
+        raise OpError('E_ARG_TYPE', '%s must be a boolean' % path)
+    return value
+
+
+def _color(value, path):
+    triple = _vec(value, path, 3, 0.0, 1.0)
+    return triple
+
+
+# --------------------------------------------------------------------------- helpers
+
+
+def _object(name):
+    target = bpy.data.objects.get(name)
+    if target is None:
+        raise OpError('E_NO_SUCH_OBJECT', 'no object named %s' % name)
+    return target
+
+
+def _material(name):
+    found = bpy.data.materials.get(name)
+    if found is not None:
+        return found
+    if len(bpy.data.materials) > 4096:
+        raise OpError('E_LIMIT', 'too many materials in this file')
+    return bpy.data.materials.new(name)
+
+
+def _ensure_principled(material):
+    # A brand new material already carries a Principled BSDF in 4.x/5.x, but a
+    # material loaded from an older file may not.
+    if material.use_nodes and material.node_tree is not None:
+        for node in material.node_tree.nodes:
+            if node.type == 'BSDF_PRINCIPLED':
+                return node
+    material.use_nodes = True
+    node = material.node_tree.nodes.new('ShaderNodeBsdfPrincipled')
+    output = next((n for n in material.node_tree.nodes if n.type == 'OUTPUT_MATERIAL'), None)
+    if output is None:
+        output = material.node_tree.nodes.new('ShaderNodeOutputMaterial')
+    material.node_tree.links.new(node.outputs['BSDF'], output.inputs['Surface'])
+    return node
+
+
+def _counts():
+    return len(bpy.data.objects)
+
+
+# --------------------------------------------------------------------------- ops
+# Each entry: (spec, apply). `spec` drives validation; `apply` gets already-validated
+# values and must return a small JSON-able delta.
+
+PRIMITIVE_KINDS = ('cube', 'uv_sphere', 'cylinder', 'cone', 'torus', 'plane')
+
+
+def _op_primitive_add(args):
+    kind = _enum(args.get('kind'), 'kind', PRIMITIVE_KINDS)
+    name = _name(args.get('name'), 'name')
+    if len(bpy.data.objects) >= MAX_OBJECTS:
+        raise OpError('E_LIMIT', 'object budget exhausted')
+    replace = _flag(args.get('replace', False), 'replace')
+    size = _num(args.get('size', 1.0), 'size') if 'size' in args else 1.0
+    if size <= 0 or size > 1000:
+        raise OpError('E_ARG_RANGE', 'size must be in (0, 1000]')
+    location = _vec(args.get('location', [0, 0, 0]), 'location', 3, -10000.0, 10000.0)
+    rotation = _vec(args.get('rotation_euler', [0, 0, 0]), 'rotation_euler', 3)
+    scale = _vec(args.get('scale', [1, 1, 1]), 'scale', 3, 1e-6, 10000.0)
+
+    if kind == 'cube':
+        bpy.ops.mesh.primitive_cube_add(size=size)
+    elif kind == 'uv_sphere':
+        bpy.ops.mesh.primitive_uv_sphere_add(radius=size / 2.0)
+    elif kind == 'cylinder':
+        bpy.ops.mesh.primitive_cylinder_add(radius=size / 2.0, depth=size)
+    elif kind == 'cone':
+        bpy.ops.mesh.primitive_cone_add(radius1=size / 2.0, depth=size)
+    elif kind == 'torus':
+        bpy.ops.mesh.primitive_torus_add(major_radius=size / 2.0, minor_radius=size / 8.0)
+    else:
+        bpy.ops.mesh.primitive_plane_add(size=size)
+
+    created = bpy.context.active_object
+    if created is None:
+        raise OpError('E_INTERNAL', 'primitive operator produced no active object')
+
+    previous = bpy.data.objects.get(name)
+    if previous is not None and previous is not created:
+        if replace:
+            bpy.data.objects.remove(previous, do_unlink=True)
+        else:
+            bpy.data.objects.remove(created, do_unlink=True)
+            raise OpError('E_NAME_TAKEN', 'object %s already exists (pass replace=true)' % name)
+    created.name = name
+    created.location = location
+    created.rotation_euler = rotation
+    created.scale = scale
+
+    material_name = args.get('material')
+    if material_name is not None:
+        created.data.materials.append(_material(_name(material_name, 'material')))
+    return {'created': name, 'kind': kind, 'objectCount': _counts()}
+
+
+def _op_transform(args):
+    target = _object(_name(args.get('name'), 'name'))
+    changed = []
+    for key in ('location', 'rotation_euler', 'scale'):
+        if key in args:
+            value = _vec(args[key], key, 3)
+            if key == 'scale' and min(value) <= 0:
+                raise OpError('E_ARG_RANGE', 'scale components must be positive')
+            setattr(target, key, value)
+            changed.append(key)
+    if not changed:
+        raise OpError('E_ARG_MISSING', 'transform needs at least one of location/rotation_euler/scale')
+    return {'transformed': target.name, 'changed': changed, 'objectCount': _counts()}
+
+
+def _op_duplicate(args):
+    source = _object(_name(args.get('name'), 'name'))
+    name = _name(args.get('newName'), 'newName')
+    if bpy.data.objects.get(name) is not None:
+        raise OpError('E_NAME_TAKEN', 'object %s already exists' % name)
+    if len(bpy.data.objects) >= MAX_OBJECTS:
+        raise OpError('E_LIMIT', 'object budget exhausted')
+    clone = source.copy()
+    if source.data is not None:
+        clone.data = source.data.copy()
+    bpy.context.collection.objects.link(clone)
+    clone.name = name
+    clone.location = [source.location[i] + _num(args.get('offset', [0, 0, 0])[i], 'offset[%d]' % i)
+                      for i in range(3)] if 'offset' in args else list(source.location)
+    if 'scale' in args:
+        clone.scale = _vec(args['scale'], 'scale', 3, 1e-6, 10000.0)
+    return {'duplicated': source.name, 'created': clone.name, 'objectCount': _counts()}
+
+
+def _op_delete(args):
+    target = _object(_name(args.get('name'), 'name'))
+    name = target.name
+    bpy.data.objects.remove(target, do_unlink=True)
+    return {'deleted': name, 'objectCount': _counts()}
+
+
+def _op_material_set(args):
+    material = _material(_name(args.get('name'), 'name'))
+    node = _ensure_principled(material)
+    color = _color(args.get('color', [0.8, 0.8, 0.8]), 'color')
+    node.inputs['Base Color'].default_value = (color[0], color[1], color[2], 1.0)
+    if 'roughness' in args:
+        node.inputs['Roughness'].default_value = _num(args['roughness'], 'roughness')
+    if 'metallic' in args:
+        node.inputs['Metallic'].default_value = _num(args['metallic'], 'metallic')
+    if 'emission' in args:
+        strength = _num(args['emission'], 'emission')
+        if 'Emission Color' in node.inputs:
+            node.inputs['Emission Color'].default_value = (color[0], color[1], color[2], 1.0)
+        node.inputs['Emission Strength'].default_value = strength
+    return {'material': material.name, 'color': color}
+
+
+def _op_material_assign(args):
+    target = _object(_name(args.get('name'), 'name'))
+    material = _material(_name(args.get('material'), 'material'))
+    if target.data is None:
+        raise OpError('E_NOT_A_MESH', '%s has no mesh data' % target.name)
+    target.data.materials.clear()
+    target.data.materials.append(material)
+    return {'assigned': material.name, 'to': target.name}
+
+
+def _op_join(args):
+    names = args.get('names')
+    if not isinstance(names, list) or len(names) < 2 or len(names) > MAX_OPS_PER_BATCH:
+        raise OpError('E_ARG_TYPE', 'names must be a list of 2..%d names' % MAX_OPS_PER_BATCH)
+    targets = [_object(_name(item, 'names[]')) for item in names]
+    kind = _name(args.get('name'), 'name')
+    for item in bpy.context.view_layer.objects:
+        item.select_set(False)
+    for item in targets:
+        item.select_set(True)
+    bpy.context.view_layer.objects.active = targets[0]
+    bpy.ops.object.join()
+    merged = bpy.context.active_object
+    merged.name = kind
+    return {'joined': len(targets), 'name': merged.name, 'objectCount': _counts()}
+
+
+INSTANCE_DIR = None
+
+
+def set_instance_dir(path):
+    """The bridge owns the instance directory; the ops module only needs to be told where it is."""
+    global INSTANCE_DIR
+    INSTANCE_DIR = path
+
+
+def _sha256_file(path):
+    import hashlib
+    digest = hashlib.sha256()
+    with open(path, 'rb') as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _image_report():
+    """Every image path, raw and resolved — the point of a checkpoint is that the resolved path
+    still lands on the original asset, not on an empty directory beside the copy."""
+    report = []
+    for image in bpy.data.images:
+        raw = image.filepath
+        if not raw:
+            continue
+        resolved = bpy.path.abspath(raw)
+        report.append({
+            'name': image.name,
+            'filepath': raw,
+            'resolved': resolved,
+            'exists': os.path.exists(resolved),
+        })
+    return report
+
+
+def _op_data_purge_unused(args):
+    """Remove datablocks nothing references.
+
+    Deleting an object does not delete its mesh or material: Blender keeps them until the file is
+    saved and reloaded, so a long modelling session accumulates orphans. Only blocks with no users
+    and no fake user are touched, and linked (library) data is never removed.
+    """
+    import os  # noqa: F401  (kept local so the module header stays untouched)
+    dry = bool(args.get('dry', False))
+    removed = {'meshes': [], 'materials': [], 'images': []}
+    for label, pool in (('meshes', bpy.data.meshes), ('materials', bpy.data.materials), ('images', bpy.data.images)):
+        for block in list(pool):
+            if block.users == 0 and not block.use_fake_user and block.library is None:
+                removed[label].append(block.name)
+                if not dry:
+                    pool.remove(block)
+    return {
+        'dry': dry,
+        'removed': {name: names for name, names in removed.items() if names},
+        'counts': {name: len(names) for name, names in removed.items()},
+        'objectCount': _counts(),
+    }
+
+
+def _op_file_checkpoint(args):
+    """Save a snapshot with copy=True / relative_remap=True.
+
+    copy=True leaves bpy.data.filepath pointing at the original, so checkpointing never mutates the
+    open file; relative_remap=True rewrites relative image paths so they still resolve back to the
+    original project's assets instead of to an empty folder next to the copy.
+    """
+    if INSTANCE_DIR is None:
+        raise OpError('E_NO_INSTANCE', 'the bridge has no instance directory configured')
+    label = _name(args.get('label') or 'checkpoint', 'label')
+    target_dir = os.path.join(INSTANCE_DIR, 'checkpoints')
+    if not os.path.isdir(target_dir):
+        os.makedirs(target_dir)
+    target = os.path.join(target_dir, label + '.blend')
+    # Never overwrite: a checkpoint that replaces an earlier one is not a checkpoint.
+    if os.path.exists(target):
+        raise OpError('E_TARGET_EXISTS', 'checkpoint already exists: %s (pick another label)' % target)
+    before = bpy.data.filepath
+    bpy.ops.wm.save_as_mainfile(
+        filepath=target, copy=True, relative_remap=True, compress=False, check_existing=False,
+    )
+    return {
+        'path': target,
+        'bytes': os.path.getsize(target),
+        'sha256': _sha256_file(target),
+        'mainFilepathBefore': before,
+        'mainFilepathAfter': bpy.data.filepath,
+        'mainFileUntouched': bpy.data.filepath == before,
+        'images': _image_report(),
+    }
+
+
+def _op_file_stage_export(args):
+    """Write a fresh copy into the instance staging area, for the Host to deliver with its own
+    file write (so the final write is audited and cannot overwrite anything).
+
+    relative_remap=False on purpose: the export is a standalone artifact, so a relative path that
+    would silently break outside the project is reported rather than rewritten to point somewhere
+    the caller never chose.
+    """
+    if INSTANCE_DIR is None:
+        raise OpError('E_NO_INSTANCE', 'the bridge has no instance directory configured')
+    target_dir = os.path.join(INSTANCE_DIR, 'staging')
+    if not os.path.isdir(target_dir):
+        os.makedirs(target_dir)
+    name = os.urandom(16).hex()
+    if args.get('name') is not None:
+        name = _name(args['name'], 'name')
+    target = os.path.join(target_dir, name + '.blend')
+    if os.path.exists(target):
+        raise OpError('E_TARGET_EXISTS', 'staging target already exists: %s' % target)
+    before = bpy.data.filepath
+    images = _image_report()
+    bpy.ops.wm.save_as_mainfile(
+        filepath=target, copy=True, relative_remap=False, compress=False, check_existing=False,
+    )
+    relative = [image for image in images if image['filepath'].startswith('//')]
+    return {
+        'path': target,
+        'bytes': os.path.getsize(target),
+        'sha256': _sha256_file(target),
+        'mainFilepathBefore': before,
+        'mainFilepathAfter': bpy.data.filepath,
+        'mainFileUntouched': bpy.data.filepath == before,
+        'images': images,
+        'relativeImages': relative,
+        'relativeWarning': (
+            'this scene has %d relative image path(s); delivering the artifact outside the project '
+            'would leave them pointing at the original directory' % len(relative)
+        ) if relative else None,
+    }
+
+
+OPS = {
+    'mesh.primitive_add': _op_primitive_add,
+    'object.transform': _op_transform,
+    'object.duplicate': _op_duplicate,
+    'object.delete': _op_delete,
+    'material.set': _op_material_set,
+    'material.assign': _op_material_assign,
+    'object.join': _op_join,
+    'data.purge_unused': _op_data_purge_unused,
+    'file.checkpoint': _op_file_checkpoint,
+    'file.stage_export': _op_file_stage_export,
+}
+
+# Declared so a caller can ask what exists without guessing. This table is the single
+# source of truth: the model composes batches from it, and `mutates`/`destructive` drive
+# the approval decision on the Node side.
+OP_MANIFEST = {
+    'mesh.primitive_add': {
+        'mutates': False,
+        'summary': 'add one primitive mesh',
+        'args': {
+            'kind': {'type': 'enum', 'required': True, 'values': list(PRIMITIVE_KINDS)},
+            'name': {'type': 'string', 'required': True, 'charset': 'A-Za-z0-9_-.', 'maxLength': 96},
+            'size': {'type': 'number', 'default': 1.0, 'range': '(0, 1000]', 'note': 'diameter/footprint'},
+            'location': {'type': 'vec3', 'default': [0, 0, 0], 'absMax': 10000},
+            'rotation_euler': {'type': 'vec3', 'default': [0, 0, 0], 'unit': 'radians'},
+            'scale': {'type': 'vec3', 'default': [1, 1, 1], 'range': '(0, 10000]'},
+            'material': {'type': 'string', 'optional': True, 'note': 'created on demand'},
+            'replace': {'type': 'boolean', 'default': False, 'note': 'overwrite an existing object of the same name'},
+        },
+        'example': {'op': 'mesh.primitive_add',
+                    'args': {'kind': 'uv_sphere', 'name': 'head', 'size': 1.6,
+                             'location': [0, 0, 3.3], 'material': 'Skin'}},
+    },
+    'object.transform': {
+        'mutates': True,
+        'summary': 'set absolute location / rotation_euler / scale',
+        'args': {
+            'name': {'type': 'string', 'required': True},
+            'location': {'type': 'vec3', 'optional': True, 'absMax': 10000},
+            'rotation_euler': {'type': 'vec3', 'optional': True, 'unit': 'radians'},
+            'scale': {'type': 'vec3', 'optional': True, 'range': '(0, 10000]'},
+        },
+        'notes': ['at least one of location/rotation_euler/scale is required',
+                  'values are absolute, not deltas'],
+        'example': {'op': 'object.transform',
+                    'args': {'name': 'arm_L', 'rotation_euler': [0, 0, -0.35]}},
+    },
+    'object.duplicate': {
+        'mutates': False,
+        'summary': 'copy an object (cheapest way to build mirrored limbs)',
+        'args': {
+            'name': {'type': 'string', 'required': True, 'note': 'source'},
+            'newName': {'type': 'string', 'required': True, 'charset': 'A-Za-z0-9_-.', 'maxLength': 96},
+            'offset': {'type': 'vec3', 'optional': True, 'note': 'relative to the source location'},
+            'scale': {'type': 'vec3', 'optional': True, 'range': '(0, 10000]'},
+        },
+        'example': {'op': 'object.duplicate',
+                    'args': {'name': 'body', 'newName': 'arm_R', 'offset': [-0.85, 0, 0.15]}},
+    },
+    'object.delete': {
+        'mutates': True,
+        'destructive': True,
+        'summary': 'remove an object',
+        'args': {'name': {'type': 'string', 'required': True}},
+        'example': {'op': 'object.delete', 'args': {'name': 'Cube'}},
+    },
+    'material.set': {
+        'mutates': False,
+        'summary': 'create a material if missing, then set colour/roughness/metallic/emission',
+        'args': {
+            'name': {'type': 'string', 'required': True},
+            'color': {'type': 'vec3', 'default': [0.8, 0.8, 0.8], 'range': '0..1 per channel'},
+            'roughness': {'type': 'number', 'optional': True, 'range': '0..1'},
+            'metallic': {'type': 'number', 'optional': True, 'range': '0..1'},
+            'emission': {'type': 'number', 'optional': True, 'note': 'emission strength, 0..1 typical'},
+        },
+        'notes': ['colour is linear scene-referred, not sRGB hex; divide a hex value by 255 and '
+                  'apply an approximate sRGB->linear step for similar-looking results'],
+        'example': {'op': 'material.set',
+                    'args': {'name': 'Hair', 'color': [0.12, 0.18, 0.55], 'roughness': 0.45}},
+    },
+    'material.assign': {
+        'mutates': True,
+        'summary': 'replace all material slots of an object with one material',
+        'args': {
+            'name': {'type': 'string', 'required': True, 'note': 'object'},
+            'material': {'type': 'string', 'required': True},
+        },
+        'example': {'op': 'material.assign', 'args': {'name': 'head', 'material': 'Skin'}},
+    },
+    'object.join': {
+        'mutates': True,
+        'destructive': True,
+        'summary': 'merge several objects into the first one',
+        'args': {
+            'names': {'type': 'strlist', 'required': True, 'minItems': 2, 'maxItems': MAX_OPS_PER_BATCH},
+            'name': {'type': 'string', 'required': True},
+        },
+        'example': {'op': 'object.join', 'args': {'names': ['arm_L', 'arm_R'], 'name': 'arms'}},
+    },
+}
+
+OP_MANIFEST.update({
+    'data.purge_unused': {
+        'mutates': True,
+        'destructive': True,
+        'summary': 'remove datablocks with no users (orphan meshes/materials/images)',
+        'args': {
+            'dry': {'type': 'boolean', 'default': False, 'note': 'report what would be removed without removing it'},
+        },
+        'notes': ['deleting an object does not delete its mesh or material; they linger until purge'],
+        'example': {'op': 'data.purge_unused', 'args': {'dry': True}},
+    },
+    'file.checkpoint': {
+        'mutates': False,
+        'summary': 'save a snapshot beside the instance (main file untouched, relative paths kept working)',
+        'args': {
+            'label': {'type': 'string', 'default': 'checkpoint', 'charset': 'A-Za-z0-9_-.', 'maxLength': 96},
+        },
+        'notes': [
+            'copy=True: bpy.data.filepath is unchanged, so the open file is never modified',
+            'relative_remap=True: relative image paths still resolve to the original assets',
+            'an existing label is refused (a checkpoint that replaces an earlier one is not a checkpoint)',
+        ],
+        'example': {'op': 'file.checkpoint', 'args': {'label': 'boy-01'}},
+    },
+    'file.stage_export': {
+        'mutates': False,
+        'summary': 'write a standalone copy into the instance staging area for the Host to deliver',
+        'args': {
+            'name': {'type': 'string', 'optional': True, 'charset': 'A-Za-z0-9_-.', 'maxLength': 96},
+        },
+        'notes': [
+            'the staging target is always a fresh name; an existing target is refused',
+            'relative_remap=False: relative image paths are reported, not silently rewritten',
+            'the final destination is written by the Host (audited, and it refuses to overwrite)',
+        ],
+        'example': {'op': 'file.stage_export', 'args': {}},
+    },
+})
+
+
+ERROR_CODES = {
+    'E_TARGET_EXISTS': 'the target file already exists (checkpoints and exports never overwrite)',
+    'E_NO_INSTANCE': 'the bridge has no instance directory configured',
+    'E_UNKNOWN_OP': 'op is not in the whitelist',
+    'E_BAD_RECORD': 'record has unknown/missing keys',
+    'E_ARG_TYPE': 'a value has the wrong type (or is not finite)',
+    'E_ARG_RANGE': 'a value is outside its allowed range',
+    'E_ARG_ENUM': 'a value is not one of the allowed enum members',
+    'E_ARG_CHARSET': 'a name contains characters outside A-Za-z0-9_-.',
+    'E_ARG_MISSING': 'a required field is absent',
+    'E_NO_SUCH_OBJECT': 'the named object does not exist',
+    'E_NAME_TAKEN': 'the name is already used (pass replace=true to overwrite)',
+    'E_NOT_A_MESH': 'the object has no mesh data to take a material',
+    'E_LIMIT': 'a budget was exceeded (ops per batch, objects, materials)',
+    'E_BAD_BATCH': 'the batch is empty or malformed',
+}
+
+
+def catalog():
+    """The machine-readable contract: what may be called, with which arguments."""
+    return {
+        'version': 1,
+        'limits': {
+            'maxOpsPerBatch': MAX_OPS_PER_BATCH,
+            'maxObjects': MAX_OBJECTS,
+            'nameCharset': 'A-Za-z0-9_-.',
+            'nameMaxLength': 96,
+        },
+        'ops': OP_MANIFEST,
+        'errorCodes': ERROR_CODES,
+        'notes': [
+            'ops are applied in order; the batch stops at the first rejection and reports what already ran',
+            'the whole batch shares one undo step',
+            'a rejected op changes nothing',
+            'read the scene with scene.describe before and after a build to verify the result',
+        ],
+    }
+
+
+def apply_op(record):
+    """Validate and run one op record. Raises OpError for anything rejected."""
+    if not isinstance(record, dict):
+        raise OpError('E_BAD_RECORD', 'op record must be an object')
+    unknown = set(record.keys()) - {'op', 'args'}
+    if unknown:
+        raise OpError('E_BAD_RECORD', 'unknown keys: %s' % ', '.join(sorted(unknown)))
+    name = record.get('op')
+    if not isinstance(name, str):
+        raise OpError('E_BAD_RECORD', 'op must be a string')
+    handler = OPS.get(name)
+    if handler is None:
+        raise OpError('E_UNKNOWN_OP', 'op is not in the whitelist: %s' % name)
+    args = record.get('args', {})
+    if not isinstance(args, dict):
+        raise OpError('E_ARG_TYPE', 'args must be an object')
+    return handler(args)
+
+
+def apply_batch(records):
+    """Run a batch; stop at the first rejection and report what already happened."""
+    if not isinstance(records, list) or not records:
+        raise OpError('E_BAD_BATCH', 'ops must be a non-empty list')
+    if len(records) > MAX_OPS_PER_BATCH:
+        raise OpError('E_LIMIT', 'at most %d ops per batch' % MAX_OPS_PER_BATCH)
+    applied = []
+    for index, record in enumerate(records):
+        try:
+            applied.append({'index': index, 'op': record.get('op'), 'result': apply_op(record), 'ok': True})
+        except OpError as error:
+            return {'ok': False, 'applied': applied, 'failed': {'index': index, 'code': error.code, 'message': error.message}}
+    return {'ok': True, 'applied': applied}
+
+
+def describe_scene():
+    scene = bpy.context.scene
+    objects = []
+    for item in bpy.data.objects:
+        entry = {
+            'name': item.name,
+            'type': item.type,
+            'location': [round(v, 6) for v in item.location],
+            'scale': [round(v, 6) for v in item.scale],
+        }
+        if item.type == 'MESH' and item.data is not None:
+            entry['vertices'] = len(item.data.vertices)
+            entry['polygons'] = len(item.data.polygons)
+            entry['materials'] = [slot.name for slot in item.data.materials if slot is not None]
+        objects.append(entry)
+    return {
+        'scene': scene.name,
+        'objectCount': len(objects),
+        'objects': objects,
+        'materials': sorted(material.name for material in bpy.data.materials),
+        'knownOps': sorted(OPS.keys()),
+    }

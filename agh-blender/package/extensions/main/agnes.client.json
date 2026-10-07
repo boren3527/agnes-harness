@@ -1,0 +1,13 @@
+{
+  "client": {
+    "entry": "./client/index.js",
+    "styles": [],
+    "slots": ["workbench.panel", "shell.overlay"],
+    "slotCatalogVersion": "dsh-client-slots/v1",
+    "publicConfig": {
+      "label": "Blender"
+    },
+    "services": ["blender.status"],
+    "projections": []
+  }
+}

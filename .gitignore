@@ -26,6 +26,10 @@ packages/host/native/macos-live-app-identity
 /.windows-core-host-check.log
 .agnes
 .agh
+
+# Managed per-workspace state for the AGH Blender bridge (created at runtime by the P0-3 probe).
+.agh-blender/
+
 learn/
 .DS_Store
 

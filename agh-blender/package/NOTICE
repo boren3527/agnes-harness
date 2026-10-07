@@ -1,0 +1,46 @@
+agh-blender — 许可与声明 / Licensing notice
+============================================
+
+包级 SPDX 标识（package.json 的 "license" 字段）：Apache-2.0
+
+但本包**不是**整包单一许可。分发时请按目录区分：
+
+  extensions/main/index.mjs        Apache-2.0
+  extensions/main/client/index.js  Apache-2.0
+  extensions/main/agnes.client.json Apache-2.0
+  extensions/main/helpers/*.ps1    Apache-2.0  (Node-side process probes; they never touch bpy)
+  extensions/main/bridge/*.py      GPL-3.0-or-later   <-- 见下
+
+为什么 bridge 子目录是 GPL-3.0-or-later
+--------------------------------------
+
+extensions/main/bridge/ 下的三个 Python 脚本直接在 Blender 内运行，并调用 Blender
+的 Python API（bpy）：
+
+  bootstrap.py      import bpy，17 处 bpy. 调用（bpy.app.timers / bpy.ops / bpy.data /
+                    bpy.context.preferences，等）
+  agh_ops.py        import bpy，42 处 bpy. 调用
+  agh_capture.py    import bpy + import gpu，bpy. 调用
+
+Blender 官方许可页（https://www.blender.org/about/license/ ，2026-10-05 查阅）对此的
+表述是：
+
+  "Blender's Python API is an integral part of the software, used to define the user
+   interface or develop tools for example. The GNU GPL license therefore requires that
+   such scripts (if published) are being shared under a GPL compliant license."
+
+因此这些脚本按 GPL-3.0-or-later 分发。GPL-3.0 全文见同目录的 LICENSE-GPL。
+
+理由的范围限定（诚实声明）
+--------------------------
+
+以上是对 "脚本使用了 Blender 的 Python API" 这一事实的**保守处置**，不是法律意见。
+本包未 import 任何第三方 GPL 项目（blender-mcp / BlenderKit 等均未引用）；但
+`import` 扫描只能证明没有直接依赖，不能证明没有行级抄录。
+
+文件位置
+--------
+
+  LICENSE          Apache-2.0 全文（适用于上述非 bridge 部分）
+  LICENSE-GPL      GPL-3.0 全文（适用于 extensions/main/bridge/）
+  NOTICE           本文件
