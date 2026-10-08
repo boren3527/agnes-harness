@@ -27,6 +27,15 @@ $outputDir = Join-Path $repoDir (
 )
 $entry = Join-Path $outputDir 'agnes.mjs'
 
+# Resolve an explicit Windows Node executable. A bare `node` can be shadowed by another
+# application's PATH entry (for example a POSIX shell script named `node`), which PowerShell
+# then runs as a silent no-op instead of failing loudly.
+$nodeExe = @(Get-Command -Name 'node.exe' -CommandType Application -ErrorAction SilentlyContinue |
+    Select-Object -First 1 -ExpandProperty Source)
+if (-not $nodeExe -or -not (Test-Path -LiteralPath $nodeExe -PathType Leaf)) {
+    throw 'node.exe was not found on PATH. Install Node.js or fix PATH before running this script.'
+}
+
 # Fail closed: only the exact launcher grammar and this repository's build outputs qualify.
 function Test-LocalAgnesProcess($ProcessInfo, [string]$Kind) {
     if ($null -eq $ProcessInfo -or $ProcessInfo.Name -ne 'node.exe') { return $false }
@@ -118,7 +127,7 @@ try {
         }
     }
     Write-Host '[4/5] Stopping the old daemon and cleaning verified local leftovers...'
-    & node $entry daemon stop --profile local-dev --workspace $repoDir --data-dir $dataDir
+    & $nodeExe $entry daemon stop --profile local-dev --workspace $repoDir --data-dir $dataDir
     if ($LASTEXITCODE -ne 0) {
         Write-Warning 'Normal daemon stop failed; checking for verified local leftovers.'
     }
@@ -134,7 +143,7 @@ try {
 
     Write-Host '[5/5] Starting the new build. Keep this terminal open.'
     Write-Host 'Open the FULL new URL printed below. Re-running this script replaces this local instance.'
-    & node $entry serve --port 4180 --profile local-dev --cwd $repoDir --data-dir $dataDir
+    & $nodeExe $entry serve --port 4180 --profile local-dev --cwd $repoDir --data-dir $dataDir
     if ($LASTEXITCODE -ne 0) {
         throw 'The web server exited with an error. See the output above.'
     }
