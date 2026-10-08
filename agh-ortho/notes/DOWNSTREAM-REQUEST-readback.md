@@ -138,6 +138,38 @@ entry = {
 | 项 | 依赖什么 | 建议顺序 |
 |---|---|---|
 | `describe_scene()` 加 `dimensions` | 无（只读侧） | ~~**1**~~ —— **已完成**（0.1.8），`scene_readback` 的 `size_asserted` 已翻成 `true` |
-| `catalog()` 发布 `primitives` 与能力集标识 | 无 | **1** —— 消掉 `agh-ortho` 合成的 `capabilitySet` |
+| `catalog()` 发布 `primitives` 与能力集标识 | 无 | **1** —— 消掉合成的 `capabilitySet`，**并让能力闸门真正生效**（见下） |
 | `stop` 的确认语义（bridge 断连时回退到按 PID 确认） | 无 | 2 |
+
+**实测两次，形态完全一样**（2026-10-08）：
+
+| 次 | stop-report | 独立探针 | 意味着 |
+|---|---|---|---|
+| 1 | `ok:false` `transport: fetch failed` `stage:close` | `alive:false` `processAlive:false` | 进程已不在 |
+| 2 | `ok:false` `transport: fetch failed` `elapsedMs:2` `forceKilled:false` | `alive:false` `processAlive:false` | 进程已不在 |
+
+**`elapsedMs: 2` 是关键线索**：2 毫秒就 `fetch failed` ⇒ **没有监听者** ⇒ HTTP close 请求发出时进程早就没了（窗口已被手动关闭）。
+所以 `ok:false` 表达的是"我没能确认你说的那件事"，而不是"我没做成"。**方向是保守的（没有谎报成功）**，但调用方无法区分：
+
+- 「进程还在，关闭失败」 ← 需要重试
+- 「进程早就没了，我只是没拿到回执」 ← 不需要做任何事
+
+建议：`stop` 在 `transport: fetch failed` 时**回退到按 PID 探活**，再决定报成功还是失败。
 | 实例目录的保留与清理 | 无 | 3 —— 与上两条同一批 |
+
+### 为什么第 1 条现在更要紧（实测，不是推测）
+
+`agh-ortho` 里有一道**能力闸门**：发 ops 之前先查目标有没有那种基元（比如本该用 `cylinder` 却只有六种里的五种，就该报 `no_downstream_primitive` 而不是硬发）。但它依赖 `primitives` 列表，而两个来源的形状不同：
+
+| 来源 | 有 `primitives` 吗 | 闸门 |
+|---|---|---|
+| 随包快照 `agh.capability.json` | 有 | **applied** |
+| 活实例的 `catalog()` | **没有** | `not_applied: the target publishes no primitives list` |
+
+于是闸门**只在用旧快照时才生效、对着实时真相时反而不生效** —— 正好是反的。
+
+实测证据：两轮 `fit` 的 `three_state.primitive_gate`，一轮 `applied`（快照 `agh-blender@0.1.7`）、
+一轮 `not_applied`（实时 `agh-blender@live:catalog-v1`）。
+
+**只要 `catalog()` 把它自己已经知道的 `PRIMITIVE_KINDS`（六种基元）一并发布，闸门就双向生效。**
+这是"扩下游不改上游"那条主张里唯一还差的一块拼图 —— 现在它一半是活的，另一半靠一张会过期的表。
