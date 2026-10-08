@@ -609,6 +609,25 @@ def apply_batch(records):
     return {'ok': True, 'applied': applied}
 
 
+# Objects whose data can supply a bounding box. Measured on Blender 5.2.2: every object carries a
+# `dimensions` vector, and cameras, lights and empties answer [0, 0, 0] instead of raising -- so
+# hasattr() alone can never yield None here, and reporting that zero as a size would be a lie
+# (a camera is not a zero-size box). Only objects with geometry report a size.
+_GEOMETRY_TYPES = ('MESH', 'CURVE', 'SURFACE', 'META', 'FONT')
+
+
+def _rounded3(value):
+    """Round a vector to the same precision as location/scale; None when it is unavailable.
+
+    Used by a read-only diagnostic path, so it must never raise: an attribute that is missing,
+    or of an unexpected shape, becomes None rather than failing the whole scene readback.
+    """
+    try:
+        return [round(v, 6) for v in value]
+    except Exception:
+        return None
+
+
 def describe_scene():
     scene = bpy.context.scene
     objects = []
@@ -618,6 +637,10 @@ def describe_scene():
             'type': item.type,
             'location': [round(v, 6) for v in item.location],
             'scale': [round(v, 6) for v in item.scale],
+            # Final world-space size (scale is already baked in). None for cameras, lights and
+            # empties, which have no geometry to measure.
+            'dimensions': _rounded3(getattr(item, 'dimensions', None)) if item.type in _GEOMETRY_TYPES else None,
+            'rotation_euler': _rounded3(getattr(item, 'rotation_euler', None)),
         }
         if item.type == 'MESH' and item.data is not None:
             entry['vertices'] = len(item.data.vertices)
