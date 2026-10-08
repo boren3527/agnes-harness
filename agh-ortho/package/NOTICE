@@ -1,0 +1,31 @@
+agh-ortho — 许可与声明 / Licensing notice
+=========================================
+
+包级 SPDX 标识（package.json 的 "license" 字段）：Apache-2.0
+
+与隔壁的 agh-blender 不同，本包**是**整包单一许可：
+
+  extensions/main/index.mjs         Apache-2.0
+  extensions/main/agh.capability.json  Apache-2.0
+  LICENSE                            Apache-2.0 全文
+
+本包没有 bridge/ 子目录，也没有任何 GPL 派生部分
+-----------------------------------------------
+
+agh-ortho 不调用 `bpy`，不含 Python，**零 npm 依赖**（只用 Node 内建模块
+`node:crypto` 与 `node:fs`）。它从不 import 下游插件，只消费下游声明的能力表。
+因此这里没有 agh-blender 那种"部分 GPL-3.0-or-later"的区分问题。
+
+第三方来源
+----------
+
+无。本包未包含任何第三方代码。
+
+工具 schema 的 `Symbol.for('TypeBox.Kind')` 标记写法参考自 agh-blender
+（同一作者、同一仓库），不是第三方代码。
+
+文档不在包内
+------------
+
+设计契约与实测记录放在 `../notes/`。**不要放进 package/**：包会被复制成
+内容寻址快照，包内任何改动都会改 `integrity`，逼一次重装与重新 trust。

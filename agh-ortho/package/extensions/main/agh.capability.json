@@ -1,0 +1,42 @@
+{
+  "schema": "agh.capability/1",
+  "target": "agh-blender@0.1.7",
+  "capabilitySet": "primitives-6",
+  "capabilitySetNote": "下游 catalog() 不发布能力集标识；本字段由本插件按『包版本 + 基元种类数』合成。这是 CONTRACT §5.2 要求 target_capability_set 与下游实际发布内容之间的一个已知缺口。",
+  "observedAt": "2026-10-08",
+  "source": "agh-blender/package/extensions/main/bridge/agh_ops.py → OPS / OP_MANIFEST / catalog()；包版本取自 agh-blender/package/package.json",
+  "unit": "m",
+  "primitives": ["cube", "uv_sphere", "cylinder", "cone", "torus", "plane"],
+  "limits": {
+    "maxOpsPerBatch": 64,
+    "maxObjects": 512,
+    "sizeRange": "(0, 1000]",
+    "locationAbsMax": 10000,
+    "scaleRange": "(0, 10000]",
+    "nameCharset": "A-Za-z0-9_-.",
+    "nameMaxLength": 96
+  },
+  "sizeSemantics": {
+    "cube": "edge length (size=1 配合 scale 得到精确 w/d/h)",
+    "uv_sphere": "diameter; radius = size/2",
+    "cylinder": "diameter; radius = size/2, depth = size",
+    "cone": "diameter; radius1 = size/2, depth = size",
+    "torus": "major diameter; major_radius = size/2, minor_radius = size/8",
+    "plane": "footprint (size=1 配合 scale 得到精确 w/d)"
+  },
+  "ops": [
+    { "name": "mesh.primitive_add", "mutates": false, "destructive": false },
+    { "name": "object.transform", "mutates": true, "destructive": false },
+    { "name": "object.duplicate", "mutates": false, "destructive": false },
+    { "name": "object.delete", "mutates": true, "destructive": true },
+    { "name": "material.set", "mutates": false, "destructive": false },
+    { "name": "material.assign", "mutates": true, "destructive": false },
+    { "name": "object.join", "mutates": true, "destructive": true },
+    { "name": "data.purge_unused", "mutates": true, "destructive": true },
+    { "name": "file.checkpoint", "mutates": false, "destructive": false },
+    { "name": "file.stage_export", "mutates": false, "destructive": false }
+  ],
+  "authorityNote": "mutates / destructive 必须以 agh_ops.py 的 OP_MANIFEST 为准，不能手抄别的表：它们驱动审批决策，写错的后果不是报错，而是审批行为静默变化（CONTRACT §11-2）。本文件里的值于 2026-10-08 逐条对照 OP_MANIFEST 抄录，其中 mesh.primitive_add / object.duplicate / material.set / file.checkpoint / file.stage_export 的 mutates 是 false —— 与 CONTRACT §3.1 表格给人的印象不同。",
+  "missing": ["extrude", "revolve", "boolean", "自定义顶点/网格", "相机控制/正交六视图渲染"],
+  "stalenessPolicy": "下游加 op 或改限额后本文件即过期。本插件不假设它新鲜：每次读取都标 stale，并要求调用方自行核对。"
+}
