@@ -347,6 +347,101 @@ check('and the capability set is reported as the live one', emitLive.target_capa
 const emitFile = (await byName['agh_ortho_emit_ops'].execute(tooMany, {})).structured
 check('the same 4 objects pass against the shipped snapshot limit of 512', emitFile.ok === true, JSON.stringify(emitFile.blockers.map((b) => b.code)))
 
+// --- 8c. scene_readback 半档（引入外部事实的那一档）---
+const verifyTool = byName['agh_ortho_verify']
+const GOOD_SCENE = {
+  scene: 'Scene',
+  objectCount: 3,
+  objects: [
+    { name: 'site', type: 'MESH', location: [0, 0, 0], scale: [60, 40, 1], vertices: 4, polygons: 1, materials: [] },
+    { name: 'body', type: 'MESH', location: [0, 0, 4.65], scale: [12.4, 8.6, 9.3], vertices: 8, polygons: 6, materials: [] },
+    // --factory-startup 带来的对象：不是我们建的，**不是失败**
+    { name: 'Cube', type: 'MESH', location: [0, 0, 0], scale: [1, 1, 1], vertices: 8, polygons: 6, materials: [] },
+  ],
+  materials: [],
+  knownOps: [],
+}
+const withScene = (scene) => ({ tools: { invoke: async () => ({ structured: { ok: true, blockers: [], scene } }) } })
+
+const sceneGood = (await verifyTool.execute({ ...SAMPLE, against_scene: true }, withScene(GOOD_SCENE))).structured
+check('scene: the tier is named honestly, not against_blender', sceneGood.tier === 'scene_readback' && sceneGood.needs_blender === true, sceneGood.tier)
+check('scene: objects match by exact name with location and scale', sceneGood.ok === true && sceneGood.scene.matched === 2 && sceneGood.scene.missing.length === 0 && sceneGood.scene.mismatched.length === 0, JSON.stringify(sceneGood.scene.rows.map((r) => r.verdict)))
+check('scene: factory objects are reported as extra, not treated as failure', sceneGood.scene.extra_objects.includes('Cube'))
+check('scene: the gap is stated, not hidden', sceneGood.scene.cannot_assert.some((t) => /dimensions/.test(t)) && sceneGood.scene.cannot_assert.some((t) => /primitive kind/.test(t)), JSON.stringify(sceneGood.scene.cannot_assert))
+check('scene: size is NOT asserted while the downstream publishes no dimensions', sceneGood.scene.size_asserted === false && sceneGood.scene.dimensions_published === false)
+check('scene: the camera gap is permanent and always stated', sceneGood.scene.cannot_assert.some((t) => /camera op/.test(t)))
+
+// 下游一旦发布 dimensions，同一份比对必须**自动**获得尺寸断言（这正是那份请求的接收端）
+const DIM_SCENE = {
+  ...GOOD_SCENE,
+  objects: [
+    { name: 'site', type: 'MESH', location: [0, 0, 0], scale: [60, 40, 1], dimensions: [60, 40, 0], vertices: 4, polygons: 1, materials: [] },
+    { name: 'body', type: 'MESH', location: [0, 0, 4.65], scale: [12.4, 8.6, 9.3], dimensions: [12.4, 8.6, 9.3], vertices: 8, polygons: 6, materials: [] },
+    { name: 'Cube', type: 'MESH', location: [0, 0, 0], scale: [1, 1, 1], dimensions: [1, 1, 1], vertices: 8, polygons: 6, materials: [] },
+  ],
+}
+const sceneDims = (await verifyTool.execute({ ...SAMPLE, against_scene: true }, withScene(DIM_SCENE))).structured
+check('dimensions: the size assertion turns on by itself', sceneDims.scene.size_asserted === true && sceneDims.scene.dimensions_published === true && sceneDims.ok === true, JSON.stringify(sceneDims.scene.rows.map((r) => r.dimensions_delta)))
+check('dimensions: and the size gap leaves cannot_assert', !sceneDims.scene.cannot_assert.some((t) => /publishes no dimensions/.test(t)), JSON.stringify(sceneDims.scene.cannot_assert))
+check('dimensions: the camera gap still stays', sceneDims.scene.cannot_assert.some((t) => /camera op/.test(t)))
+// 尺寸不符必须被抓到 —— 这正是 size=1 语义错误的现场
+const BAD_DIM_SCENE = { ...DIM_SCENE, objects: DIM_SCENE.objects.map((o) => (o.name === 'body' ? { ...o, dimensions: [12.4, 8.6, 9.299] } : o)) }
+const sceneBadDim = (await verifyTool.execute({ ...SAMPLE, against_scene: true }, withScene(BAD_DIM_SCENE))).structured
+check('dimensions: a size that disagrees with scale x size is a mismatch', sceneBadDim.ok === false && sceneBadDim.scene.mismatched.includes('body'), JSON.stringify(sceneBadDim.scene.rows.find((r) => r.object === 'body').dimensions_delta))
+
+// 单位尺寸必须**按种查表**：torus 在 size=8 时是 10 x 10 x 2，不是 8 x 8 x 8。
+// 这条分支走不到工具里（M1 不 lower `ring`），所以直接测纯函数 —— 但 M2 一上就会走工具。
+check('unit extent: torus is NOT 1x1x1', JSON.stringify(geometry.UNIT_EXTENT.torus) === JSON.stringify([1.25, 1.25, 0.25]), JSON.stringify(geometry.UNIT_EXTENT))
+const torusRows = geometry.compareScene(
+  [{ name: 'ring', kind: 'torus', size: 8, location: [0, 0, 0], scale: [1, 1, 1] }],
+  { objects: [{ name: 'ring', type: 'MESH', location: [0, 0, 0], scale: [1, 1, 1], rotation_euler: [0, 0, 0], dimensions: [10, 10, 2], vertices: 48, polygons: 48 }] },
+)
+check('unit extent: a torus of size 8 expects 10 x 10 x 2', torusRows.rows[0].verdict === 'match' && torusRows.rows[0].size_asserted === true, JSON.stringify(torusRows.rows[0].expected_size_m))
+
+// 旋转过的对象：`dimensions` 是"本地包围盒 × scale"，不再是世界 AABB ⇒ **不许**断言尺寸。
+// 而且 M1 的 ops 从不设置 rotation_euler，所以现场出现旋转本身就是不符。
+const rotated = geometry.compareScene(
+  [{ name: 'b', kind: 'cube', size: 1, location: [0, 0, 0], scale: [2, 2, 2] }],
+  { objects: [{ name: 'b', type: 'MESH', location: [0, 0, 0], scale: [2, 2, 2], rotation_euler: [0, 0, 0.785], dimensions: [2, 2, 2], vertices: 8, polygons: 6 }] },
+)
+check('rotation: a rotated object is a mismatch AND its size is not asserted', rotated.rows[0].verdict === 'mismatch' && rotated.rows[0].size_asserted === false && /rotated/.test(rotated.rows[0].size_not_asserted_reason), JSON.stringify(rotated.rows[0].size_not_asserted_reason))
+
+const noDim = geometry.compareScene(
+  [{ name: 'b', kind: 'cube', size: 1, location: [0, 0, 0], scale: [2, 2, 2] }],
+  { objects: [{ name: 'b', type: 'MESH', location: [0, 0, 0], scale: [2, 2, 2], rotation_euler: [0, 0, 0], vertices: 8, polygons: 6 }] },
+)
+check('no dimensions on this object: size is not asserted and the reason is stated', noDim.rows[0].size_asserted === false && /no dimensions/.test(noDim.rows[0].size_not_asserted_reason), JSON.stringify(noDim.rows[0].size_not_asserted_reason))
+
+const movedScene = { ...GOOD_SCENE, objects: GOOD_SCENE.objects.map((o) => (o.name === 'body' ? { ...o, location: [0, 0, 5.0] } : o)) }
+const sceneMoved = (await verifyTool.execute({ ...SAMPLE, against_scene: true }, withScene(movedScene))).structured
+check('scene: a moved object is a mismatch', sceneMoved.ok === false && sceneMoved.scene.mismatched.includes('body'), JSON.stringify(sceneMoved.scene.rows.find((r) => r.object === 'body')))
+check('scene: and the numeric tier still passes beside it', sceneMoved.residual_max === 0)
+
+// Blender 会把重名改成 name.001 —— "精确名字找不到"必须报 missing，而不是悄悄放过
+const renamedScene = { ...GOOD_SCENE, objects: GOOD_SCENE.objects.map((o) => (o.name === 'body' ? { ...o, name: 'body.001' } : o)) }
+const sceneRenamed = (await verifyTool.execute({ ...SAMPLE, against_scene: true }, withScene(renamedScene))).structured
+check('scene: a renamed object (body -> body.001) is caught as missing', sceneRenamed.ok === false && sceneRenamed.scene.missing.includes('body'), JSON.stringify(sceneRenamed.scene.missing))
+
+const sceneAbsent = (await verifyTool.execute({ ...SAMPLE, against_scene: true }, { tools: { invoke: async () => ({ structured: { ok: false, blockers: ['no managed Blender instance in this workspace; call agh_blender_start first'] } }) } })).structured
+check('scene: absent instance fails the tool but keeps the numeric result', sceneAbsent.ok === false && sceneAbsent.residual_max === 0 && sceneAbsent.tier === 'numeric', JSON.stringify(sceneAbsent.blockers.map((b) => b.code)))
+check('scene: and it says the tier did not happen', sceneAbsent.scene.available === false && /no managed Blender instance/.test(sceneAbsent.scene.reason), sceneAbsent.scene.reason)
+
+// 不带 against_scene 时**不该读场景**。
+// 注意：能力协商仍然会（且应该）尝试 agh_blender_ops_catalog —— 那是"限额不硬编码"的代价，
+// 所以这里只断言 agh_blender_scene 没被调用，而不是"没有任何嵌套调用"。
+const called = []
+const spy = {
+  tools: {
+    invoke: async (name) => {
+      called.push(name)
+      throw Object.assign(new Error('not needed for this assertion'), { code: 'TOOL_NOT_FOUND' })
+    },
+  },
+}
+const plainVerify = (await verifyTool.execute(SAMPLE, spy)).structured
+check('scene: without against_scene, agh_blender_scene is never read', plainVerify.tier === 'numeric' && plainVerify.scene === undefined && plainVerify.ok === true && !called.includes('agh_blender_scene'), JSON.stringify(called))
+check('scene: and the negotiation layer still asks for the live catalog', called.includes('agh_blender_ops_catalog'), JSON.stringify(called))
+
 // --- 9. 在真实文件系统上再走一遍（内存 fs 会把路径差异糊掉；Windows 的拼接只有真实 IO 才验得出来）---
 const realRoot = join(tmpdir(), `agh-ortho-check-${process.pid}`)
 const realFs = {
