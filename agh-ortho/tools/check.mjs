@@ -77,7 +77,7 @@ const depthOf = (value, d = 0) => {
 }
 
 // --- 1. 工具定义 ---
-check('runtime registers 5 tools', tools.length === 5, tools.map((t) => t.name).join(', '))
+check('runtime registers 6 tools', tools.length === 6, tools.map((t) => t.name).join(', '))
 for (const tool of tools) {
   const problems = [
     ...(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(tool.name) ? [] : ['name pattern']),
@@ -296,6 +296,42 @@ const verifyArtifact = saved.artifacts.find((a) => a.path.endsWith('verify.json'
 const verifyText = fs1.files.get(relKey(verifyArtifact.path))
 check('verify.json records residual 0, needs_blender false, and its caveats', (() => { const v = JSON.parse(verifyText); return v.residual_max === 0 && v.needs_blender === false && Array.isArray(v.caveats) && v.caveats.length === 3 })())
 
+// save + 读回：产物包必须记录 ⑤。否则交付物只能证明"我自洽"，证明不了"下游照做了" ——
+// **交付物不该比这一轮实际验过的少**。
+// 注意场景对象在这里内联，而不是复用后面 8c 段里的 DIM_SCENE：那会踩 TDZ（const 未初始化就访问），
+// 这个坑已经咬过我两次。
+const SAVE_SCENE = {
+  scene: 'Scene',
+  objects: [
+    { name: 'site', type: 'MESH', location: [0, 0, 0], scale: [60, 40, 1], dimensions: [60, 40, 0], rotation_euler: [0, 0, 0], vertices: 4, polygons: 1, materials: [] },
+    { name: 'body', type: 'MESH', location: [0, 0, 4.65], scale: [12.4, 8.6, 9.3], dimensions: [12.4, 8.6, 9.3], rotation_euler: [0, 0, 0], vertices: 8, polygons: 6, materials: [] },
+  ],
+}
+const fs4 = memoryFs()
+const savedWithScene = (
+  await save.execute({ ...SAMPLE, run_id: 'with-scene', against_scene: true }, { fs: fs4, session: { workspaceRoot: ws }, tools: { invoke: async () => ({ structured: { ok: true, blockers: [], scene: SAVE_SCENE } }) } })
+).structured
+check('save: asking for the readback keeps it ok', savedWithScene.ok === true, JSON.stringify(savedWithScene.blockers))
+const vWithScene = JSON.parse(fs4.files.get(relKey(savedWithScene.artifacts.find((a) => a.path.endsWith('verify.json')).path)))
+check('save: verify.json names both tiers and the readback result', vWithScene.tier === 'scene_readback' && vWithScene.needs_blender === true && vWithScene.scene.matched === 2 && vWithScene.scene.size_asserted === true, JSON.stringify({ tier: vWithScene.tier, matched: vWithScene.scene?.matched, size: vWithScene.scene?.size_asserted }))
+check('save: report.json carries the readback summary', (() => { const r = JSON.parse(fs4.files.get(`.agnes/agh-ortho/runs/${savedWithScene.run_id}/report.json`)); return r.scene_readback?.available === true && r.scene_readback?.matched === 2 && r.scene_readback?.size_asserted === true })())
+
+// 交付物必须**喂得回去**：parameters.json 里不能夹带工具控制字段（run_id / against_scene），
+// 而且要能原样作为 emit_ops / fit 的输入。实测抓到过：第一轮包里带着这两个键，
+// 于是那份参数文件被 additionalProperties:false 直接拒掉 —— 交付物不能复用。
+const sceneParams = JSON.parse(fs4.files.get(relKey(savedWithScene.artifacts.find((a) => a.path.endsWith('parameters.json')).path)))
+check('save: parameters.json carries no tool-control keys', !('run_id' in sceneParams) && !('against_scene' in sceneParams), Object.keys(sceneParams).join(','))
+const refed = (await byName['agh_ortho_emit_ops'].execute(sceneParams, {})).structured
+check('save: the saved parameters feed straight back into emit_ops', refed.ok === true && refed.ops.length === 2, JSON.stringify(refed.blockers))
+
+// 没有实例时：包里必须写明"读回没有发生"，而不是含糊过去
+const fs5 = memoryFs()
+const savedNoScene = (
+  await save.execute({ ...SAMPLE, run_id: 'no-scene', against_scene: true }, { fs: fs5, session: { workspaceRoot: ws }, tools: { invoke: async () => ({ structured: { ok: false, blockers: ['no managed Blender instance in this workspace'] } }) } })
+).structured
+const vNoScene = JSON.parse(fs5.files.get(relKey(savedNoScene.artifacts.find((a) => a.path.endsWith('verify.json')).path)))
+check('save: an absent instance is recorded as "the readback did NOT happen"', savedNoScene.ok === false && vNoScene.scene.available === false && /did NOT happen/.test(vNoScene.scene.note), JSON.stringify(vNoScene.scene))
+
 // --- 8b. 能力协商第 1 级（跨插件 invoke）与它的四级降级 ---
 // 下游 catalog 的真实形状（读自 agh_ops.py 的 catalog()）：ops 是**字典**，没有 primitives 列表。
 const LIVE_CATALOG = {
@@ -441,6 +477,74 @@ const spy = {
 const plainVerify = (await verifyTool.execute(SAMPLE, spy)).structured
 check('scene: without against_scene, agh_blender_scene is never read', plainVerify.tier === 'numeric' && plainVerify.scene === undefined && plainVerify.ok === true && !called.includes('agh_blender_scene'), JSON.stringify(called))
 check('scene: and the negotiation layer still asks for the live catalog', called.includes('agh_blender_ops_catalog'), JSON.stringify(called))
+
+// --- 8d. fit：闭环里"便宜的那一半" ---
+const fitTool = byName['agh_ortho_fit']
+// 完整候选：有锚点、叶子自带 conf，所以应当判 fit
+const FIT_OK = { ...SAMPLE, scale_anchor: { pixel_len: 340, real_len: 2.1, ref: 'door_height' } }
+
+const fitOk = (await fitTool.execute(FIT_OK, {})).structured
+check('fit: a complete candidate is judged fit', fitOk.verdict === 'fit' && fitOk.ok === true, JSON.stringify(fitOk.revise_hints))
+check('fit: validation reports every check with its own ok', fitOk.validation.checks.length > 0 && fitOk.validation.checks.every((c) => typeof c.ok === 'boolean'), fitOk.validation.checks.length + ' checks')
+check('fit: outline is numeric, per view and per object', fitOk.outline.length === 6 && fitOk.outline[1].objects.length === 2 && typeof fitOk.outline[1].objects[0].u_span_m === 'number', JSON.stringify(fitOk.outline[1].objects[0]))
+check('fit: outline carries the sheet position', fitOk.outline.every((o) => o.sheet && typeof o.sheet.col === 'number'))
+check('fit: conf is labelled DECLARED, not a probability', /DECLARED/.test(fitOk.declared_relative_confidence.warning) && fitOk.declared_relative_confidence.least_certain_first.length > 0, JSON.stringify(fitOk.declared_relative_confidence.least_certain_first.slice(0, 3)))
+check('fit: the anchor records the one ratio and its fragility', fitOk.anchor.present === true && fitOk.anchor.metres_per_pixel > 0 && /EVERY size/.test(fitOk.anchor.fragility), JSON.stringify(fitOk.anchor))
+check('fit: three-state keeps downstream gaps apart from emitter gaps', fitOk.three_state.emitter_ready_features.length === 2 && Array.isArray(fitOk.three_state.downstream_cannot) && Array.isArray(fitOk.three_state.emitter_not_yet), JSON.stringify(fitOk.three_state.emitter_ready_features))
+check('fit: the six SVGs still come along', fitOk.views.length === 6 && fitOk.views.every((v) => /^<svg/.test(v.svg)))
+check('fit: it hands you the ops, so one round is one call', Array.isArray(fitOk.ops) && fitOk.ops.length === 2 && fitOk.ops[0].op === 'mesh.primitive_add', JSON.stringify(fitOk.ops?.map((o) => o.op)))
+const fitBytes = JSON.stringify(fitOk).length
+check('fit: the whole report stays a sane size', fitBytes < 200000, fitBytes + ' bytes')
+check('fit: both boundaries are stated as caveats', fitOk.caveats.some((c) => /neither proves agreement with the photograph/.test(c)) && fitOk.caveats.some((c) => /not a measurement/.test(c)))
+
+// 缺锚点 ⇒ blocking。否则会产出一批"没有依据却很自信的米"。
+// 注意 SAMPLE 本身带 scale_anchor（§4.4 的样例就有），所以要**删掉**它才算"缺锚点"。
+const NO_ANCHOR = { ...SAMPLE }
+delete NO_ANCHOR.scale_anchor
+const noAnchor = (await fitTool.execute(NO_ANCHOR, {})).structured
+check('fit: a missing scale_anchor is blocking, not a silent pass', noAnchor.verdict === 'revise' && noAnchor.revise_hints.some((h) => h.where === 'scale_anchor' && h.severity === 'blocking'), JSON.stringify({ verdict: noAnchor.verdict, anchor: noAnchor.anchor }))
+const ratiosOnly = (await fitTool.execute({ ...NO_ANCHOR, assumptions: ['proportions_only'] }, {})).structured
+check('fit: declaring proportions_only makes the missing anchor acceptable', ratiosOnly.anchor.declared_ratios_only === true && !ratiosOnly.revise_hints.some((h) => h.where === 'scale_anchor' && h.severity === 'blocking'), JSON.stringify({ verdict: ratiosOnly.verdict, blocking: ratiosOnly.revise_summary.blocking }))
+
+// 叶子自相矛盾（v 落在自己声明的 [min,max] 之外）必须被点名到**具体项、具体轴**
+const contradiction = { ...FIT_OK, assembly: [...FIT_OK.assembly] }
+contradiction.assembly[1] = { ...contradiction.assembly[1], h: { v: 9.3, conf: 0.7, min: 12.0, max: 12.8 } }
+const cOut = (await fitTool.execute(contradiction, {})).structured
+check('fit: a leaf contradicting its own min/max is named precisely', cOut.verdict === 'revise' && cOut.revise_hints.some((h) => h.where.startsWith('assembly[1]') && /\.h\.v$/.test(h.where) && h.severity === 'blocking'), JSON.stringify(cOut.revise_hints.map((h) => h.where)))
+
+// 坐标系：本插件的投影写死 Z-up / -Y-front，声明成别的等于视图是错的
+const badFrame = (await fitTool.execute({ ...FIT_OK, frame: { up: 'Y', front: '-Z', handed: 'right' } }, {})).structured
+check('fit: a non-Z-up frame fails validation', badFrame.verdict === 'revise' && badFrame.validation.failed.includes('frame is the Z-up / -Y-front one this plugin projects'), JSON.stringify(badFrame.validation.failed))
+
+// 下游做不到的形体 ⇒ warning（不是 blocking）：删掉、或在 unresolved 里声明。
+// SAMPLE 的 assembly 里本来就含一个 roof.gable 项，所以直接断言它。
+check('fit: a downstream-impossible feature warns instead of blocking', fitOk.verdict === 'fit' && fitOk.three_state.downstream_cannot.some((u) => u.feature === 'roof.gable'), JSON.stringify(fitOk.three_state.downstream_cannot))
+// 重复 id 必须被校验抓到（这条是从我自己的测试写错里来的：我加了一个与既有项同 id 的项）
+const dupId = { ...FIT_OK, assembly: [...FIT_OK.assembly, { ...FIT_OK.assembly[1] }] }
+const dupOut = (await fitTool.execute(dupId, {})).structured
+check('fit: duplicate ids are caught by validation', dupOut.verdict === 'revise' && dupOut.validation.failed.includes('ids are unique'), JSON.stringify(dupOut.validation.failed))
+
+// 带读回时：归因纪律必须写在载荷里（用 DIM_SCENE：它有 dimensions，才能验尺寸）
+const fitScene = (await fitTool.execute({ ...FIT_OK, against_scene: true }, withScene(DIM_SCENE))).structured
+check('fit: with against_scene it reports the readback tier', fitScene.scene?.tier === 'scene_readback' && fitScene.scene.size_asserted === true && fitScene.scene.matched === 2, JSON.stringify([fitScene.scene?.tier, fitScene.scene?.matched, fitScene.scene?.size_asserted]))
+check('fit: the readback states the attribution rule', /corrupts a correct model/.test(fitScene.scene.attribution), fitScene.scene.attribution)
+
+// numeric 的容差边界：1 ulp 的往返噪声必须仍然算通过，而 1e-6 的真实误差必须不算。
+// 这条断言来自一次真实事故：我用"残差必须恰好为 0"当判据，于是 34 条 1-ulp 噪声
+// 把整条闭环堵死在 verdict=revise 上。
+const epsUnit = { name: 'a', x: { centre: 0, size: 12.4 }, y: { centre: 0, size: 1 }, z: { centre: 0, size: 1 } }
+const epsBoxes = [{ name: 'a', kind: 'cube', min: [-6.2, -0.5, -0.5], max: [6.2, 0.5, 0.5] }]
+const viewsWithX = (sizeX) => [
+  { id: 'front', label: 'front', u: [1, 0, 0], v: [0, 0, 1], names: ['a'], rects: [{ u: [-sizeX / 2, sizeX / 2], v: [-0.5, 0.5] }], bbox: { u: [-sizeX / 2, sizeX / 2], v: [-0.5, 0.5] } },
+  { id: 'top', label: 'top', u: [1, 0, 0], v: [0, -1, 0], names: ['a'], rects: [{ u: [-sizeX / 2, sizeX / 2], v: [-0.5, 0.5] }], bbox: { u: [-sizeX / 2, sizeX / 2], v: [-0.5, 0.5] } },
+]
+// 用 12.4 这个量级。注意**在 1 附近加 1 ulp 是不可表示的**（1 + 2^-53 会舍回 1），
+// 所以第一版测试拿 1.0 去加 1 ulp，测出来是 0 —— 那条断言本身写错了。
+const ULP_12_4 = 2 ** -49 // 12.4 落在 [8,16)，该区间的 ulp 就是 2^-49
+const noisy = viewsMod.residual([epsUnit], viewsWithX(12.4 + ULP_12_4), epsBoxes)
+check('numeric: 1 ulp of round-trip noise is within tolerance (and still reported)', noisy.within_tolerance === true && noisy.max > 0 && noisy.tolerance === viewsMod.NUMERIC_TOLERANCE, JSON.stringify({ max: noisy.max, tol: noisy.tolerance }))
+const realError = viewsMod.residual([epsUnit], viewsWithX(12.4 + 1e-6), epsBoxes)
+check('numeric: a 1e-6 discrepancy is NOT within tolerance', realError.within_tolerance === false && realError.max > 1e-7, JSON.stringify({ max: realError.max, tol: realError.tolerance }))
 
 // --- 9. 在真实文件系统上再走一遍（内存 fs 会把路径差异糊掉；Windows 的拼接只有真实 IO 才验得出来）---
 const realRoot = join(tmpdir(), `agh-ortho-check-${process.pid}`)

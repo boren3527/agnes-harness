@@ -594,6 +594,64 @@ inspect → disable → remove → install → trust → enable → status → a
 - 风险（暂未发生）：如果将来某个下游 catalog 工具改成需要审批，我们的**只读**工具会 PARK ——
   目前 `agh_blender_ops_catalog` 是 `never`，且失败即降级能兜住抛错，但这值得在 M3 扩下游时再看一眼。
 
+## 9.10 M2 第一轮：闭环在真实照片上跑通，并暴露三个缺陷（2026-10-08）
+
+`agh_ortho_fit`（闭环里"便宜的那一半"）落地后，拿**一张真实照片**跑了两轮完整的
+①→⑥。这是第一次在真实输入上把闭环合上，也是第一次量到几件一直只是"设计主张"的事。
+
+### 9.10.1 跑通的流程
+
+```
+① 模型看图 → 20 个 box（人形：shoe/leg/shorts/shirt/head/hair/eyes/arms/stick/ball…）
+② fit（不碰 Blender）→ verdict: fit
+④ agh_blender_apply_ops → 20/20 applied，场景 3 → 23 对象
+⑤ fit + against_scene → matched 20/20、size_asserted=true、extra_objects=[Camera,Cube,Light]
+⑥ save → 11 项（9 产物 + marker + report），verify.json 同时记 numeric 与 scene_readback
+```
+
+### 9.10.2 量到了：确定性
+
+**同一组参数 → ops.json 与六个 SVG 的 sha256 逐字节相同**（两轮对比，见
+`photo-round-1` 与 `photo-round-1b`）。契约里"参数是唯一真值源、六视图是它的确定性投影"
+这句话，从主张变成了可对账的事实。意义：参数可以长期保存、随时重算，且重算结果可复现。
+
+### 9.10.3 这一轮暴露的三个**真**缺陷（都已修，各带回归断言）
+
+| # | 缺陷 | 症状 | 修法 |
+|---|---|---|---|
+| 1 | **numeric 判据用了"残差必须恰好为 0"** | 20 对象产生 **34 条 blocking，全是 1 ulp**（`residual_max` 1.11e-16）→ **整条闭环堵死在 `verdict=revise`**，⑥ 永不可达 | 引入**具名容差 `NUMERIC_TOLERANCE = 1e-9`**（噪声 ~1e-16，真实误差 ≥1e-6，中间是宽空档），并**始终报告实际数值 + 容差**，从不声称"恰好是 0"。**这是对契约 §9 字面说法的有意偏离** —— 两侧是两条独立算术路径，箱体中心经过 `c ± half → (min+max)/2` 的往返，浮点下不位精确 |
+| 2 | **`save` 记录不了读回** | 产物包只证明"我自洽"，证明不了"下游照做了" —— **交付物比这一轮实际验过的少** | `SAVE_INPUT` 加 `against_scene`；`verify.json` 同时写两档；`report.json` 带 `scene_readback` 摘要；没有实例时写明"读回**没有发生**" |
+| 3 | **`parameters.json` 夹带工具控制字段** | 落盘的是 `JSON.stringify(args)`，含 `run_id` / `against_scene` ⇒ 这份交付物带着两个额外键，而 schema 是 `additionalProperties:false` ⇒ **喂不回 `emit_ops`/`fit`** | 改成**白名单**，字段名从 `Object.keys(EMIT_OPS_INPUT.properties)` 推 ⇒ 加真实参数字段会自动进产物，工具字段永远漏不进去。断言：`the saved parameters feed straight back into emit_ops` |
+
+**三个都是"跑真实数据才暴露"的类型。** 两个是交付物的诚实性问题（一个少证明、一个多夹带），
+一个是判据本身错。
+
+### 9.10.4 难度阶梯的第一份实测校准
+
+输入是**一张平线图**（人形，无已知真实长度，含曲线轮廓）。结果落在预估阶梯的
+**⚠️ 勉强档**，且表现与预测一致。模型的自我声明质量很高，正好覆盖契约警告过的每个坑：
+
+```
+proportions_only + unit_is_figure_height（所有"米"其实是相对图形总高的比例）
+cutout_relief（单张前视图看不见深度，Y 厚度全是声明假设）
+fronto_parallel（按正交前视图处理，未校正透视）
+face_marks_as_relief / no_symmetry_assumed
+unresolved 6 条：圆形轮廓只能用方块近似、背面完全不可知、头发形状只能近似 …
+anchor.present = false
+```
+
+**所以这一轮的"全绿"证明的是自洽 + 下游照做，不证明与照片一致。** 要与照片比对，
+只能用 `outline` 或那 6 张 SVG 配合人眼 —— 工具读不到图片像素。这条边界是设计，不是缺陷。
+
+### 9.10.5 顺手确认的两件事
+
+- **`stop` 可以给出干净确认**：`ok=true, requested=true, confirmed=true`（对比之前两次：
+  一次 `E_DIRTY` 拒绝、一次 `transport: fetch failed`）。
+- **旧实例无需善后**：手工关窗或重装导致的"无 stop-report 死亡"，由插件的**进程存活检查**
+  兜住 —— 下一次 `start` 正常，不会读错记录。
+
+---
+
 ## 10. 未决项
 
 

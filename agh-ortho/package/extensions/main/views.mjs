@@ -92,6 +92,39 @@ export function sixViewRects(boxes) {
   })
 }
 
+const r6 = (n) => Math.round(n * 1e6) / 1e6
+
+/**
+ * 六视图的**数值轮廓**：把"图"变成"数字"。
+ *
+ * 为什么需要它：模型看得见**用户上传的照片**，却看不见工具产出的图片像素（上游契约 §2.3 实测）。
+ * 而 SVG 是文本，所以视图几何本来就能被读出来。把每张视图里每个对象的 u/v 范围与宽高比
+ * 单独结构化之后，模型能做的事就变成："照片里这栋明显高宽 3:1，而前视图说 60×9.3（6.5:1）——
+ * 对不上。" 这是**照片一致性目前唯一可行的自动路径**，代价为零。
+ *
+ * 必须如实标注它的性质：这是**粗粒度、人眼级别的形态核对**（比例、体量个数、大小排序），
+ * **不是测量**。它不能判定"到底是 12.4 还是 12.7 米"。
+ */
+export function numericOutline(views) {
+  const wh = (rect) => {
+    const w = r6(rect.u[1] - rect.u[0])
+    const h = r6(rect.v[1] - rect.v[0])
+    return { u_span_m: w, v_span_m: h, w_over_h: h > 0 ? r6(w / h) : null }
+  }
+  return (views ?? []).map((view) => ({
+    view: view.id,
+    label: view.label,
+    sheet: undefined,
+    ...(view.bbox ? wh(view.bbox) : { u_span_m: null, v_span_m: null, w_over_h: null }),
+    object_count: (view.names ?? []).length,
+    objects: (view.names ?? []).map((name, i) => {
+      const rect = view.rects[i]
+      if (!rect) return { name, missing: true }
+      return { name, u_m: [r6(rect.u[0]), r6(rect.u[1])], v_m: [r6(rect.v[0]), r6(rect.v[1])], ...wh(rect) }
+    }),
+  }))
+}
+
 /** 从 u/v 范围反解出被观测轴的 { centre, size }。sign 处理 u = -X 这类镜像。 */
 function measure(range, sign) {
   return { centre: (sign * (range[0] + range[1])) / 2, size: range[1] - range[0] }
@@ -104,6 +137,24 @@ function measure(range, sign) {
  *
  * 返回 max 与逐项明细。max 非 0 就是几何不自洽 —— 不接受任何"接近 0"。
  */
+/**
+ * numeric 残差的**容差**（米，绝对值）。
+ *
+ * 为什么不是"必须恰好为 0"（契约 §9 的字面说法，本插件**有意偏离**）：
+ * 两侧是**两条独立的算术路径** —— 一侧直接读参数叶子，另一侧从投影后的 u/v 反解。
+ * 箱体中心经过了 `c ± half → (min+max)/2` 这个往返，而它在浮点下**不是位精确的**：
+ * 实测噪声量级是 1 ulp（约 1.1e-16）。把"恰好相等"当判据，就会让 1 ulp 冒充成缺陷，
+ * 而且会把整条闭环堵死 —— 实测时 34 条 blocking 全部是这个。
+ *
+ * 两个数量级之间是很宽的空档，容差放在空档中间：
+ *   浮点往返噪声 ~1e-16   |   1e-9   |   任何真实几何误差 ≥1e-6（米级建筑上的一毫米）
+ * 所以它**不可能掩盖真实错误**。
+ *
+ * 载荷里**始终给出实际数值**（residual_max）与这个容差 —— 从不声称它恰好是 0；
+ * 一旦残差开始向容差漂移，必须看得见。
+ */
+export const NUMERIC_TOLERANCE = 1e-9
+
 export function residual(paramExtents, views, boxes) {
   const rows = []
   let max = 0
@@ -153,7 +204,7 @@ export function residual(paramExtents, views, boxes) {
       })
     }
   }
-  return { max, worst, rows }
+  return { max, tolerance: NUMERIC_TOLERANCE, within_tolerance: max <= NUMERIC_TOLERANCE, worst, rows }
 }
 
 // ---------------------------------------------------------------------------

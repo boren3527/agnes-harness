@@ -25,7 +25,7 @@ import {
   planRetention,
   writeRun,
 } from './run.mjs'
-import { VIEW_CONVENTION, commonScale, residual, sheetPlacement, sixViewRects, svgFor } from './views.mjs'
+import { VIEW_CONVENTION, commonScale, numericOutline, residual, sheetPlacement, sixViewRects, svgFor } from './views.mjs'
 
 const EMITTER_VERSION = '0.1.0'
 
@@ -252,6 +252,9 @@ const SAVE_INPUT = {
   properties: {
     ...EMIT_OPS_INPUT.properties,
     run_id: { type: 'string' },
+    // 产物包是交付物，所以它必须能记录**读回验证** —— 否则包里只有"我自洽"，
+    // 而证明不了"下游照做了"，等于交付物比这一轮实际验过的少。
+    against_scene: { type: 'boolean' },
   },
   required: EMIT_OPS_INPUT.required,
   additionalProperties: false,
@@ -713,6 +716,41 @@ async function assembleArtifacts(args, createdAt, tctx) {
     ? residual(fromParams, views, boxes)
     : { max: Infinity, worst: 'parameter/ops list misalignment', rows: [] }
 
+  // ⑤ 读回验证：save 也支持它。产物包是**交付物**，不该比这一轮实际验过的少 ——
+  // 没有这一块，包里只记录了"我自洽"，而证明不了"下游照做了、尺寸也对"。
+  let scene = null
+  if (args.against_scene === true) {
+    const expected = expectedObjectsFromOps(emission.ops)
+    const read = await readSceneForComparison(tctx)
+    if (!read.available) {
+      scene = {
+        tier: 'scene_readback',
+        available: false,
+        reason: read.reason,
+        note: 'the readback did NOT happen — do not read available:false as "the readback passed"',
+      }
+    } else {
+      const comparison = compareScene(expected, read.scene)
+      scene = {
+        tier: 'scene_readback',
+        available: true,
+        ok: comparison.rows.length > 0 && comparison.missing.length === 0 && comparison.mismatched.length === 0,
+        scene_name: read.scene.scene ?? null,
+        objects_in_scene: Array.isArray(read.scene.objects) ? read.scene.objects.length : null,
+        expected_objects: expected.length,
+        matched: comparison.matched,
+        missing: comparison.missing,
+        mismatched: comparison.mismatched,
+        extra_objects: comparison.extra_objects,
+        size_asserted: comparison.size_asserted,
+        dimensions_published: comparison.dimensions_published,
+        rows: comparison.rows,
+        asserts: sceneAsserts(comparison.size_asserted),
+        cannot_assert: sceneCannotAssert(comparison.size_asserted),
+      }
+    }
+  }
+
   const files = []
   for (const view of views) {
     const sheet = placement[view.id] ?? { col: 0, row: 0 }
@@ -728,9 +766,11 @@ async function assembleArtifacts(args, createdAt, tctx) {
   }
   files.push({
     name: 'parameters.json',
-    text: `${JSON.stringify(args, null, 2)}\n`,
-    preview: `参数模型（意图层）：${(args.assembly ?? []).length} 个 assembly 项、${(args.unsupported ?? []).length} 个声明 unsupported、${(args.unresolved ?? []).length} 个 unresolved；单位 ${args.unit}；投影 ${args.projection}`,
-    meta: { unit: args.unit, projection: args.projection },
+    // 落盘的必须是**意图层参数模型**，不能夹带 run_id / against_scene 这类工具控制字段 ——
+    // 否则这份交付物喂不回 emit_ops / fit（additionalProperties:false 会拒）。
+    text: `${JSON.stringify(intentParamsOf(args), null, 2)}\n`,
+    preview: `参数模型（意图层）：${(args.assembly ?? []).length} 个 assembly 项、${(args.unsupported ?? []).length} 个声明 unsupported、${(args.unresolved ?? []).length} 个 unresolved；单位 ${args.unit}；投影 ${args.projection}；只含意图层字段，可直接作为 emit_ops / fit 的输入复现`,
+    meta: { unit: args.unit, projection: args.projection, intent_only: true },
   })
   files.push({
     name: 'ops.json',
@@ -740,14 +780,23 @@ async function assembleArtifacts(args, createdAt, tctx) {
   })
   files.push({
     name: 'verify.json',
-    text: `${JSON.stringify({ tier: 'numeric', needs_blender: false, alignment: aligned ? 'aligned' : 'misaligned', residual_max: checked.max, worst: checked.worst, object_count: fromParams.length, convention: VIEW_CONVENTION, caveats: VERIFY_CAVEATS, rows: checked.rows }, null, 2)}\n`,
-    preview: `numeric 校验：残差 max=${checked.max}（必须为 0），${fromParams.length} 个对象 × 3 轴、每轴 4 张视图交叉一致；不需要 Blender`,
-    meta: { tier: 'numeric', residual_max: checked.max, worst: checked.worst },
+    text: `${JSON.stringify({ tier: scene ? 'scene_readback' : 'numeric', needs_blender: Boolean(scene), alignment: aligned ? 'aligned' : 'misaligned', residual_max: checked.max, residual_tolerance: checked.tolerance, residual_within_tolerance: checked.within_tolerance, worst: checked.worst, object_count: fromParams.length, convention: VIEW_CONVENTION, caveats: VERIFY_CAVEATS, rows: checked.rows, scene }, null, 2)}\n`,
+    preview: scene
+      ? scene.available
+        ? `两档校验。numeric：残差 max=${checked.max}，容差 ${checked.tolerance}，within=${checked.within_tolerance}（**不声称恰好为 0**）。scene_readback：${scene.matched}/${scene.expected_objects} match、missing ${scene.missing.length}、mismatched ${scene.mismatched.length}、size_asserted=${scene.size_asserted}`
+        : `numeric 已给出；scene_readback **没有发生**（${scene.reason}）—— 不要把 available:false 读成通过`
+      : `numeric 校验：残差 max=${checked.max}，容差 ${checked.tolerance}，判定 within=${checked.within_tolerance}（**不声称恰好为 0**）；${fromParams.length} 个对象 × 3 轴、每轴 4 张视图交叉一致；不需要 Blender`,
+    meta: {
+      tier: scene ? 'scene_readback' : 'numeric',
+      residual_max: checked.max,
+      residual_tolerance: checked.tolerance,
+      scene_available: scene ? scene.available : null,
+    },
   })
 
   return {
     files,
-    ok: emission.ok && aligned && checked.max === 0,
+    ok: emission.ok && aligned && checked.within_tolerance && (!scene || (scene.available === true && scene.ok === true)),
     blockers: [
       ...emission.blockers,
       ...(aligned
@@ -761,8 +810,22 @@ async function assembleArtifacts(args, createdAt, tctx) {
     ],
     extra: {
       createdAt,
-      tier: 'numeric',
+      tier: scene ? 'scene_readback' : 'numeric',
       residual_max: checked.max,
+      residual_tolerance: checked.tolerance,
+      residual_within_tolerance: checked.within_tolerance,
+      // 交付物里要能一眼看出"读回到底发生了没有、对不对"
+      scene_readback: scene
+        ? {
+            available: scene.available,
+            reason: scene.reason ?? null,
+            matched: scene.matched ?? null,
+            expected: scene.expected_objects ?? null,
+            missing: scene.missing ?? null,
+            mismatched: scene.mismatched ?? null,
+            size_asserted: scene.size_asserted ?? null,
+          }
+        : null,
       object_count: fromParams.length,
       unit: args.unit,
       projection: args.projection,
@@ -790,6 +853,242 @@ async function retentionPlan(fs, currentRunId) {
     cannot_delete_here:
       'the tool fs seam exposes read/write/list/stat only (no rm), so retention is planned but never executed by this plugin; delete outside the plugin, or the seam needs an rm',
   }
+}
+
+// ---------------------------------------------------------------------------
+// fit：闭环里"便宜的那一半"
+//
+// 它是 M2 循环的**唯一入口** —— 收敛判定、三态清单、数值轮廓、修改指向一次给全。
+// 为什么聚合、而不是让调用方自己串 4 个工具：每多一次工具调用就多一次嵌套的能力协商
+// （一次到 Blender 的 HTTP 往返、外加一对可见事件）。一轮循环只该付一次这个代价。
+// 它保持**只读、不落盘** —— 落盘归 agh_ortho_save，等循环收敛了再存。
+// ---------------------------------------------------------------------------
+
+const round6 = (n) => Math.round(n * 1e6) / 1e6
+
+/**
+ * 意图层的字段名 —— 从 schema 直接推出来，所以将来**加一个真实参数字段**会自动进入产物，
+ * 而任何工具控制字段（run_id / against_scene …）都不可能漏进去。
+ *
+ * 为什么必须是白名单：落盘的 parameters.json 必须是**意图层参数模型本身**，不能夹带工具管道。
+ * 实测抓到过：第一轮的 parameters.json 里带着 run_id / against_scene，于是它既不是一份干净的
+ * 参数文件，也**喂不回** emit_ops / fit（schema 是 additionalProperties:false，会被直接拒）。
+ */
+const INTENT_KEYS = Object.keys(EMIT_OPS_INPUT.properties)
+
+/** 从工具参数里剥出纯意图层参数。 */
+function intentParamsOf(args) {
+  return Object.fromEntries(INTENT_KEYS.filter((k) => args[k] !== undefined).map((k) => [k, args[k]]))
+}
+
+// fit 的输入 = emit_ops 的输入 + 一个可选的"是否引入外部事实"开关。
+const FIT_INPUT = {
+  type: 'object',
+  properties: {
+    ...EMIT_OPS_INPUT.properties,
+    against_scene: { type: 'boolean' },
+  },
+  required: EMIT_OPS_INPUT.required,
+  additionalProperties: false,
+}
+
+/** 已知的 blocker 码 → 可操作的下一步。比一句"参数错了"有用得多。 */
+const BLOCKER_SUGGESTIONS = {
+  E_UNIT_NOT_METRE: 'if you measured millimetres, divide every length by 1000 and set unit to "m"',
+  E_PROJECTION_UNSET:
+    'set projection to "first_angle" (GB/T 17451) or "third_angle" (ANSI) — the two place the views in opposite directions',
+  E_LIMIT_OBJECTS: 'split the model into stages, or raise the limit after measuring it with agh_ortho_catalog',
+  E_ARG_MISSING: 'that quantity is missing: give it a numeric leaf { v: <number>, conf: <0..1> }',
+}
+
+/** 逐条校验。**每一条都带 ok**，所以报告能指出"哪一条不过"，而不是一句"不合法"。 */
+function validationReport(params, emission, caps) {
+  const assembly = Array.isArray(params.assembly) ? params.assembly : []
+  const ids = assembly.map((i) => i?.id).filter((v) => typeof v === 'string')
+  const frame = params.frame
+  const maxObjects = caps?.limits?.maxObjects
+  const checks = []
+  const add = (check, ok, detail) => checks.push({ check, ok: ok === true, detail: detail === undefined ? null : detail })
+  add('schema_version stated', typeof params.schema_version === 'string' && params.schema_version.length > 0, params.schema_version ?? null)
+  add('unit is metres', params.unit === 'm', params.unit ?? null)
+  add('projection stated', params.projection === 'first_angle' || params.projection === 'third_angle', params.projection ?? null)
+  add('assembly is a non-empty list', assembly.length > 0, assembly.length)
+  add('every item has a string id', ids.length === assembly.length, `${ids.length}/${assembly.length}`)
+  add('ids are unique', new Set(ids).size === ids.length, `${ids.length - new Set(ids).size} duplicate(s)`)
+  // 坐标系：本插件的投影写死 up=Z / front=-Y。声明成别的，等于六视图是错的。
+  add(
+    'frame is the Z-up / -Y-front one this plugin projects',
+    !frame || (frame.up === 'Z' && frame.front === '-Y'),
+    frame ?? 'absent (assumed Z-up / -Y-front)',
+  )
+  add(
+    'within the target object limit',
+    typeof maxObjects !== 'number' || emission.op_count <= maxObjects,
+    `${emission.op_count}/${maxObjects ?? '?'}`,
+  )
+  return { ok: checks.every((c) => c.ok), failed: checks.filter((c) => !c.ok).map((c) => c.check), checks }
+}
+
+/**
+ * 三态清单。**"下游做不到"与"我还没做"必须分开** —— 问题不同、修法也不同：
+ * 前者只能删掉或声明为缺口；后者等 emitter 自己的 lowering。
+ */
+function threeState(emission) {
+  const un = emission.unlowered ?? []
+  const pick = (code) => un.filter((u) => u.reason_code === code).map((u) => ({ id: u.id, feature: u.feature, reason: u.reason }))
+  return {
+    lowered_op_count: emission.op_count,
+    // 本版 emitter 里哪些规则是 approx —— 从**表里推**出来，不是写死的数字。
+    approx_rules_in_this_emitter: Object.entries(LOWERING)
+      .filter(([, r]) => r.status === 'approx')
+      .map(([f]) => f),
+    emitter_ready_features: Object.entries(LOWERING)
+      .filter(([, r]) => r.status !== 'unsupported')
+      .map(([f]) => f),
+    unlowered_total: un.length,
+    downstream_cannot: pick('no_downstream_op'),
+    emitter_not_yet: pick('not_implemented_in_m1'),
+    declared_by_author: pick('declared_unsupported'),
+    needs_attention: [...pick('unknown_feature'), ...pick('undecided')],
+    note: 'downstream_cannot and emitter_not_yet are different problems with different fixes: keep them apart.',
+  }
+}
+
+/** conf 是**声明的相对把握**，不是概率。如实标注，并按"最没把握"优先排序。 */
+function declaredConfidence(params) {
+  const assembly = Array.isArray(params.assembly) ? params.assembly : []
+  const leaves = []
+  let missing = 0
+  for (const [i, item] of assembly.entries()) {
+    if (!item || typeof item !== 'object') continue
+    for (const key of ['w', 'd', 'h', 'z', 'dia', 'pitch', 'at']) {
+      const leaf = item[key]
+      if (!leaf || typeof leaf !== 'object') continue
+      if (typeof leaf.conf === 'number') leaves.push({ where: `assembly[${i}].${key}`, id: item.id ?? null, conf: leaf.conf })
+      else missing += 1
+    }
+  }
+  return {
+    warning:
+      'conf is the model\'s DECLARED relative confidence, not a calibrated probability. Use it to rank (which size is least certain); never as a threshold — "conf > 0.8" does not mean 80% right.',
+    declared: leaves.length,
+    missing,
+    least_certain_first: [...leaves].sort((a, b) => a.conf - b.conf).slice(0, 10),
+  }
+}
+
+/** 绝对尺寸的唯一来源，以及它的脆弱性。没有锚点时，每一个"米"其实都只是比例。 */
+function anchorReport(params) {
+  const a = params.scale_anchor
+  const ratiosOnly = Array.isArray(params.assumptions) && params.assumptions.includes('proportions_only')
+  if (!a || typeof a.pixel_len !== 'number' || typeof a.real_len !== 'number' || a.pixel_len === 0) {
+    return {
+      present: false,
+      declared_ratios_only: ratiosOnly,
+      consequence: 'every metre in this file is really a RATIO until a scale_anchor grounds it',
+      how_to_fix:
+        'name a length you know in the photo (a standard door is about 2.1 m) and give its pixel_len and real_len',
+    }
+  }
+  return {
+    present: true,
+    ref: a.ref ?? null,
+    pixel_len: a.pixel_len,
+    real_len: a.real_len,
+    metres_per_pixel: round6(a.real_len / a.pixel_len),
+    fragility:
+      'all absolute sizes scale with this one ratio: misidentify ref, or misread pixel_len by 10%, and EVERY size is off by 10%',
+  }
+}
+
+/**
+ * 生成"改哪里"的具体指向 —— **这是闭环能收敛的关键**。
+ * 报告只说"不合理"的话，模型只能重猜，循环就退化成随机游走。
+ *
+ * severity 两档：blocking（不修就不能进下一步）／ warning（值得处理但不挡路）。
+ *
+ * 特别地：内部不一致类的 hint 会明确写"**不要靠调参数去凑**"。那说明是代码的 bug；
+ * 调参数只会为了迎合一个出错的现场，把本来正确的模型改歪。
+ */
+function reviseHints(params, emission, caps, { checked, aligned, fromParams }) {
+  const hints = []
+  const add = (severity, where, problem, suggestion, evidence) => {
+    const hint = { severity, where, problem, suggestion }
+    if (evidence !== undefined) hint.evidence = evidence
+    hints.push(hint)
+  }
+
+  for (const b of emission.blockers) {
+    add('blocking', 'parameters', b.message, BLOCKER_SUGGESTIONS[b.code] ?? 'fix the quantity named in the message', b.code)
+  }
+
+  const assembly = Array.isArray(params.assembly) ? params.assembly : []
+  for (const [i, item] of assembly.entries()) {
+    if (!item || typeof item !== 'object') continue
+    const at = `assembly[${i}] (${item.id ?? '?'})`
+    for (const key of ['w', 'd', 'h', 'z', 'dia', 'pitch', 'at']) {
+      const leaf = item[key]
+      if (!leaf || typeof leaf !== 'object') continue
+      if (typeof leaf.conf !== 'number') {
+        add('warning', `${at}.${key}.conf`, 'no confidence declared', 'declare a relative confidence so the least certain sizes can be seen first')
+      } else if (leaf.conf < 0 || leaf.conf > 1) {
+        add('blocking', `${at}.${key}.conf`, `conf=${leaf.conf} is outside [0,1]`, 'confidence is a fraction between 0 and 1')
+      }
+      if (typeof leaf.v === 'number' && typeof leaf.min === 'number' && leaf.v < leaf.min) {
+        add('blocking', `${at}.${key}.v`, `v=${leaf.v} is below the declared min=${leaf.min}`, 'the leaf contradicts itself: fix v or fix min')
+      }
+      if (typeof leaf.v === 'number' && typeof leaf.max === 'number' && leaf.v > leaf.max) {
+        add('blocking', `${at}.${key}.v`, `v=${leaf.v} is above the declared max=${leaf.max}`, 'the leaf contradicts itself: fix v or fix max')
+      }
+    }
+  }
+
+  const anchor = anchorReport(params)
+  if (!anchor.present && !anchor.declared_ratios_only) {
+    add(
+      'blocking',
+      'scale_anchor',
+      'no scale_anchor, so every metre is really a ratio',
+      `${anchor.how_to_fix}; or declare assumptions:["proportions_only"] if proportions are all you want`,
+    )
+  }
+
+  for (const u of emission.unlowered) {
+    if (u.reason_code === 'no_downstream_op') {
+      add('warning', String(u.id), `the downstream cannot express "${u.feature}" (${u.reason})`, 'drop it, or declare it in unresolved[] so the gap reaches the reader instead of being silently lost')
+    } else if (u.reason_code === 'not_implemented_in_m1') {
+      add('warning', String(u.id), `this emitter cannot lower "${u.feature}" yet (${u.reason})`, 'drop it for now, or declare it in unresolved[]')
+    } else if (u.reason_code === 'declared_unsupported') {
+      add('warning', String(u.id), 'you declared this unsupported yourself', 'nothing to do — it is already reported')
+    } else if (u.reason_code === 'undecided') {
+      // repeat/array 这类"还没定"的情况：不是词汇表问题，也不该判 blocking。
+      // （自检抓到过：它落到 else 分支，被报成"不在词汇表里"外加 blocking。）
+      add('warning', String(u.id), `"${u.feature}" has no lowering rule for this shape yet (${u.reason})`, 'drop it, or declare it in unresolved[]')
+    } else if (u.reason_code === 'unknown_feature') {
+      add('blocking', String(u.id), `"${u.feature}" is not in the intent vocabulary`, 'use a feature name from the design contract')
+    } else {
+      // 真·未知原因码：响亮失败，别静默归到某一类。
+      add('blocking', String(u.id), `unhandled unlowered reason "${u.reason_code}"`, 'this is a bug in the emitter: report it')
+    }
+  }
+
+  // 内部不一致 —— 这些是**代码的 bug**，不是参数的错。说清楚，免得有人靠调参数去凑。
+  if (!aligned) {
+    add('blocking', 'assembly', `the parameter side sees ${fromParams.length} objects but the ops carry a different count`, 'this is an internal inconsistency: report it, do NOT tune the parameters to hide it')
+  }
+  if (Number.isFinite(checked.max) && !checked.within_tolerance) {
+    for (const row of (checked.rows ?? []).filter((r) => r.delta !== 0 && r.delta !== null)) {
+      add('blocking', `${row.object}.${row.axis}`, `the views disagree with the parameters by ${row.delta}, which is beyond the ${checked.tolerance} tolerance`, 'this is an internal inconsistency: report it, do NOT tune the parameters to hide it', row.from_params ?? null)
+    }
+  }
+
+  const maxObjects = caps?.limits?.maxObjects
+  if (typeof maxObjects === 'number' && emission.op_count > maxObjects) {
+    add('blocking', 'assembly', `${emission.op_count} objects exceeds the target limit of ${maxObjects}`, 'split the model, or raise the limit after measuring it with agh_ortho_catalog')
+  }
+
+  const blocking = hints.filter((h) => h.severity === 'blocking').length
+  return { hints, blocking, warning: hints.length - blocking }
 }
 
 // ---------------------------------------------------------------------------
@@ -975,13 +1274,15 @@ export const runtime = {
             message: `the parameter side sees ${fromParams.length} objects but the emitted ops carry ${fromOps.length}; lowering and parameter reading disagree about which items are buildable`,
           })
         }
-        const numericOk = emission.ok && aligned && checked.max === 0
+        const numericOk = emission.ok && aligned && checked.within_tolerance
         const numeric = {
           blockers,
           tier: 'numeric',
           needs_blender: false,
           alignment: aligned ? 'aligned' : 'misaligned',
           residual_max: checked.max,
+          residual_tolerance: checked.tolerance,
+          residual_within_tolerance: checked.within_tolerance,
           worst: checked.worst,
           object_count: fromParams.length,
           views_per_axis: 4,
@@ -1041,6 +1342,127 @@ export const runtime = {
             upgrade_path: comparison.size_asserted
               ? 'the size assertion is now active because this downstream publishes dimensions; the only remaining gap toward an image-level comparison is the downstream camera op (see cannot_assert)'
               : 'when agh-blender publishes per-object dimensions from scene.describe, this same comparison gains the size assertion — see notes/DOWNSTREAM-REQUEST-readback.md',
+          },
+        })
+      },
+    })
+
+    registerTool({
+      name: 'agh_ortho_fit',
+      // 闭环里"便宜的那一半"的入口。它把一份候选参数变成**可审计的结论 + 该改哪里**，
+      // 一次调用给全，让一轮迭代只付一次嵌套协商的代价。只读、不落盘 —— 落盘归 save。
+      description:
+        '只读、纯函数、**不落盘**。把一份候选参数 JSON 变成一份**可审计的结论**，并明确告诉你**该改哪里**。一次调用给出：逐条 validation（每条都带 ok）、三态清单（区分"下游做不到"与"我还没做"）、numeric 自洽（残差必须为 0）、六视图的**数值轮廓**（outline，供你拿照片做粗核对 —— 你看见用户上传的照片，看不见工具产出的图像素）、六张 SVG、conf 的如实标注、scale_anchor 的换算与脆弱性、以及逐项逐轴的 revise_hints。verdict 为 fit 时才进下一步：apply_ops 建模，再用 against_scene:true 跑一次做读回比对。**边界说清楚**：numeric 与读回只证明"我自洽、下游照做了"，**都不证明与照片一致** —— 那一段只能靠你拿 outline 和照片比，加上人的眼睛。',
+      parameters: FIT_INPUT,
+      meta: READ_ONLY_META,
+      async execute(args, tctx) {
+        const caps = await resolveTargetCapabilities(tctx)
+        const emission = emitOps(args, caps)
+        const boxes = boxesFromOps(emission.ops)
+        const views = sixViewRects(boxes)
+        const placement = sheetPlacement(args.projection)
+        const scale = commonScale(views)
+        const fromParams = extentsFromParams(Array.isArray(args.assembly) ? args.assembly : [])
+        const fromOps = extentsFromBoxes(boxes)
+        const aligned = fromParams.length === fromOps.length
+        const checked = aligned
+          ? residual(fromParams, views, boxes)
+          : { max: Infinity, worst: 'parameter/ops list misalignment', rows: [] }
+        const numericOk = emission.ok && aligned && checked.within_tolerance
+        const revise = reviseHints(args, emission, caps, { checked, aligned, fromParams })
+        const validation = validationReport(args, emission, caps)
+        const verdict = numericOk && validation.ok && revise.blocking === 0 ? 'fit' : 'revise'
+
+        const payload = {
+          ok: verdict === 'fit',
+          verdict,
+          revise_summary: { blocking: revise.blocking, warning: revise.warning },
+          revise_hints: revise.hints,
+          validation,
+          three_state: threeState(emission),
+          numeric: {
+            residual_max: checked.max,
+            residual_tolerance: checked.tolerance,
+            residual_within_tolerance: checked.within_tolerance,
+            alignment: aligned ? 'aligned' : 'misaligned',
+            object_count: fromParams.length,
+            views_per_axis: 4,
+            convention: VIEW_CONVENTION,
+            rows: checked.rows,
+            caveats: VERIFY_CAVEATS,
+          },
+          outline: numericOutline(views).map((o) => ({ ...o, sheet: placement[o.view] ?? null })),
+          declared_relative_confidence: declaredConfidence(args),
+          anchor: anchorReport(args),
+          target_capability_set: emission.target_capability_set,
+          capability_source: emission.capability_source,
+          // 必须带上 ops：否则调用方为了拿到它还得再调一次 emit_ops，就多付一次嵌套协商，
+          // "一轮只付一次"的聚合意义就没了。verdict 为 fit 时它就是要喂给 apply_ops 的东西。
+          ops: emission.ops,
+          op_count: emission.op_count,
+          batches: emission.batches,
+          blockers: emission.blockers,
+          unresolved: args.unresolved ?? [],
+          next:
+            verdict === 'fit'
+              ? 'compare outline (and the SVGs) against the photo, then apply the ops and re-run fit with against_scene:true for the readback check'
+              : 'act on revise_hints: each one names the exact item and axis. Change nothing else in the same round.',
+          views: views.map((view) => {
+            const sheet = placement[view.id] ?? { col: 0, row: 0 }
+            return { view: view.id, label: view.label, sheet, svg: svgFor(view, sheet, { scale }) }
+          }),
+          caveats: [
+            'numeric and the readback prove self-consistency, and that the downstream obeyed — neither proves agreement with the photograph',
+            'outline is a coarse, human-grade shape check (proportions, mass count, size ordering), not a measurement',
+          ],
+        }
+
+        if (args.against_scene !== true) return respond(payload)
+
+        const expected = expectedObjectsFromOps(emission.ops)
+        const read = await readSceneForComparison(tctx)
+        if (!read.available) {
+          return respond({
+            ...payload,
+            ok: false,
+            blockers: [
+              ...emission.blockers,
+              { code: 'E_SCENE_UNAVAILABLE', message: `against_scene was asked for, but the scene could not be read: ${read.reason}` },
+            ],
+            scene: {
+              tier: 'scene_readback',
+              available: false,
+              reason: read.reason,
+              note: 'the readback did NOT happen — do not read available:false as "the readback passed"',
+              asserts: sceneAsserts(false),
+              cannot_assert: sceneCannotAssert(false),
+            },
+          })
+        }
+        const comparison = compareScene(expected, read.scene)
+        const sceneOk = comparison.rows.length > 0 && comparison.missing.length === 0 && comparison.mismatched.length === 0
+        return respond({
+          ...payload,
+          ok: verdict === 'fit' && sceneOk,
+          scene: {
+            tier: 'scene_readback',
+            available: true,
+            reason: null,
+            scene_name: read.scene.scene ?? null,
+            objects_in_scene: Array.isArray(read.scene.objects) ? read.scene.objects.length : null,
+            expected_objects: expected.length,
+            matched: comparison.matched,
+            missing: comparison.missing,
+            mismatched: comparison.mismatched,
+            extra_objects: comparison.extra_objects,
+            rows: comparison.rows,
+            size_asserted: comparison.size_asserted,
+            dimensions_published: comparison.dimensions_published,
+            asserts: sceneAsserts(comparison.size_asserted),
+            cannot_assert: sceneCannotAssert(comparison.size_asserted),
+            // 归因纪律：⑤ 失败时先判**哪一侧错了**，再决定改什么。
+            attribution:
+              'if a row mismatches, decide WHICH side is wrong first: our ops disagreeing with our parameters is a bug in this plugin; the scene disagreeing with our ops means the downstream did not obey. Changing the parameters to match a wrong scene corrupts a correct model.',
           },
         })
       },

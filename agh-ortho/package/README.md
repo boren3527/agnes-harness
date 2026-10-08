@@ -8,14 +8,15 @@
 
 ## 状态：M1 闭环（0.1.0）
 
-五个工具。前四个是只读纯函数、不写盘；第五个是唯一的变更型工具：
+六个工具。前五个是只读纯函数、不写盘；第六个是唯一的变更型工具：
 
 | 工具 | 作用 |
 |---|---|
 | `agh_ortho_catalog` | 回报**协商后**的下游能力面（op 白名单、限额、基元）。写 ops 之前先调它。 |
 | `agh_ortho_emit_ops` | 意图层参数 JSON → `agh_blender_apply_ops` 的 `ops` 批次。**只算不写。** |
 | `agh_ortho_views` | 参数 → **正交六视图 SVG**（自己算投影，不依赖下游的相机）。返回文本，不落盘。 |
-| `agh_ortho_verify` | `numeric` 档校验：参数 → 六视图 → 反解 → 与参数比对，**残差必须为 0**。 |
+| `agh_ortho_verify` | 两档校验。默认只跑 `numeric`：参数 → 六视图 → 反解 → 与参数比对，**残差必须为 0**，不需要 Blender。加 `against_scene: true` 再跑 `scene_readback` 半档：读回真实场景，比对名字/位置/缩放/**尺寸**。 |
+| `agh_ortho_fit` | **M2 闭环里"便宜那一半"的入口**，一次给全：逐条 validation、三态清单、numeric、六视图 + **数值轮廓**（供你拿照片做粗核对）、`conf` 的如实标注、`scale_anchor` 的换算与脆弱性、逐项逐轴的 `revise_hints`。只读、不落盘。 |
 | `agh_ortho_save` | 唯一写盘的工具（`requiresApproval: always`）。落一个 run：六个视图 SVG、参数、ops、校验结果、`marker.json`、`report.json`（描述符）。 |
 
 `views` 只返回 SVG **文本**、不落盘 —— SVG 本来就是文本，模型读得到；文件与描述符归 `save`。
@@ -34,7 +35,7 @@
 node agh-ortho/tools/check.mjs     # 零依赖，不需要 Blender
 ```
 
-覆盖工具定义结构、四个工具的行为、5 个负例（把 lowering 改坏残差必须非 0）、落位假设、
+覆盖工具定义结构、六个工具的行为、5 个负例（把 lowering 改坏残差必须非 0）、落位假设、
 单位/投影的拒绝路径。当前 **ALL PASS**。
 
 
