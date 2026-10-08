@@ -13,7 +13,7 @@
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { boxesFromOps, extentsFromBoxes, extentsFromParams, placementOf } from './geometry.mjs'
+import { boxesFromOps, compareScene, expectedObjectsFromOps, extentsFromBoxes, extentsFromParams, placementOf } from './geometry.mjs'
 import {
   ARTIFACT_ROOT_SEGMENTS,
   CONTRACT_VERSION,
@@ -38,6 +38,40 @@ const VERIFY_CAVEATS = [
   'the placement rule (placementOf) is shared by both paths, so a wrong placement rule cancels out and stays invisible to this check',
   'the u/v axis sense per view follows this plugin convention and has not been checked line by line against GB/T 17451',
 ]
+
+/**
+ * `scene_readback` 半档**能**断言的（名字如实，不冒充 against_blender）。
+ * 它与 `numeric` 档的本质区别：本档第一次引入**外部事实**（下游场景），
+ * 所以它能抓到 numeric 抓不到的东西 —— 例如"ops 发出了但下游没建出来"或"名字被占用改成了 .001"。
+ * `size_asserted` 由下游是否发布 `dimensions` 决定，所以这一项必须是参数，不能写死。
+ */
+function sceneAsserts(sizeAsserted) {
+  const base = [
+    'every intended object exists under its exact name (Blender renames collisions to name.001, so a missing exact name is caught)',
+    'type is MESH',
+    'location equals the location we asked for, within 1e-6',
+    'scale equals the scale we asked for, within 1e-6',
+  ]
+  if (sizeAsserted) {
+    base.push('the final size in metres equals scale x size, within 1e-6 — dimensions ARE published by this downstream')
+  }
+  return base
+}
+
+/**
+ * 本档**验不了**的。必须与"验到了什么"一样明确地报出去 —— 否则半档会被读成整档。
+ * 这张表就是 notes/DOWNSTREAM-REQUEST-readback.md 那份请求的可复现理由。
+ */
+function sceneCannotAssert(sizeAsserted) {
+  const out = []
+  if (!sizeAsserted) {
+    out.push('the final size in metres: scene.describe publishes no dimensions, so whether size=1 means a unit edge is still unverified')
+  }
+  out.push('the primitive kind beyond type=MESH: the downstream catalog publishes no per-kind vertex/face counts, so vertices/polygons are reported as evidence and not asserted')
+  // 即使下游补上 dimensions，这一条也永远补不上 —— 所以它必须一直在这里，不能靠"以后再说"。
+  out.push('agreement with the original photograph: that needs an orthographic render of the real scene, and the downstream has no camera op — so this tier can never become an image-level against_blender comparison')
+  return out
+}
 
 // ---------------------------------------------------------------------------
 // 平台约束 A：工具 schema 的每个节点都必须带 Symbol.for('TypeBox.Kind')。
@@ -201,6 +235,17 @@ const EMIT_OPS_INPUT = {
   additionalProperties: false,
 }
 
+// verify 的输入 = emit_ops 的输入 + 一个可选的"是否引入外部事实"开关。
+const VERIFY_INPUT = {
+  type: 'object',
+  properties: {
+    ...EMIT_OPS_INPUT.properties,
+    against_scene: { type: 'boolean' },
+  },
+  required: EMIT_OPS_INPUT.required,
+  additionalProperties: false,
+}
+
 // save 的输入 = emit_ops 的输入 + 一个幂等键（上游契约 §5.3：同一 id 必须对应同一内容）。
 const SAVE_INPUT = {
   type: 'object',
@@ -307,6 +352,32 @@ async function negotiateFromDownstream(tctx) {
     return { attempted: true, reason: 'catalog payload lacks limits or ops' }
   }
   return { attempted: true, reason: null, catalog }
+}
+
+/**
+ * `scene_readback` 半档要的外部事实：下游的场景读回。
+ * 与能力协商同源：`agh_blender_scene` 是只读工具（never 审批），所以它可以被嵌套调用；
+ * 而"没有受管理实例"和"调用失败"都是**正常分支**，一律不抛，只把原因报出来。
+ */
+async function readSceneForComparison(tctx) {
+  const invoke = tctx?.tools?.invoke
+  if (typeof invoke !== 'function') return { available: false, reason: 'no tools seam on this tool context' }
+  let result
+  try {
+    result = await invoke('agh_blender_scene', {})
+  } catch (error) {
+    const code = error?.code ? `${error.code}: ` : ''
+    return { available: false, reason: `nested invoke failed (${code}${error?.message ?? error})` }
+  }
+  const report = result?.structured
+  if (!report || report.ok !== true || !report.scene) {
+    const why =
+      Array.isArray(report?.blockers) && report.blockers.length
+        ? report.blockers.join('; ')
+        : 'the nested result carried no ok:true scene'
+    return { available: false, reason: `downstream answered without a scene (${why})` }
+  }
+  return { available: true, reason: null, scene: report.scene }
 }
 
 /**
@@ -883,8 +954,8 @@ export const runtime = {
     registerTool({
       name: 'agh_ortho_verify',
       description:
-        '只读、纯函数。numeric 档校验（CONTRACT §9）：参数 → ops → 包围盒 → 六视图 → **从视图反解** → 与参数比对，残差必须为 0，且同一个轴被 4 张视图观测、4 个观测值必须彼此相等。走的是两条**独立路径**：一侧直接读参数叶子，另一侧读 lowering 产出的 ops —— 共用一条路径的话校验就是同义反复。**不需要 Blender**，这就是"扩下游之前就能交付价值"的关键解耦。它只证明几何自洽，不证明几何与真实照片一致（那是 against_blender 档，M1 不做）。',
-      parameters: EMIT_OPS_INPUT,
+        '只读、纯函数。numeric 档校验（CONTRACT §9）：参数 → ops → 包围盒 → 六视图 → **从视图反解** → 与参数比对，残差必须为 0，且同一个轴被 4 张视图观测、4 个观测值必须彼此相等。走的是两条**独立路径**：一侧直接读参数叶子，另一侧读 lowering 产出的 ops —— 共用一条路径的话校验就是同义反复。**不需要 Blender**，这就是"扩下游之前就能交付价值"的关键解耦。它只证明几何自洽，不证明几何与真实照片一致。传 against_scene:true 会再跑一档 **scene_readback**（半档，名字如实）：向下游读一次场景（agh_blender_scene，只读、无需审批），比对"我打算创建的对象"是否按**确切名字**存在、类型是 MESH、location 与 scale 与我们发出的 ops 一致 —— 这是本插件第一次引入外部事实，因此能抓到 numeric 抓不到的"ops 发了但下游没建出来 / 名字被占用改成了 .001"。它**验不了**最终尺寸（下游不发布 dimensions）与基元种类（catalog 不发布每类顶点/面数）；这两条会在返回里逐条列在 cannot_assert 里，因为"验不了什么"必须和"验到了什么"一样明确。缺实例或读不到场景时不会抛错，会报 E_SCENE_UNAVAILABLE 并明确说明**本档没有发生**，不要把 available:false 读成通过。',
+      parameters: VERIFY_INPUT,
       meta: READ_ONLY_META,
       async execute(args, tctx) {
         const caps = await resolveTargetCapabilities(tctx)
@@ -904,8 +975,8 @@ export const runtime = {
             message: `the parameter side sees ${fromParams.length} objects but the emitted ops carry ${fromOps.length}; lowering and parameter reading disagree about which items are buildable`,
           })
         }
-        return respond({
-          ok: emission.ok && aligned && checked.max === 0,
+        const numericOk = emission.ok && aligned && checked.max === 0
+        const numeric = {
           blockers,
           tier: 'numeric',
           needs_blender: false,
@@ -917,6 +988,60 @@ export const runtime = {
           convention: VIEW_CONVENTION,
           rows: checked.rows,
           caveats: VERIFY_CAVEATS,
+        }
+        // 默认只跑 numeric 档；against_scene 才引入外部事实（需要一个已启动的受管理实例）。
+        if (args.against_scene !== true) return respond({ ok: numericOk, ...numeric })
+
+        const expected = expectedObjectsFromOps(emission.ops)
+        const read = await readSceneForComparison(tctx)
+        if (!read.available) {
+          return respond({
+            ok: false,
+            ...numeric,
+            blockers: [
+              ...blockers,
+              { code: 'E_SCENE_UNAVAILABLE', message: `against_scene was asked for, but the scene could not be read: ${read.reason}` },
+            ],
+            scene: {
+              tier: 'scene_readback',
+              available: false,
+              reason: read.reason,
+              note: 'numeric 的结果仍然有效并已给出；本档**没有发生** —— 不要把 available:false 读成"读回通过了"。',
+              asserts: sceneAsserts(false),
+              cannot_assert: sceneCannotAssert(false),
+            },
+          })
+        }
+        const comparison = compareScene(expected, read.scene)
+        const sceneOk = comparison.rows.length > 0 && comparison.missing.length === 0 && comparison.mismatched.length === 0
+        return respond({
+          ok: numericOk && sceneOk,
+          ...numeric,
+          // 有外部事实参与时 tier 如实写 scene_readback，**不写 against_blender**：
+          // 尺寸语义仍然验不了（下游不发布 dimensions），所以它还够不上契约里那一档。
+          tier: 'scene_readback',
+          needs_blender: true,
+          scene: {
+            tier: 'scene_readback',
+            available: true,
+            reason: null,
+            scene_name: read.scene.scene ?? null,
+            objects_in_scene: Array.isArray(read.scene.objects) ? read.scene.objects.length : null,
+            expected_objects: expected.length,
+            matched: comparison.matched,
+            missing: comparison.missing,
+            mismatched: comparison.mismatched,
+            extra_objects: comparison.extra_objects,
+            rows: comparison.rows,
+            // 尺寸语义到底验没验 —— 显式给出来，不靠读者推断。
+            size_asserted: comparison.size_asserted,
+            dimensions_published: comparison.dimensions_published,
+            asserts: sceneAsserts(comparison.size_asserted),
+            cannot_assert: sceneCannotAssert(comparison.size_asserted),
+            upgrade_path: comparison.size_asserted
+              ? 'the size assertion is now active because this downstream publishes dimensions; the only remaining gap toward an image-level comparison is the downstream camera op (see cannot_assert)'
+              : 'when agh-blender publishes per-object dimensions from scene.describe, this same comparison gains the size assertion — see notes/DOWNSTREAM-REQUEST-readback.md',
+          },
         })
       },
     })

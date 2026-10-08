@@ -554,6 +554,46 @@ inspect → disable → remove → install → trust → enable → status → a
 候选加入给下游的清单（见 `DOWNSTREAM-REQUEST-readback.md` §8），并提醒：本插件不受影响
 （我们不调用 stop），但**凡是把它当闸门的编排都会踩到**。
 
+### 9.9.6 `scene_readback` 半档（已完成）
+
+新增在 `agh_ortho_verify` 上：传 `against_scene:true` 时，它嵌套调用只读的 `agh_blender_scene`，
+把"我打算创建的对象"与真实场景比对。
+
+**能断言（精确）**：对象按**确切名字**存在、`type` 是 MESH、`location` 与 `scale` 与我们发出的 ops
+一致（容差 1e-6）。这一档的意义在于它是本插件**第一次引入外部事实**，因此能抓到 `numeric` 抓不到的：
+
+- ops 发出了但下游**没建出来**；
+- 名字被占用 —— Blender 会改名成 `name.001`，于是"精确名字找不到"直接报 `missing`；
+- 位置/缩放被下游改了或被别的东西覆盖。
+
+**验不了（必须在返回里逐条写出来）**：
+
+1. **最终尺寸（`w×d×h`）** —— `describe_scene()` 不发布 `dimensions`，所以"`size=1` 是不是单位边长"
+   仍然没被验证过；
+2. **基元种类本身**（除 `type=MESH` 外）—— 下游 catalog 不发布每种基元的顶点/面数，
+   所以 `vertices`/`polygons` **只作为证据报出来，不据此判成败**。
+
+这两条就是 `notes/DOWNSTREAM-REQUEST-readback.md` 那份请求的**可复现理由**，而不是一句设计意见。
+
+**命名纪律**：这一档的 `tier` 如实写 `scene_readback`，**绝不写 `against_blender`** ——
+尺寸语义还验不了，它够不上契约 §9 那一档。`upgrade_path` 字段把"下游加 `dimensions` 之后
+同一份比对代码就升级成真正的 against_blender"写进了载荷本身。
+
+缺实例/读不到场景时**不抛错**：报 `E_SCENE_UNAVAILABLE`，`scene.available:false`，
+并明确说明"本档没有发生"（`note` 字段），同时**保留 numeric 的结果** —— 半档不能因为读不到外部事实
+就把已经算出来的东西丢掉，但也绝不能被读成"读回通过了"。
+
+### 9.9.7 一条性能/噪音上的代价（如实记下）
+
+`resolveTargetCapabilities` 每次都会尝试嵌套调用 `agh_blender_ops_catalog`，而
+`reentry.ts` 的注释写明嵌套调用会**各自记一条 `tool/call` 与 `tool/result`**。所以：
+**每个会 lower ops 的只读工具（`emit_ops`/`views`/`verify`/`save`）在有能力源时都会多出一对可见事件。**
+
+- 好的一面：能力来源变得**可追溯**（转录里能看见它到底问过谁）；
+- 代价：转录噪音 + 每次一个到 Blender 的 HTTP 往返；
+- 风险（暂未发生）：如果将来某个下游 catalog 工具改成需要审批，我们的**只读**工具会 PARK ——
+  目前 `agh_blender_ops_catalog` 是 `never`，且失败即降级能兜住抛错，但这值得在 M3 扩下游时再看一眼。
+
 ## 10. 未决项
 
 

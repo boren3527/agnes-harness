@@ -17,8 +17,14 @@
         previously recorded source was a relative file: path; install replaces it
         anyway. Their failures are reported, never fatal.
       * the install step stays interactive: AGH refuses to install unless a human
-        answers the prompt (INV-33). Its output is NOT piped, because piping the
-        child's stdout would make its isTTY check fail.
+        answers the prompt (INV-33). It is launched with Start-Process -NoNewWindow,
+        because ANY capture of the child's stdout by PowerShell makes its isTTY check
+        fail, and the install is then cancelled silently. See Invoke-CliInteractive.
+      * after installing, the recorded integrity MUST equal the source integrity. A
+        record existing is not enough: Get-InstalledRecord returns the last record for
+        the id, which is the PREVIOUS copy whenever the install silently did nothing.
+        Without that check the script would trust and enable the stale copy and then
+        report success.
       * trust is re-run even when nothing changed; it is idempotent.
 
     Usage (from the repository root):
@@ -91,16 +97,32 @@ Write-Host ''
 
 $results = @()
 
-function Invoke-Cli([string]$label, [string[]]$cliArgs, [switch]$NoPipe) {
-    if ($NoPipe) {
-        & $nodeExe $cli @cliArgs --profile $ProfileName
-    }
-    else {
-        & $nodeExe $cli @cliArgs --profile $ProfileName 2>&1 | ForEach-Object { Write-Host "     $_" }
-    }
+function Invoke-Cli([string]$label, [string[]]$cliArgs) {
+    & $nodeExe $cli @cliArgs --profile $ProfileName 2>&1 | ForEach-Object { Write-Host "     $_" }
     $code = $LASTEXITCODE
     $script:results += [pscustomobject]@{ Step = $label; ExitCode = $code }
     return $code
+}
+
+# The install step is the one command that must reach the console as a real TTY.
+#
+# It cannot go through Invoke-Cli. PowerShell turns a native process's stdout into
+# pipeline strings whenever the call is consumed by an expression, a pipe, or a
+# function whose output is used -- and inside a function it always is. The child then
+# sees stdout as a PIPE, AGH's confirmPackageInstall() takes its non-interactive
+# branch (packages/cli/src/bin.ts: "if (io.stdin.isTTY !== true ||
+# io.stdout.isTTY !== true) return Promise.resolve(false)"), and it returns without
+# printing anything at all. The visible symptom is an install step that shows no
+# prompt and installs nothing; the stale-record check below then has to catch it.
+#
+# Start-Process with -NoNewWindow and no -Redirect* hands the child the real console
+# handles, so the isTTY check passes and the prompt appears.
+function Invoke-CliInteractive([string]$label, [string[]]$cliArgs) {
+    $argList = @($cliArgs + @('--profile', $ProfileName)) |
+        ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }
+    $proc = Start-Process -FilePath $nodeExe -ArgumentList ($argList -join ' ') -NoNewWindow -Wait -PassThru
+    $script:results += [pscustomobject]@{ Step = $label; ExitCode = $proc.ExitCode }
+    return $proc.ExitCode
 }
 
 function Get-InstalledRecord([string]$id) {
@@ -158,13 +180,29 @@ else {
     Invoke-Cli 'remove' @('package', 'remove', 'agh-blender') | Out-Null
 
     Write-Step 'install  ->  answer y at the prompt'
-    Invoke-Cli 'install' @('install', $Source) -NoPipe | Out-Null
+    Invoke-CliInteractive 'install' @('install', $Source) | Out-Null
 
     $record = Get-InstalledRecord 'agh-blender'
     if ($null -eq $record) {
         Write-Bad 'no install record for agh-blender - did the install step succeed?'
         Write-Host ''
         Write-Host 'Nothing else was run. Re-run after checking the install output above.' -ForegroundColor Red
+        exit 1
+    }
+    # A record existing does NOT mean THIS install happened: Get-InstalledRecord returns
+    # the last record for the id, i.e. the PREVIOUS copy, whenever the install silently
+    # did nothing (the child never saw a TTY, so confirmPackageInstall() returned false
+    # without printing anything). Without this check the script would trust and enable
+    # the stale copy, print OK, and leave the new source uninstalled.
+    if ($record.integrity -ne $sourceIntegrity) {
+        Write-Bad 'the install did not take effect - an older copy is still what is installed:'
+        Write-Bad "  installed now $($record.integrity)"
+        Write-Bad "  this source   $sourceIntegrity"
+        Write-Host ''
+        Write-Host 'Most likely the install prompt never appeared, which means the child did not' -ForegroundColor Red
+        Write-Host 'reach the console as a TTY. Run this by hand from a real console window:' -ForegroundColor Red
+        Write-Host "  node packages/cli/dist/local/agnes.mjs install $Source --profile $ProfileName" -ForegroundColor White
+        Write-Host 'Then re-run this script; trust and enable are still done for you.' -ForegroundColor Red
         exit 1
     }
 }
@@ -192,10 +230,15 @@ if (-not $SkipVerify) {
     }
     else {
         $lines = Get-Content $audit -Encoding UTF8
-        $loaded = @($lines | Select-String '"kind":"extension.loaded"' | Select-Object -Last 1)
-        $failed = @($lines | Select-String '"kind":"extension.failed"' | Select-Object -Last 1)
+        # Filter to THIS package. Without it, Select-Object -Last 1 picks the last loaded
+        # line of ANY package, so a different plugin loaded later would be reported here
+        # as if it were this one. A verification step that names the wrong subject is
+        # worse than no verification step.
+        $loaded = @($lines | Select-String '"kind":"extension.loaded"' | Select-String '"package":"agh-blender"' | Select-Object -Last 1)
+        $failed = @($lines | Select-String '"kind":"extension.failed"' | Select-String '"package":"agh-blender"' | Select-Object -Last 1)
         $tools = @($lines | Select-String '"kind":"extension.registered"' | Select-String 'agh_blender_' | Select-Object -Last 9)
         if ($loaded.Count -gt 0) { Write-Ok "last loaded: $($loaded[0].Line.Substring(0, [Math]::Min(150, $loaded[0].Line.Length)))" }
+        else { Write-Note 'no extension.loaded line for agh-blender in this audit log' }
         if ($failed.Count -gt 0) { Write-Bad "a later failure line exists: $($failed[0].Line.Substring(0, [Math]::Min(150, $failed[0].Line.Length)))" }
         Write-Note "agh_blender_* registration lines (last 9): $($tools.Count)"
     }
