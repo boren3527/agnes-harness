@@ -1,6 +1,8 @@
 {
   "schema": "agh.capability/1",
-  "target": "agh-blender@0.1.7",
+  "target": "agh-blender@0.1.8",
+  "target_measured_against": "agh-blender@0.1.7",
+  "target_note": "0.1.8 只改了 describe_scene()（开始发布 dimensions / rotation_euler），OPS / OP_MANIFEST / limits / catalog() 一行未动，所以下面这些条目仍然描述 0.1.8。**下游一旦改 op 或限额，这个文件必须同步更新** —— 实测被抓到过：它写着 0.1.7 而实际装的是 0.1.8，载荷里就跟着报了错的目标版本（stale:true 是唯一的分辨线索）。",
   "capabilitySet": "primitives-6",
   "capabilitySetNote": "下游 catalog() 不发布能力集标识；本字段由本插件按『包版本 + 基元种类数』合成。这是 CONTRACT §5.2 要求 target_capability_set 与下游实际发布内容之间的一个已知缺口。",
   "observedAt": "2026-10-08",

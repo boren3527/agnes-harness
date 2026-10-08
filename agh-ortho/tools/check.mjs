@@ -123,7 +123,6 @@ const SAMPLE = {
   assembly: [
     { id: 'site', feature: 'slab', w: { v: 60.0, conf: 0.4 }, d: { v: 40.0, conf: 0.4 }, z: { v: 0 } },
     { id: 'body', feature: 'box', w: { v: 12.4, conf: 0.9 }, d: { v: 8.6, conf: 0.65 }, h: { v: 9.3, conf: 0.71 }, at: { v: [0, 0, 4.65], conf: 0.85 } },
-    { id: 'col', feature: 'column', dia: { v: 0.6 } },
     { id: 'roof', feature: 'roof.gable', pitch: { v: 0.42 } },
   ],
   unresolved: ['屋面厚度'],
@@ -133,9 +132,14 @@ const call = async (name, args) => (await byName[name].execute(args, {})).struct
 
 const emission = await call('agh_ortho_emit_ops', SAMPLE)
 check('emit_ops: ok with only slab+box lowered', emission.ok === true && emission.ops.length === 2, JSON.stringify(emission.blockers))
-check('emit_ops: target_capability_set is generated', emission.target_capability_set === 'agh-blender@0.1.7:primitives-6', emission.target_capability_set)
-check('emit_ops: not_implemented_in_m1 vs no_downstream_op are distinguished',
-  emission.unlowered.some((u) => u.reason_code === 'not_implemented_in_m1') && emission.unlowered.some((u) => u.reason_code === 'no_downstream_op'),
+// 断言"它是**从快照推导**出来的"，而不是断言某个具体版本 —— 版本号会随下游重新测量而**合法变化**。
+// 实测被抓到过：把 0.1.7 写死在断言里，快照更新成 0.1.8 后这条测试就红了（测试本身成了维护负担）。
+const capFile = JSON.parse(readFileSync(join(pkgDir, 'extensions', 'main', 'agh.capability.json'), 'utf8'))
+check('emit_ops: target_capability_set is derived from the snapshot, not hardcoded', emission.target_capability_set === `${capFile.target}:${capFile.capabilitySet}`, `${emission.target_capability_set} vs ${capFile.target}:${capFile.capabilitySet}`)
+// M2 之后 "emitter_not_yet" 这个桶空了（五种意图都 lower 了），但**区分本身**必须留着：
+// "下游做不到"（roof.gable）仍要与"我还没做"分开，否则 M3 扩下游时会误读。
+check('emit_ops: unsupported reason codes stay separate (M2 emptied emitter_not_yet)',
+  emission.unlowered.every((u) => u.reason_code !== 'not_implemented_in_m1') && emission.unlowered.some((u) => u.reason_code === 'no_downstream_op'),
   emission.unlowered.map((u) => `${u.feature}:${u.reason_code}`).join(' '))
 check('emit_ops: unresolved reaches the caller', emission.unresolved[0] === '屋面厚度')
 
@@ -287,7 +291,7 @@ check('the refusal reports the actual marker content', foreign.blockers[0].marke
 check('retention policy is stated', saved.retention.policy.maxRuns === 20 && saved.retention.policy.maxAgeDays === 30, JSON.stringify(saved.retention.policy))
 check('retention honestly says this plugin cannot delete', saved.retention.cannot_delete_here.includes('no rm'))
 check('report.json on disk is the authority (contract + artifact count)',
-  (() => { const r = JSON.parse(fs1.files.get(`.agnes/agh-ortho/runs/${saved.run_id}/report.json`)); return r.contract === 1 && r.artifacts.length === 9 && r.unlowered.length >= 2 && r.unresolved[0] === '屋面厚度' })())
+  (() => { const r = JSON.parse(fs1.files.get(`.agnes/agh-ortho/runs/${saved.run_id}/report.json`)); return r.contract === 1 && r.artifacts.length === 9 && r.unlowered.length >= 1 && r.unresolved[0] === '屋面厚度' })())
 
 // 产物里的 preview 必须把降级误差带到用户面前，而不是只留在内部字段。
 const opsPreview = saved.artifacts.find((a) => a.path.endsWith('ops.json')).preview
@@ -490,7 +494,7 @@ check('fit: outline is numeric, per view and per object', fitOk.outline.length =
 check('fit: outline carries the sheet position', fitOk.outline.every((o) => o.sheet && typeof o.sheet.col === 'number'))
 check('fit: conf is labelled DECLARED, not a probability', /DECLARED/.test(fitOk.declared_relative_confidence.warning) && fitOk.declared_relative_confidence.least_certain_first.length > 0, JSON.stringify(fitOk.declared_relative_confidence.least_certain_first.slice(0, 3)))
 check('fit: the anchor records the one ratio and its fragility', fitOk.anchor.present === true && fitOk.anchor.metres_per_pixel > 0 && /EVERY size/.test(fitOk.anchor.fragility), JSON.stringify(fitOk.anchor))
-check('fit: three-state keeps downstream gaps apart from emitter gaps', fitOk.three_state.emitter_ready_features.length === 2 && Array.isArray(fitOk.three_state.downstream_cannot) && Array.isArray(fitOk.three_state.emitter_not_yet), JSON.stringify(fitOk.three_state.emitter_ready_features))
+check('fit: three-state keeps downstream gaps apart from emitter gaps', fitOk.three_state.emitter_ready_features.length === 7 && Array.isArray(fitOk.three_state.downstream_cannot) && Array.isArray(fitOk.three_state.emitter_not_yet), JSON.stringify(fitOk.three_state.emitter_ready_features))
 check('fit: the six SVGs still come along', fitOk.views.length === 6 && fitOk.views.every((v) => /^<svg/.test(v.svg)))
 check('fit: it hands you the ops, so one round is one call', Array.isArray(fitOk.ops) && fitOk.ops.length === 2 && fitOk.ops[0].op === 'mesh.primitive_add', JSON.stringify(fitOk.ops?.map((o) => o.op)))
 const fitBytes = JSON.stringify(fitOk).length
@@ -504,6 +508,14 @@ delete NO_ANCHOR.scale_anchor
 const noAnchor = (await fitTool.execute(NO_ANCHOR, {})).structured
 check('fit: a missing scale_anchor is blocking, not a silent pass', noAnchor.verdict === 'revise' && noAnchor.revise_hints.some((h) => h.where === 'scale_anchor' && h.severity === 'blocking'), JSON.stringify({ verdict: noAnchor.verdict, anchor: noAnchor.anchor }))
 const ratiosOnly = (await fitTool.execute({ ...NO_ANCHOR, assumptions: ['proportions_only'] }, {})).structured
+// "真米数不需要锚点"：设计给定的尺寸不是从照片量出来的，不该被要求锚点。
+// **实测被指出过**：一轮 M2 尺寸校验用的就是真米数（8 米的板、3 米的柱），却被"缺 scale_anchor"判成 blocking
+// —— 那个检查默认了"参数一定来自照片"。当时模型**拒绝**用 proportions_only 去消掉它（那会是谎报），是对的。
+const authoredDims = (await fitTool.execute({ ...NO_ANCHOR, assumptions: ['authored_dimensions'] }, {})).structured
+check('fit: authored_dimensions suppresses the anchor blocking (a design brief needs no photograph)', authoredDims.anchor.declared_authored === true && !authoredDims.revise_hints.some((h) => h.where === 'scale_anchor' && h.severity === 'blocking'), JSON.stringify(authoredDims.revise_hints.filter((h) => h.where === 'scale_anchor')))
+// 场景容差必须随尺寸缩放：限制精度的是**下游的多边形化**（实测 uv_sphere 直径 2 → 1.999999，
+// 刚好等于原来的绝对容差 1e-6 ⇒ 只差 1e-15 就翻面），不是浮点算术。
+check('scene tolerance scales with size so tessellation is not mistaken for a defect', geometry.sceneToleranceFor(2) > 1e-6 && geometry.sceneToleranceFor(2) < 1e-4 && geometry.sceneToleranceFor(0) >= 1e-9, `tol(2)=${geometry.sceneToleranceFor(2)} tol(0)=${geometry.sceneToleranceFor(0)}`)
 check('fit: declaring proportions_only makes the missing anchor acceptable', ratiosOnly.anchor.declared_ratios_only === true && !ratiosOnly.revise_hints.some((h) => h.where === 'scale_anchor' && h.severity === 'blocking'), JSON.stringify({ verdict: ratiosOnly.verdict, blocking: ratiosOnly.revise_summary.blocking }))
 
 // 叶子自相矛盾（v 落在自己声明的 [min,max] 之外）必须被点名到**具体项、具体轴**
@@ -545,6 +557,99 @@ const noisy = viewsMod.residual([epsUnit], viewsWithX(12.4 + ULP_12_4), epsBoxes
 check('numeric: 1 ulp of round-trip noise is within tolerance (and still reported)', noisy.within_tolerance === true && noisy.max > 0 && noisy.tolerance === viewsMod.NUMERIC_TOLERANCE, JSON.stringify({ max: noisy.max, tol: noisy.tolerance }))
 const realError = viewsMod.residual([epsUnit], viewsWithX(12.4 + 1e-6), epsBoxes)
 check('numeric: a 1e-6 discrepancy is NOT within tolerance', realError.within_tolerance === false && realError.max > 1e-7, JSON.stringify({ max: realError.max, tol: realError.tolerance }))
+
+// --- 8e. M2 的 lowering：sheet / column / ring / dome / spire ---
+const M2 = {
+  schema_version: '0.1',
+  unit: 'm',
+  projection: 'first_angle',
+  frame: { up: 'Z', front: '-Y', handed: 'right' },
+  scale_anchor: { pixel_len: 340, real_len: 2.1, ref: 'door_height' },
+  assembly: [
+    { id: 'wall_n', feature: 'sheet', w: { v: 8, conf: 0.8 }, d: { v: 0.24, conf: 0.5 }, h: { v: 3, conf: 0.8 } },
+    { id: 'col_a', feature: 'column', dia: { v: 0.4, conf: 0.7 }, h: { v: 3, conf: 0.7 } },
+    { id: 'ring_a', feature: 'ring', dia: { v: 1.2, conf: 0.6 } },
+    { id: 'dome_a', feature: 'dome', dia: { v: 2, conf: 0.5 } },
+    { id: 'spire_a', feature: 'spire', dia: { v: 1, conf: 0.6 }, h: { v: 2.5, conf: 0.6 } },
+  ],
+}
+const m2 = await call('agh_ortho_emit_ops', M2)
+check('M2: a ring is measured through UNIT_EXTENT, not scale x size (the bug that produced 0.3/0.3/0.9)', (() => { const b = geometry.boxesFromOps([{ op: 'mesh.primitive_add', args: { kind: 'torus', name: 'r', size: 1.2, scale: [1, 1, 1], location: [0, 0, 0] } }])[0]; return Math.abs((b.max[0] - b.min[0]) - 1.5) < 1e-12 && Math.abs((b.max[2] - b.min[2]) - 0.3) < 1e-12 })())
+const m2args = Object.fromEntries(m2.ops.map((o) => [o.args.name, o.args]))
+check('M2: sheet becomes a thin VERTICAL cube, not a plane', m2args.wall_n.kind === 'cube' && JSON.stringify(m2args.wall_n.scale) === '[8,0.24,3]', JSON.stringify(m2args.wall_n))
+check('M2: column becomes a cylinder from dia + h, base on ground', m2args.col_a.kind === 'cylinder' && JSON.stringify(m2args.col_a.scale) === '[0.4,0.4,3]' && JSON.stringify(m2args.col_a.location) === '[0,0,1.5]', JSON.stringify(m2args.col_a))
+check('M2: ring dia means the OUTER diameter (size is divided by 1.25)', m2args.ring_a.kind === 'torus' && Math.abs(m2args.ring_a.size - 0.96) < 1e-12, JSON.stringify(m2args.ring_a))
+check('M2: spire becomes a cone and stays exact (same shape, so approx would be a false claim)', m2args.spire_a.kind === 'cone' && JSON.stringify(m2args.spire_a.scale) === '[1,1,2.5]' && !m2.approx.some((a) => a.feature === 'spire'), JSON.stringify(m2args.spire_a))
+check('M2: dome becomes a uv_sphere and IS recorded as approx', m2args.dome_a_approx.kind === 'uv_sphere' && m2.approx.length === 1 && m2.approx[0].feature === 'dome', JSON.stringify(m2.approx))
+check('M2: the approx object name carries the _approx suffix', m2args.dome_a_approx.name === 'dome_a_approx', m2args.dome_a_approx.name)
+check('M2: approx carries how + error_note, not just a flag', /uv_sphere/.test(m2.approx[0].how) && /hemisphere/.test(m2.approx[0].error_note), m2.approx[0].error_note?.slice(0, 60))
+check('M2: no not_implemented_in_m1 entries are left', !m2.unlowered.some((u) => u.reason_code === 'not_implemented_in_m1'), JSON.stringify(m2.unlowered.map((u) => u.reason_code)))
+check('M2: the primitive gate is reported honestly', /not_applied|applied/.test(m2.primitive_gate ?? ''), m2.primitive_gate)
+
+// column 缺 h：不许凭空给一个高度 —— 这正是 CONTRACT §4.4 样例的情形
+const noColH = await call('agh_ortho_emit_ops', { ...M2, assembly: [{ id: 'col_x', feature: 'column', dia: { v: 0.4 } }] })
+check('M2: a column without h is refused, never invented', noColH.ok === false && noColH.blockers.some((b) => b.code === 'E_ARG_MISSING' && /"col_x"\."h"/.test(b.message)), JSON.stringify(noColH.blockers.map((b) => b.message)))
+check('M2: and h-less is the CONTRACT §4.4 sample itself (a contract gap, surfaced loudly)', /col_x/.test(noColH.blockers[0]?.message ?? ''))
+
+// 作者自己声明的 unsupported 必须归进自己的桶里，而不是掉进"未知原因码"变成 blocking。
+// （这两处 reason_code 曾经不一致，是读代码时发现的潜伏 bug —— 现在有测试兜着。）
+const declaredEmit = await call('agh_ortho_emit_ops', { ...M2, unsupported: [{ feature: 'roof.gable', pitch: { v: 0.42 } }] })
+check('M2: a declared unsupported gets its own reason code', declaredEmit.unlowered.some((u) => u.reason_code === 'declared_by_parameter_file'), JSON.stringify(declaredEmit.unlowered.map((u) => u.reason_code)))
+const declaredFit = (await fitTool.execute({ ...M2, unsupported: [{ feature: 'roof.gable', pitch: { v: 0.42 } }] }, {})).structured
+check('M2: and it stays a warning, never a blocking unknown-reason error', declaredFit.three_state.declared_by_author.length === 1 && !declaredFit.revise_hints.some((h) => h.severity === 'blocking'), JSON.stringify(declaredFit.revise_hints.filter((h) => h.severity === 'blocking').map((h) => h.problem)))
+
+// approx 必须一路传到 fit 的读者面前（CONTRACT §10：降级误差最隐蔽）
+const m2fit = (await fitTool.execute(M2, {})).structured
+check('M2: fit surfaces the approximation as a warning with the gap spelled out', m2fit.three_state.approximated.length === 1 && m2fit.revise_hints.some((h) => h.severity === 'warning' && /dome/.test(h.where)), JSON.stringify(m2fit.three_state.approximated.map((a) => a.object_name)))
+
+// --- 8f. photo_check：把"模型对照片的读数"变成可核对的输出（③ 不再靠自觉）---
+// SAMPLE 的前视图：u 跨度 60（site 主导）、v 跨度 9.3（body 最高）⇒ 60/9.3 ≈ 6.45
+const photoAgree = (await fitTool.execute({ ...FIT_OK, photo_check: { front: { w_over_h_min: 6.3, w_over_h_max: 6.6, note: '主体宽约是高的 6.4 倍' } } }, {})).structured
+check('photo_check: a computed value inside the declared interval passes', photoAgree.verdict === 'fit' && photoAgree.photo_check.rows.length === 1 && photoAgree.photo_check.rows[0].inside === true, JSON.stringify(photoAgree.photo_check.rows))
+const photoDisagree = (await fitTool.execute({ ...FIT_OK, photo_check: { front: { w_over_h_min: 1.8, w_over_h_max: 2.2 } } }, {})).structured
+check('photo_check: a computed value OUTSIDE the declared interval BLOCKS', photoDisagree.verdict === 'revise' && photoDisagree.revise_hints.some((h) => h.where === 'photo_check.front' && h.severity === 'blocking'), JSON.stringify(photoDisagree.revise_hints.filter((h) => h.where.startsWith('photo_check')).map((h) => h.problem)))
+check('photo_check: and it forbids widening the interval or copying the number', /tautology/.test(photoDisagree.revise_hints.find((h) => h.where === 'photo_check.front')?.suggestion ?? ''), photoDisagree.revise_hints.find((h) => h.where === 'photo_check.front')?.suggestion)
+// 区间太宽 = 等于没读。**必须有这条**，否则模型可以靠声明一个很宽的区间让什么都通过（新的同义反复）。
+const photoTooWide = (await fitTool.execute({ ...FIT_OK, photo_check: { front: { w_over_h_min: 1, w_over_h_max: 20 } } }, {})).structured
+check('photo_check: an interval too wide to discriminate is itself blocking', photoTooWide.verdict === 'revise' && photoTooWide.photo_check.rows[0].interval_is_too_wide === true && /cannot discriminate/.test(photoTooWide.revise_hints.find((h) => h.where === 'photo_check.front')?.problem ?? ''), JSON.stringify(photoTooWide.photo_check.rows))
+const photoAbsent = (await fitTool.execute(FIT_OK, {})).structured
+check('photo_check: absent is stated as unchecked, never silently passed', photoAbsent.photo_check.declared_views === 0 && /self-discipline/.test(photoAbsent.photo_check.note), photoAbsent.photo_check.note)
+// 擦边：只超 0.09%，在**申明的写法精度**内算通过 —— 与"残差必须恰好为 0"是同一课。
+// SAMPLE 的 front 算出 6.451613；声明 [5.4, 6.4516]（4 位小数 ⇒ 边界容差 5e-5）。
+const photoRazor = (await fitTool.execute({ ...FIT_OK, photo_check: { front: { w_over_h_min: 5.4, w_over_h_max: 6.4516 } } }, {})).structured
+check('photo_check: a hair outside the WRITTEN bound is inside once the written precision is respected', photoRazor.verdict === 'fit' && photoRazor.photo_check.rows[0].inside === true && photoRazor.photo_check.rows[0].inside_ignoring_bound_precision === false && photoRazor.photo_check.rows[0].bound_tolerance > 0, JSON.stringify(photoRazor.photo_check.rows[0]))
+check('photo_check is part of the intent schema (so it lands in parameters.json too)', Object.hasOwn(tools.find((t) => t.name === 'agh_ortho_emit_ops').parameters.properties, 'photo_check'))
+
+// 尺寸必须为正：0 或负数会让 Blender 翻面/退化，而且是静默错的
+const zeroSize = await call('agh_ortho_emit_ops', { ...SAMPLE, assembly: [{ id: 'zp', feature: 'box', w: { v: 0 }, d: { v: 1 }, h: { v: 1 } }] })
+check('a non-positive size is refused as E_ARG_RANGE', zeroSize.ok === false && zeroSize.blockers.some((b) => b.code === 'E_ARG_RANGE'), JSON.stringify(zeroSize.blockers.map((b) => b.code)))
+const negSize = await call('agh_ortho_emit_ops', { ...SAMPLE, assembly: [{ id: 'zn', feature: 'column', dia: { v: -0.4 }, h: { v: 3 } }] })
+check('a negative size is refused too, not silently flipped', negSize.ok === false && negSize.blockers.some((b) => b.code === 'E_ARG_RANGE'), JSON.stringify(negSize.blockers.map((b) => b.code)))
+
+// 重叠：两个物体几乎占同一空间 = 建模手滑（warning，不是 blocking：墙嵌进楼板是合理的）
+const overlapped = (await fitTool.execute({ ...FIT_OK, assembly: [
+  { id: 'oa', feature: 'box', w: { v: 2 }, d: { v: 2 }, h: { v: 2 }, at: { v: [0, 0, 1] } },
+  { id: 'ob', feature: 'box', w: { v: 2 }, d: { v: 2 }, h: { v: 2 }, at: { v: [0, 0, 1] } },
+] }, {})).structured
+check('overlap: near-total containment says the object is almost invisible', overlapped.overlaps.significant.length === 1 && overlapped.overlaps.significant[0].almost_hidden === true && overlapped.revise_hints.some((h) => h.severity === 'warning' && /contributes almost nothing visible/.test(h.problem)), JSON.stringify(overlapped.overlaps.significant))
+const partialOverlap = (await fitTool.execute({ ...FIT_OK, assembly: [
+  { id: 'pa', feature: 'box', w: { v: 2 }, d: { v: 2 }, h: { v: 2 }, at: { v: [0, 0, 1] } },
+  { id: 'pb', feature: 'box', w: { v: 2 }, d: { v: 2 }, h: { v: 2 }, at: { v: [0.5, 0, 1] } },
+] }, {})).structured
+check('overlap: partial overlap keeps the milder wording (not "almost hidden")', partialOverlap.overlaps.significant[0].almost_hidden === false && partialOverlap.revise_hints.some((h) => /almost the same space/.test(h.problem)), JSON.stringify(partialOverlap.overlaps.significant))
+const touching = (await fitTool.execute({ ...FIT_OK, assembly: [
+  { id: 'ta', feature: 'box', w: { v: 2 }, d: { v: 2 }, h: { v: 2 }, at: { v: [0, 0, 1] } },
+  { id: 'tb', feature: 'box', w: { v: 2 }, d: { v: 2 }, h: { v: 2 }, at: { v: [2, 0, 1] } },
+] }, {})).structured
+check('overlap: objects that merely touch are NOT reported (no noise)', touching.overlaps.significant.length === 0 && touching.overlaps.checked_pairs === 1, JSON.stringify(touching.overlaps))
+// 判定必须用**印出来的那个数**：分数正好 0.5 时，报告会印 `0.5`，那就不能又被列出来
+// （实测被抓到过：未舍入的 0.5000000… 通过了 > 0.5，输出却显示 0.5）。
+const exactHalf = (await fitTool.execute({ ...FIT_OK, assembly: [
+  { id: 'ha', feature: 'box', w: { v: 2 }, d: { v: 2 }, h: { v: 2 }, at: { v: [0, 0, 1] } },
+  { id: 'hb', feature: 'box', w: { v: 2 }, d: { v: 2 }, h: { v: 2 }, at: { v: [1, 0, 1] } },
+] }, {})).structured
+check('overlap: a fraction that PRINTS as 0.5 must not be listed (decision uses the reported value)', exactHalf.overlaps.significant.length === 0, JSON.stringify(exactHalf.overlaps.significant))
+check('overlap: BOTH thresholds are published so a reader can interpret a row itself', touching.overlaps.listing_threshold === 0.5 && touching.overlaps.almost_hidden_threshold === 0.9 && /almost_hidden is a second/.test(touching.overlaps.note), touching.overlaps.note)
 
 // --- 9. 在真实文件系统上再走一遍（内存 fs 会把路径差异糊掉；Windows 的拼接只有真实 IO 才验得出来）---
 const realRoot = join(tmpdir(), `agh-ortho-check-${process.pid}`)

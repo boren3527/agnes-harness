@@ -200,6 +200,43 @@ const DECLARED_UNSUPPORTED = {
   additionalProperties: false,
 }
 
+/**
+ * `photo_check` 的形状：每个视图一个"照片里看起来的宽高比"。
+ *
+ * 必须**声明在 EMIT_OPS_INPUT 之前** —— 后者在模块求值时就要引用它（const 有 TDZ，
+ * 放在后面会 ReferenceError）。
+ *
+ * 六个视图**写成可选属性**，而不是用 `additionalProperties: <schema>`：后者需要 tb()
+ * 递归进 additionalProperties 才带 Kind 标记，那是另一处未覆盖的空档（与 Union 节点同类）。
+ * 显式列出还能顺便校验视图名。
+ */
+const PHOTO_VIEW_READING = {
+  type: 'object',
+  properties: {
+    // **区间，不是一个点。** 实测：同一个模型对同一张照片两次读数给出 0.60 与 0.77（差 28%），
+    // 所以"一个数 + 一个我猜的容差"是假严谨 —— 让模型自己申明它能保证的范围，判定才有意义。
+    w_over_h_min: { type: 'number' },
+    w_over_h_max: { type: 'number' },
+    // 模型自己的备注（它看到了什么、为什么这么读）—— 不加判断，原样带给读者。
+    note: { type: 'string' },
+  },
+  required: ['w_over_h_min', 'w_over_h_max'],
+  additionalProperties: false,
+}
+const PHOTO_CHECK = {
+  type: 'object',
+  properties: {
+    front: PHOTO_VIEW_READING,
+    top: PHOTO_VIEW_READING,
+    left: PHOTO_VIEW_READING,
+    right: PHOTO_VIEW_READING,
+    bottom: PHOTO_VIEW_READING,
+    back: PHOTO_VIEW_READING,
+  },
+  required: [],
+  additionalProperties: false,
+}
+
 const EMIT_OPS_INPUT = {
   type: 'object',
   properties: {
@@ -230,6 +267,10 @@ const EMIT_OPS_INPUT = {
     assembly: { type: 'array', items: ASSEMBLY_ITEM },
     unsupported: { type: 'array', items: DECLARED_UNSUPPORTED },
     unresolved: { type: 'array', items: { type: 'string' } },
+    // 模型**读照片**得到的读数 —— 这是"一口气跑完"里唯一能把照片纳进来的机制：
+    // 它把"像不像照片"从自觉变成有输出、可核对（fit 会拿它与自己算出的 outline 比）。
+    // 每个视图一个"照片里看起来的宽高比"。**不要求全填**（看不到就留空），但填了就要对得上。
+    photo_check: PHOTO_CHECK,
   },
   required: ['schema_version', 'unit', 'projection', 'assembly'],
   additionalProperties: false,
@@ -466,6 +507,14 @@ function leafNumber(item, key, blockers) {
     })
     return null
   }
+  // 尺寸必须为正：0 或负数会让 Blender 翻面/退化，而且是**静默**错的。
+  if (SIZE_KEYS.includes(key) && leaf.v <= 0) {
+    blockers.push({
+      code: 'E_ARG_RANGE',
+      message: `"${item.id}"."${key}" must be greater than zero (got ${leaf.v}); a non-positive size silently degenerates or flips in Blender`,
+    })
+    return null
+  }
   return leaf.v
 }
 
@@ -497,34 +546,133 @@ function buildBox(item, name, blockers) {
   ]
 }
 
+// ---------------------------------------------------------------------------
+// M2 的 lowering：CONTRACT §4.3 里另外五种意图
+//
+// 每个 build 只负责"把意图翻译成 op"；**能力闸门**与**三态记账**在 emitOps 里统一做
+// （见 LOWERING 表里的 `kind` 与 `errorNote`）。
+// ---------------------------------------------------------------------------
+
+/** 目标有没有这种基元。三态：可用 / 不可用 / **无法判定**（活实例的 catalog 不发布 primitives）。 */
+function primitiveAvailable(caps, kind) {
+  const list = Array.isArray(caps?.primitives) ? caps.primitives : null
+  if (!list) {
+    return { ok: true, gated: false, why: 'the live catalog publishes no primitives list, so this could not be gated' }
+  }
+  if (list.includes(kind)) return { ok: true, gated: true, why: null }
+  return { ok: false, gated: true, why: `the target declares primitives ${list.join('/')} and has no "${kind}"` }
+}
+
+/** 把 caps 变成 geometry 侧要的判据。
+ *  **参数侧必须应用与 op 侧相同的闸门**：否则闸门拒绝某项时，op 侧少一个而参数侧多一个
+ *  ⇒ 报成"内部不一致"，把"下游没有这种基元"这个真实原因掩盖成一条假告警。 */
+const kindAvailableFor = (caps) => (kind) => primitiveAvailable(caps, kind).ok
+
+/** 只读取、不报错（用于"可选"的字段，别把可选当缺失）。 */
+function optionalLeaf(item, key) {
+  const leaf = item[key]
+  if (!leaf || typeof leaf !== 'object' || typeof leaf.v !== 'number' || !Number.isFinite(leaf.v)) return null
+  return leaf.v
+}
+
+/** 竖板 / 墙片：**薄的竖向 cube**，不是 plane。
+ *  契约表写的是 plane，但 plane 的法线是 +Z（水平），而 sheet 的语义是竖直面板；
+ *  要在竖直方向立起来就必须发 rotation —— 本 emitter 不发旋转，而且对象一旦旋转，
+ *  `dimensions` 就不再是世界 AABB、尺寸断言会被迫关闭。所以"薄 cube"才是诚实的建模：
+ *  它多出来的那点厚度**就是**面板的厚度，由 `d` 显式给出，不是编的。
+ *  （与 `box` 落到同一个 op —— 意图层的区别在这一层不必体现在 op 上。） */
+function buildSheet(item, name, blockers) {
+  const w = leafNumber(item, 'w', blockers)
+  const h = leafNumber(item, 'h', blockers)
+  const t = leafNumber(item, 'd', blockers) // 面板厚度读 `d`
+  if (w === null || h === null || t === null) return []
+  return [
+    {
+      op: 'mesh.primitive_add',
+      args: { kind: 'cube', name, size: 1, scale: [w, t, h], location: placementOf(item, h) },
+    },
+  ]
+}
+
+/** 柱：cylinder，`dia` 是直径、`h` 是高度。
+ *  **`h` 必须显式给** —— CONTRACT §4.4 的样例里 col_nw 只有 dia+at，没有高度；
+ *  圆柱需要 depth，凭空给一个高度就是编数据。缺失时按普通缺失字段报 E_ARG_MISSING。 */
+function buildColumn(item, name, blockers) {
+  const dia = leafNumber(item, 'dia', blockers)
+  const h = leafNumber(item, 'h', blockers)
+  if (dia === null || h === null) return []
+  return [
+    {
+      op: 'mesh.primitive_add',
+      args: { kind: 'cylinder', name, size: 1, scale: [dia, dia, h], location: placementOf(item, h) },
+    },
+  ]
+}
+
+/** 环：torus。`dia` 是**下游语义里的直径**（manifest 写着 diameter/footprint）。
+ *  注意下游把管径钉死在 size/8，所以任何一个环都能被精确表达 —— 不需要 approx。 */
+/** 环：torus。**`dia` 是"外形直径"** —— 人会这么理解（"这个圈 1.2 米"指的是外廓）。
+ *
+ *  但下游的 `size` 是**主直径**：`major_radius = size/2`、`minor_radius = size/8`
+ *  ⇒ 外廓半径 = size/2 + size/8 = 0.625 × size ⇒ **外径 = 1.25 × size**。
+ *  实测抓到过：写 `dia 1.2` 却量到外径 **1.5**（差 25%）—— 字段名承诺的和结果不一致。
+ *  所以这里除掉那个系数，让 `dia` 真的等于外径；管径由下游钉死在 size/8 = dia/10。
+ *  （`UNIT_EXTENT.torus` 不动 —— 它记的是**下游的真相**，本来就该是 1.25/1.25/0.25。） */
+const TORUS_OUTER_OVER_SIZE = 1.25
+
+function buildRing(item, name, blockers) {
+  const dia = leafNumber(item, 'dia', blockers)
+  if (dia === null) return []
+  return [
+    {
+      op: 'mesh.primitive_add',
+      args: { kind: 'torus', name, size: dia / TORUS_OUTER_OVER_SIZE, scale: [1, 1, 1], location: placementOf(item) },
+    },
+  ]
+}
+
+/** 穹顶：下游只有**整球**，没有半球 —— 这是唯一真正的 approx。
+ *  做法：把球心放在基面上，于是上半球就是穹顶、下半球埋在地下（拿到正确的**地上轮廓**）。
+ *  代价：对象自身的 bbox 是 (dia, dia, dia)，不等于穹顶的高度 —— 这一点写进 error_note，
+ *  并且对象名带 `_approx` 后缀，让产物自带自证（CONTRACT §5.1 的强制做法）。 */
+function buildDome(item, name, blockers) {
+  const dia = leafNumber(item, 'dia', blockers)
+  if (dia === null) return []
+  return [
+    // placementOf 在没有 at/z 时给的是 z=0 —— 对穹顶正好就是"球心在基面"这个约定。
+    { op: 'mesh.primitive_add', args: { kind: 'uv_sphere', name, size: dia, scale: [1, 1, 1], location: placementOf(item) } },
+  ]
+}
+
+/** 尖顶 / 锥体：cone。锥体与 cone **同形**，所以是 exact —— 把它标成 approx 等于谎报降级。
+ *  （契约表把它写成 approx，是因为当时设想它用于近似坡屋顶；那种场景应该用 `roof.gable`，
+ *   而它仍然是 unsupported。） */
+function buildSpire(item, name, blockers) {
+  const dia = leafNumber(item, 'dia', blockers)
+  const h = leafNumber(item, 'h', blockers)
+  if (dia === null || h === null) return []
+  return [
+    {
+      op: 'mesh.primitive_add',
+      args: { kind: 'cone', name, size: 1, scale: [dia, dia, h], location: placementOf(item, h) },
+    },
+  ]
+}
+
 const LOWERING = {
-  slab: { status: 'exact', build: buildSlab },
-  box: { status: 'exact', build: buildBox },
-  sheet: {
-    status: 'unsupported',
-    reasonCode: 'not_implemented_in_m1',
-    reason: 'downstream has plane; this emitter does not lower sheet yet',
-  },
-  column: {
-    status: 'unsupported',
-    reasonCode: 'not_implemented_in_m1',
-    reason: 'downstream has cylinder; this emitter does not lower column yet',
-  },
-  ring: {
-    status: 'unsupported',
-    reasonCode: 'not_implemented_in_m1',
-    reason: 'downstream has torus; this emitter does not lower ring yet',
-  },
+  slab: { status: 'exact', kind: 'plane', build: buildSlab },
+  box: { status: 'exact', kind: 'cube', build: buildBox },
+  sheet: { status: 'exact', kind: 'cube', build: buildSheet },
+  column: { status: 'exact', kind: 'cylinder', build: buildColumn },
+  ring: { status: 'exact', kind: 'torus', build: buildRing },
   dome: {
-    status: 'unsupported',
-    reasonCode: 'not_implemented_in_m1',
-    reason: 'downstream has uv_sphere; the approx lowering is M2',
+    status: 'approx',
+    kind: 'uv_sphere',
+    build: buildDome,
+    errorNote:
+      'a dome is a hemisphere, but the downstream has only a full uv_sphere: the sphere is centred on the base plane, so its lower half is buried and its upper half gives the dome. The object itself therefore measures (dia, dia, dia), not the dome height.',
   },
-  spire: {
-    status: 'unsupported',
-    reasonCode: 'not_implemented_in_m1',
-    reason: 'downstream has cone; the approx lowering is M2',
-  },
+  spire: { status: 'exact', kind: 'cone', build: buildSpire },
   'roof.gable': {
     status: 'unsupported',
     reasonCode: 'no_downstream_op',
@@ -568,6 +716,8 @@ function emitOps(params, caps) {
   const blockers = []
   const notes = []
   const unlowered = []
+  // 真·approx 的记账（CONTRACT §5.1：对象名带 `_approx` 之外，how / error_note 也必须传出去）
+  const approx = []
   const usedNames = new Set()
   const ops = []
 
@@ -619,6 +769,17 @@ function emitOps(params, caps) {
       continue
     }
 
+    // 能力闸门：目标没这种基元就不硬发，而是报成 unlowered（这样"下游做不到"与"我还没做"
+    // 仍然分得开）。注意**活的 catalog 不发布 primitives 列表** ⇒ 那时 gated=false（无法判定），
+    // 我们仍然发出，并在能力来源里如实标注，而不是假装判定过。
+    if (rule.kind) {
+      const gate = primitiveAvailable(caps, rule.kind)
+      if (!gate.ok) {
+        unlowered.push({ id, feature, reason_code: 'no_downstream_primitive', reason: gate.why })
+        continue
+      }
+    }
+
     let name = objectName(id, rule.status)
     if (usedNames.has(name)) {
       const renamed = uniqueName(name, usedNames)
@@ -629,15 +790,19 @@ function emitOps(params, caps) {
 
     const built = rule.build(item, name, blockers)
     if (built.length > 0 && !item.at) {
-      const assumed =
-        feature === 'box'
-          ? `centre z = h/2 = ${((Number(item.h?.v) || 0) / 2).toFixed(3)}`
-          : '落在 z = 0 平面'
+      // 哪些意图有"高度"就用 h/2，其余落在 z = 0 平面。别写死成 box —— M2 之后
+      // sheet / column / spire 都有 h。
+      const h = Number(item.h?.v)
+      const assumed = Number.isFinite(h) ? `centre z = h/2 = ${(h / 2).toFixed(3)}` : '落在了 z = 0 平面'
       notes.push(
         `"${id}" had no "at", so its placement was assumed to be base-on-ground (${assumed}) — assert or override this`,
       )
     }
     for (const op of built) ops.push(op)
+    // 三态记账：approx 的误差必须落到**产物**里，而不是只活在 lowering 表里。
+    if (built.length > 0 && rule.status === 'approx') {
+      approx.push({ id, feature, object_name: name, how: rule.kind, error_note: rule.errorNote ?? null })
+    }
   }
 
   // 作者自己声明的 unsupported 必须一起传下去（CONTRACT §10：这张清单要一路到用户面前）。
@@ -694,6 +859,12 @@ function emitOps(params, caps) {
     batches,
     max_ops_per_batch: maxOpsPerBatch,
     unlowered,
+    // 真·approx 的误差（对象名已带 `_approx` 后缀）。必须一路传到用户面前：CONTRACT §10 说
+    // "降级误差可能最大、且最隐蔽"，所以它不能只活在 lowering 表里。
+    approx,
+    // 能力闸门到底有没有生效？活的 catalog **不发布** primitives 列表 ⇒ 闸门没生效。
+    // 必须写出来，否则读者会以为"发出去的每个基元都被确认过存在"。
+    primitive_gate: Array.isArray(caps?.primitives) ? 'applied' : 'not_applied: the target publishes no primitives list',
     // —— 输入侧的坦白，原样带出 ——
     assumptions: Array.isArray(params.assumptions) ? params.assumptions : [],
     unresolved: Array.isArray(params.unresolved) ? params.unresolved : [],
@@ -710,7 +881,7 @@ async function assembleArtifacts(args, createdAt, tctx) {
   const views = sixViewRects(boxes)
   const placement = sheetPlacement(args.projection)
   const scale = commonScale(views)
-  const fromParams = extentsFromParams(Array.isArray(args.assembly) ? args.assembly : [])
+  const fromParams = extentsFromParams(Array.isArray(args.assembly) ? args.assembly : [], kindAvailableFor(caps))
   const aligned = fromParams.length === boxes.length
   const checked = aligned
     ? residual(fromParams, views, boxes)
@@ -775,8 +946,13 @@ async function assembleArtifacts(args, createdAt, tctx) {
   files.push({
     name: 'ops.json',
     text: `${JSON.stringify(emission, null, 2)}\n`,
-    preview: `ops 批次：${emission.op_count} 个 op、${emission.batches} 批，目标 ${emission.target_capability_set}；${emission.unlowered.length} 项未 lower（见 unlowered 的原因码）`,
-    meta: { op_count: emission.op_count, batches: emission.batches, target_capability_set: emission.target_capability_set },
+    preview: `ops 批次：${emission.op_count} 个 op、${emission.batches} 批，目标 ${emission.target_capability_set}；${emission.unlowered.length} 项未 lower、${(emission.approx ?? []).length} 项 approx（对象名带 _approx）；闸门 ${emission.primitive_gate}`,
+    meta: {
+      op_count: emission.op_count,
+      batches: emission.batches,
+      target_capability_set: emission.target_capability_set,
+      approx_count: (emission.approx ?? []).length,
+    },
   })
   files.push({
     name: 'verify.json',
@@ -834,6 +1010,9 @@ async function assembleArtifacts(args, createdAt, tctx) {
       assumptions: Array.isArray(args.assumptions) ? args.assumptions : [],
       // 降级误差必须一路传到最终用户面前（CONTRACT §10）：
       unlowered: emission.unlowered,
+      // 真·approx 单独列出来：它**建出来了**，只是形状被近似过 —— 与 unlowered 不是一件事。
+      approximated: emission.approx ?? [],
+      primitive_gate: emission.primitive_gate ?? null,
       unresolved: Array.isArray(args.unresolved) ? args.unresolved : [],
     },
   }
@@ -865,6 +1044,46 @@ async function retentionPlan(fs, currentRunId) {
 // ---------------------------------------------------------------------------
 
 const round6 = (n) => Math.round(n * 1e6) / 1e6
+
+/** 尺寸类字段：必须为正。z / at 不在此列 —— 负标高（地下室）是合法的。 */
+const SIZE_KEYS = ['w', 'd', 'h', 'dia']
+
+/**
+ * 模型申明的读数区间**允许有多宽**（相对半宽）。
+ *
+ * 0.30 不是猜的，是**实测来的**：同一个模型对**同一张照片**两次读数给出 w_over_h = 0.60 与 0.77，
+ * 相差 28%。也就是说它自己的读数噪声就在这个量级。三件事随之确定：
+ *
+ *  1. 容差不能小于噪声 —— 原先固定 ±25% 恰好在噪声里，那次"13.4% 通过"其实没有意义。
+ *  2. 所以判定改成"**算出来的值落不落在模型申明的区间里**"，而不是与一个点比。
+ *  3. 但申明的区间**必须有上限**，否则声明 ±100% 就什么都通过了 —— 那是新的同义反复。
+ *
+ * 定位要说清楚：**这一档只能抓量级性的错误**（比如差 2 倍），
+ * **certify 不了 10% 级别的一致** —— 那是眼睛读数根本做不到的事。载荷里必须这么写，不能含糊。
+ */
+const PHOTO_CHECK_MAX_RELATIVE_HALF_WIDTH = 0.3
+
+/**
+ * 边界容差的绝对上限（相对区间中点）。
+ *
+ * **实测抓到过一次**：模型申明区间 [0.55, 0.78]、几何算出 0.780736 —— **只超上界 0.0007（0.09%）**，
+ * 却被判成和"差 2 倍"一样的 blocking。这是**用比输入精度更高的判据**去比，
+ * 与当初"残差必须恰好为 0"（1 ulp 把闭环堵死）**是同一类错误，只是换了个地方**。
+ */
+const PHOTO_CHECK_MAX_BOUND_TOLERANCE_RELATIVE = 0.02
+
+/** 模型写下的数有几位小数，它的边界就有多大误差：写 `0.78` 就是 2 位 ⇒ ±0.005。
+ *  再封顶在中点的 2%，免得写整数（`1` ⇒ 0.5）时容差宽得失去意义。 */
+function declaredBoundTolerance(lo, hi) {
+  const decimalsOf = (n) => {
+    const s = String(Math.abs(n))
+    const i = s.indexOf('.')
+    return i < 0 ? 0 : s.length - i - 1
+  }
+  const quantum = 0.5 * 10 ** -Math.max(decimalsOf(lo), decimalsOf(hi))
+  const mid = Math.abs((lo + hi) / 2)
+  return Math.min(quantum, PHOTO_CHECK_MAX_BOUND_TOLERANCE_RELATIVE * mid)
+}
 
 /**
  * 意图层的字段名 —— 从 schema 直接推出来，所以将来**加一个真实参数字段**会自动进入产物，
@@ -899,6 +1118,7 @@ const BLOCKER_SUGGESTIONS = {
     'set projection to "first_angle" (GB/T 17451) or "third_angle" (ANSI) — the two place the views in opposite directions',
   E_LIMIT_OBJECTS: 'split the model into stages, or raise the limit after measuring it with agh_ortho_catalog',
   E_ARG_MISSING: 'that quantity is missing: give it a numeric leaf { v: <number>, conf: <0..1> }',
+  E_ARG_RANGE: 'that size must be greater than zero — a non-positive size silently degenerates or flips in Blender',
 }
 
 /** 逐条校验。**每一条都带 ok**，所以报告能指出"哪一条不过"，而不是一句"不合法"。 */
@@ -947,10 +1167,14 @@ function threeState(emission) {
       .map(([f]) => f),
     unlowered_total: un.length,
     downstream_cannot: pick('no_downstream_op'),
+    downstream_has_no_primitive: pick('no_downstream_primitive'),
     emitter_not_yet: pick('not_implemented_in_m1'),
-    declared_by_author: pick('declared_unsupported'),
+    declared_by_author: pick('declared_by_parameter_file'),
     needs_attention: [...pick('unknown_feature'), ...pick('undecided')],
-    note: 'downstream_cannot and emitter_not_yet are different problems with different fixes: keep them apart.',
+    // 真·approx：**已经 low 出来了，但形状被近似过** —— 与 unlowered 是两件事。
+    approximated: (emission.approx ?? []).map((a) => ({ id: a.id, feature: a.feature, object_name: a.object_name, how: a.how, error_note: a.error_note })),
+    primitive_gate: emission.primitive_gate ?? null,
+    note: 'downstream_cannot, downstream_has_no_primitive and emitter_not_yet are different problems with different fixes: keep them apart. approximated means it WAS built, only approximately.',
   }
 }
 
@@ -981,11 +1205,20 @@ function declaredConfidence(params) {
 function anchorReport(params) {
   const a = params.scale_anchor
   const ratiosOnly = Array.isArray(params.assumptions) && params.assumptions.includes('proportions_only')
+  // **一条真米数不需要锚点**，只要它明说"这些值是设计给定的"。
+  // 实测抓到过：一轮 M2 尺寸校验用的就是真米数（8 米的板、3 米的柱），却被"缺 scale_anchor"
+  // 判成 blocking —— 那个检查默认了"参数一定来自照片"，而设计给定的尺寸根本不需要锚点。
+  const authored = Array.isArray(params.assumptions) && params.assumptions.includes('authored_dimensions')
   if (!a || typeof a.pixel_len !== 'number' || typeof a.real_len !== 'number' || a.pixel_len === 0) {
     return {
       present: false,
       declared_ratios_only: ratiosOnly,
-      consequence: 'every metre in this file is really a RATIO until a scale_anchor grounds it',
+      declared_authored: authored,
+      consequence: ratiosOnly
+        ? 'these metres are declared to be ratios, not absolute lengths'
+        : authored
+          ? 'these metres are declared to be authored (a design brief), not measured from a photograph'
+          : 'every metre in this file is really a RATIO until a scale_anchor grounds it',
       how_to_fix:
         'name a length you know in the photo (a standard door is about 2.1 m) and give its pixel_len and real_len',
     }
@@ -1002,6 +1235,115 @@ function anchorReport(params) {
 }
 
 /**
+ * 把"模型对照片的读数"与**我们自己算出来的数值轮廓**对一遍。
+ *
+ * 这是"一口气跑完"里唯一能把照片纳进来的机制：模型看得见照片、看不见我们的图，
+ * 所以只能借它**说出来的数字**当输入。它躲不掉 —— 要么改几何、要么改它自己的读数，
+ * 两者都摆在明面上。而随手填一个跟几何一样的数字，等于承认"我按模型反推的"，
+ * 那就等于没读（这一点写在建议里，逼它自己说清楚）。
+ */
+function photoCheckFindings(params, outline) {
+  const declared = params.photo_check
+  if (!declared || typeof declared !== 'object' || Object.keys(declared).length === 0) {
+    return {
+      declared_views: 0,
+      max_relative_half_width: PHOTO_CHECK_MAX_RELATIVE_HALF_WIDTH,
+      rows: [],
+      note: 'no photo_check: nothing in the parameter file records what the model saw in the photograph, so the shape-vs-photo step stays unchecked self-discipline',
+    }
+  }
+  const computed = Object.fromEntries((outline ?? []).map((o) => [o.view, o.w_over_h]))
+  const rows = []
+  for (const [view, reading] of Object.entries(declared)) {
+    if (!reading || typeof reading.w_over_h_min !== 'number' || typeof reading.w_over_h_max !== 'number') continue
+    const lo = Math.min(reading.w_over_h_min, reading.w_over_h_max)
+    const hi = Math.max(reading.w_over_h_min, reading.w_over_h_max)
+    const mid = (lo + hi) / 2
+    const relHalf = mid === 0 ? Infinity : (hi - lo) / 2 / mid
+    const mine = computed[view]
+    const boundTol = declaredBoundTolerance(lo, hi)
+    rows.push({
+      view,
+      declared_interval: [lo, hi],
+      relative_half_width: Number.isFinite(relHalf) ? round6(relHalf) : null,
+      interval_is_too_wide: relHalf > PHOTO_CHECK_MAX_RELATIVE_HALF_WIDTH,
+      computed: typeof mine === 'number' ? mine : null,
+      // 按**申明的精度**判：写 0.78 就是 2 位小数 ⇒ 边界有 ±0.005 的写法误差。
+      // 同时如实给出不含容差的严格判定，让"擦边"这件事看得见。
+      bound_tolerance: round6(boundTol),
+      inside: typeof mine === 'number' ? mine >= lo - boundTol && mine <= hi + boundTol : null,
+      inside_ignoring_bound_precision: typeof mine === 'number' ? mine >= lo && mine <= hi : null,
+      note: reading.note ?? null,
+    })
+  }
+  return {
+    declared_views: rows.length,
+    max_relative_half_width: PHOTO_CHECK_MAX_RELATIVE_HALF_WIDTH,
+    rows,
+    note: 'declared_interval comes from the model reading the photograph; computed comes from this model\'s own projection of its own parameters. This tier can catch errors of magnitude, not certify agreement to within 10% - an eyeballed silhouette cannot support that.',
+  }
+}
+
+/**
+ * 包围盒重叠：抓"两个物体几乎占同一空间"这类建模手滑。是 warning 不是 blocking ——
+ * 墙嵌进楼板是合理的。
+ *
+ * **两个阈值，且都必须写进载荷**：>0.5 才列出来，>0.9 才标 almost_hidden。
+ * 实测被抓到过：早期只解释了 0.5、`almost_hidden` 的阈值一个字没写 ——
+ * 于是 0.8845 那一行"报了却不算 almost_hidden"，读者无法自己判断，只能拒绝背书。
+ * **载荷里的每个数字都要能被读者自己解释，否则它就是不可核的。**
+ */
+const OVERLAP_LISTING_THRESHOLD = 0.5
+const OVERLAP_ALMOST_HIDDEN_THRESHOLD = 0.9
+
+function overlapFindings(boxes) {
+  const xs = boxes ?? []
+  if (xs.length > 200) {
+    return {
+      checked_pairs: 0,
+      listing_threshold: OVERLAP_LISTING_THRESHOLD,
+      almost_hidden_threshold: OVERLAP_ALMOST_HIDDEN_THRESHOLD,
+      significant: [],
+      note: `skipped: ${xs.length} objects would be ${(xs.length * (xs.length - 1)) / 2} pairs`,
+    }
+  }
+  const vol = (b) => (b.max[0] - b.min[0]) * (b.max[1] - b.min[1]) * (b.max[2] - b.min[2])
+  const significant = []
+  let pairs = 0
+  for (let i = 0; i < xs.length; i += 1) {
+    for (let j = i + 1; j < xs.length; j += 1) {
+      pairs += 1
+      const a = xs[i]
+      const b = xs[j]
+      const ov = [0, 1, 2].map((k) => Math.min(a.max[k], b.max[k]) - Math.max(a.min[k], b.min[k]))
+      if (ov.some((v) => v <= 0)) continue
+      const smaller = Math.min(vol(a), vol(b))
+      if (smaller <= 0) continue
+      const fraction = (ov[0] * ov[1] * ov[2]) / smaller
+      // **判定必须用"报告里印出来的那个数"**。实测被抓到过：未舍入的 0.5000000… 通过了 `> 0.5`，
+      // 而输出把分数舍成 `0.5` —— 于是出现"印着 0.5 却被列出来"这种读者无法自行解释的行。
+      // 判定与报告必须是同一个数（这是"载荷里每个数字都要能自证"那条的又一面）。
+      const reported = round6(fraction)
+      if (reported > OVERLAP_LISTING_THRESHOLD) {
+        significant.push({
+          a: a.name,
+          b: b.name,
+          overlap_fraction_of_smaller: reported,
+          almost_hidden: reported > OVERLAP_ALMOST_HIDDEN_THRESHOLD,
+        })
+      }
+    }
+  }
+  return {
+    checked_pairs: pairs,
+    listing_threshold: OVERLAP_LISTING_THRESHOLD,
+    almost_hidden_threshold: OVERLAP_ALMOST_HIDDEN_THRESHOLD,
+    significant,
+    note: `listed only when more than ${OVERLAP_LISTING_THRESHOLD} of the smaller object sits inside the other; almost_hidden is a second, stricter threshold at ${OVERLAP_ALMOST_HIDDEN_THRESHOLD}, so an entry can be listed with almost_hidden false. Objects that merely touch are not listed.`,
+  }
+}
+
+/**
  * 生成"改哪里"的具体指向 —— **这是闭环能收敛的关键**。
  * 报告只说"不合理"的话，模型只能重猜，循环就退化成随机游走。
  *
@@ -1010,7 +1352,7 @@ function anchorReport(params) {
  * 特别地：内部不一致类的 hint 会明确写"**不要靠调参数去凑**"。那说明是代码的 bug；
  * 调参数只会为了迎合一个出错的现场，把本来正确的模型改歪。
  */
-function reviseHints(params, emission, caps, { checked, aligned, fromParams }) {
+function reviseHints(params, emission, caps, { checked, aligned, fromParams, outline, overlaps }) {
   const hints = []
   const add = (severity, where, problem, suggestion, evidence) => {
     const hint = { severity, where, problem, suggestion }
@@ -1044,21 +1386,23 @@ function reviseHints(params, emission, caps, { checked, aligned, fromParams }) {
   }
 
   const anchor = anchorReport(params)
-  if (!anchor.present && !anchor.declared_ratios_only) {
+  if (!anchor.present && !anchor.declared_ratios_only && !anchor.declared_authored) {
     add(
       'blocking',
       'scale_anchor',
       'no scale_anchor, so every metre is really a ratio',
-      `${anchor.how_to_fix}; or declare assumptions:["proportions_only"] if proportions are all you want`,
+      `${anchor.how_to_fix}; or declare assumptions:["proportions_only"] if proportions are all you want, or assumptions:["authored_dimensions"] if the values are a design brief rather than something read off a photograph`,
     )
   }
 
   for (const u of emission.unlowered) {
     if (u.reason_code === 'no_downstream_op') {
       add('warning', String(u.id), `the downstream cannot express "${u.feature}" (${u.reason})`, 'drop it, or declare it in unresolved[] so the gap reaches the reader instead of being silently lost')
+    } else if (u.reason_code === 'no_downstream_primitive') {
+      add('warning', String(u.id), `the target has no primitive for "${u.feature}" (${u.reason})`, 'drop it, or declare it in unresolved[]')
     } else if (u.reason_code === 'not_implemented_in_m1') {
       add('warning', String(u.id), `this emitter cannot lower "${u.feature}" yet (${u.reason})`, 'drop it for now, or declare it in unresolved[]')
-    } else if (u.reason_code === 'declared_unsupported') {
+    } else if (u.reason_code === 'declared_by_parameter_file') {
       add('warning', String(u.id), 'you declared this unsupported yourself', 'nothing to do — it is already reported')
     } else if (u.reason_code === 'undecided') {
       // repeat/array 这类"还没定"的情况：不是词汇表问题，也不该判 blocking。
@@ -1085,6 +1429,50 @@ function reviseHints(params, emission, caps, { checked, aligned, fromParams }) {
   const maxObjects = caps?.limits?.maxObjects
   if (typeof maxObjects === 'number' && emission.op_count > maxObjects) {
     add('blocking', 'assembly', `${emission.op_count} objects exceeds the target limit of ${maxObjects}`, 'split the model, or raise the limit after measuring it with agh_ortho_catalog')
+  }
+
+  // 真·approx：它**建出来了**，但形状被近似过。降级误差可能最大也最隐蔽（CONTRACT §10），
+  // 所以每条都给一条 warning，把 how / error_note 摆到读者面前 —— 而且对象名已带 `_approx`。
+  for (const a of emission.approx ?? []) {
+    add('warning', String(a.id), `"${a.feature}" was built as "${a.object_name}" with an approximation (${a.how})`, `the gap is baked into the object name on purpose; ${a.error_note ?? 'see CONTRACT §5.1'} — either accept it, or declare it in unresolved[]`)
+  }
+
+  // ③ 那一关：模型写下的照片读数区间 vs 我们算出来的轮廓。
+  // **这是把照片纳进自动循环的唯一机制。** 判定是"落在它申明的区间里"，不是"与一个点比"。
+  const photo = photoCheckFindings(params, outline ?? [])
+  for (const row of photo.rows) {
+    if (row.interval_is_too_wide) {
+      add(
+        'blocking',
+        `photo_check.${row.view}`,
+        `the declared interval ${row.declared_interval[0]}..${row.declared_interval[1]}:1 is wider than ±${Math.round(PHOTO_CHECK_MAX_RELATIVE_HALF_WIDTH * 100)}%, so it cannot discriminate anything`,
+        'read the photograph again and give a tighter interval — an interval that wide passes everything, which is the same as not having read it',
+      )
+      continue
+    }
+    if (row.inside === false) {
+      const nearMiss = row.inside_ignoring_bound_precision === false
+      add(
+        'blocking',
+        `photo_check.${row.view}`,
+        `your reading of the photograph is ${row.declared_interval[0]}..${row.declared_interval[1]}:1, but this model projects ${row.computed}:1 — outside that interval${nearMiss ? ` (and beyond the ±${row.bound_tolerance} the written precision allows)` : ''}`,
+        'reconcile: either the geometry is wrong or your reading is. Do NOT widen the interval or copy the computed number across — either turns this check into a tautology',
+      )
+    }
+  }
+
+  // 建模手滑：两个物体几乎占同一空间
+  for (const o of overlaps?.significant ?? []) {
+    add(
+      'warning',
+      String(o.b),
+      o.almost_hidden
+        ? `"${o.b}" sits ${Math.round(o.overlap_fraction_of_smaller * 100)}% inside "${o.a}" — it contributes almost nothing visible from any direction`
+        : `"${o.a}" and "${o.b}" occupy almost the same space (${Math.round(o.overlap_fraction_of_smaller * 100)}% of the smaller one is inside the other)`,
+      o.almost_hidden
+        ? 'confirm this is intentional (a face mark sitting on a head block is); otherwise it is a placement error that the front view would hide'
+        : 'check for a duplicated or misplaced object',
+    )
   }
 
   const blocking = hints.filter((h) => h.severity === 'blocking').length
@@ -1261,7 +1649,7 @@ export const runtime = {
         const emission = emitOps(args, caps)
         const boxes = boxesFromOps(emission.ops)
         const views = sixViewRects(boxes)
-        const fromParams = extentsFromParams(Array.isArray(args.assembly) ? args.assembly : [])
+        const fromParams = extentsFromParams(Array.isArray(args.assembly) ? args.assembly : [], kindAvailableFor(caps))
         const fromOps = extentsFromBoxes(boxes)
         const aligned = fromParams.length === fromOps.length
         const checked = aligned
@@ -1362,14 +1750,16 @@ export const runtime = {
         const views = sixViewRects(boxes)
         const placement = sheetPlacement(args.projection)
         const scale = commonScale(views)
-        const fromParams = extentsFromParams(Array.isArray(args.assembly) ? args.assembly : [])
+        const fromParams = extentsFromParams(Array.isArray(args.assembly) ? args.assembly : [], kindAvailableFor(caps))
         const fromOps = extentsFromBoxes(boxes)
         const aligned = fromParams.length === fromOps.length
         const checked = aligned
           ? residual(fromParams, views, boxes)
           : { max: Infinity, worst: 'parameter/ops list misalignment', rows: [] }
         const numericOk = emission.ok && aligned && checked.within_tolerance
-        const revise = reviseHints(args, emission, caps, { checked, aligned, fromParams })
+        const outline = numericOutline(views)
+        const overlaps = overlapFindings(boxes)
+        const revise = reviseHints(args, emission, caps, { checked, aligned, fromParams, outline, overlaps })
         const validation = validationReport(args, emission, caps)
         const verdict = numericOk && validation.ok && revise.blocking === 0 ? 'fit' : 'revise'
 
@@ -1391,7 +1781,11 @@ export const runtime = {
             rows: checked.rows,
             caveats: VERIFY_CAVEATS,
           },
-          outline: numericOutline(views).map((o) => ({ ...o, sheet: placement[o.view] ?? null })),
+          outline: outline.map((o) => ({ ...o, sheet: placement[o.view] ?? null })),
+          // ③ 那一关的可核部分：模型写下的照片读数 vs 我们算出来的轮廓。
+          photo_check: photoCheckFindings(args, outline),
+          // 建模手滑（warning 级）
+          overlaps,
           declared_relative_confidence: declaredConfidence(args),
           anchor: anchorReport(args),
           target_capability_set: emission.target_capability_set,

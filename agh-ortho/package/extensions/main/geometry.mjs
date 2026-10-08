@@ -25,16 +25,70 @@ export function placementOf(item, h) {
   return [0, 0, FINITE(h) ? h / 2 : 0]
 }
 
-/** 一个 assembly item 是否会被 lowering 成 op —— 两条路径必须用同一个判定，否则会错位。 */
-export function lowersToOp(item) {
-  if (!item || typeof item !== 'object') return false
-  if (item.repeat !== undefined) return false
-  if (item.feature === 'slab') return FINITE(item.w?.v) && FINITE(item.d?.v)
-  if (item.feature === 'box') return FINITE(item.w?.v) && FINITE(item.d?.v) && FINITE(item.h?.v)
-  return false
+/**
+ * 每种意图在**参数侧**的几何：lower 出来是什么尺寸、放在哪。
+ *
+ * 它必须与 `index.mjs` 里 LOWERING 的每个 build 产出**完全一致的数** —— 这是 numeric 校验的
+ * 立足点：一侧读参数、另一侧读 ops，两条独立路径比同一件事。
+ * 所以**每加一种 intent，这里也要加一行** —— 这是"独立"的代价，也正是它能抓到转写错误的原因。
+ * （`placementOf` 是两条路径共享的落位规则，那是已知盲区，见 notes。）
+ */
+const boxLike = (it) =>
+  FINITE(it.w?.v) && FINITE(it.d?.v) && FINITE(it.h?.v)
+    ? { size: [it.w.v, it.d.v, it.h.v], base: placementOf(it, it.h.v) }
+    : null
+const diaLike = (it, needsHeight) => {
+  if (!FINITE(it.dia?.v)) return null
+  if (needsHeight && !FINITE(it.h?.v)) return null
+  return { size: [it.dia.v, it.dia.v, it.h.v], base: placementOf(it, it.h.v) }
 }
 
-/** lowering 的产物 → 轴对齐包围盒。平面在 Z 上零厚（下游 plane 的 scale 第二/三参不影响厚度）。 */
+const PARAM_SIDE_GEOMETRY = {
+  // 板：w × d，Z 上零厚
+  slab: (it) => (FINITE(it.w?.v) && FINITE(it.d?.v) ? { size: [it.w.v, it.d.v, 0], base: placementOf(it, undefined) } : null),
+  // 体块 / 竖板：w × d × h（sheet 的 d 是板厚）
+  box: boxLike,
+  sheet: boxLike,
+  // 柱 / 锥体：dia × dia × h
+  column: (it) => diaLike(it, true),
+  spire: (it) => diaLike(it, true),
+  // 环：`dia` 是**外形**直径 ⇒ 期望尺寸直接是 dia（下游的 size 只是实现细节）。
+  // z 跨度 = 2 × 管半径 = 2 × (size/8) = 2 × (dia/1.25/8) = 0.2 × dia。
+  ring: (it) => (FINITE(it.dia?.v) ? { size: [it.dia.v, it.dia.v, it.dia.v * 0.2], base: placementOf(it, undefined) } : null),
+  // 穹顶：整个球，直径 dia，球心落在基面
+  dome: (it) => (FINITE(it.dia?.v) ? { size: [it.dia.v, it.dia.v, it.dia.v], base: placementOf(it, undefined) } : null),
+}
+
+/** 每种意图要用的下游基元 —— 用来让参数侧应用**与 op 侧相同的闸门**。
+ *  不这么做的话，闸门一旦拒绝某项，op 侧少一个而参数侧多一个 ⇒ 报成"内部不一致"，
+ *  把"下游没有这种基元"这个真实原因掩盖成一条假告警。 */
+const PARAM_KIND = {
+  slab: 'plane',
+  box: 'cube',
+  sheet: 'cube',
+  column: 'cylinder',
+  ring: 'torus',
+  dome: 'uv_sphere',
+  spire: 'cone',
+}
+
+/** 一个 assembly item 是否会被 lowering 成 op —— 两条路径必须用同一个判定，否则会错位。 */
+export function lowersToOp(item, kindAvailable = () => true) {
+  if (!item || typeof item !== 'object') return false
+  if (item.repeat !== undefined) return false
+  const rule = PARAM_SIDE_GEOMETRY[item.feature]
+  if (!rule || !rule(item)) return false
+  const kind = PARAM_KIND[item.feature]
+  return kind === undefined ? true : kindAvailable(kind) === true
+}
+
+/** lowering 的产物 → 轴对齐包围盒。
+ *
+ *  **每种基元的 bbox 不是 `scale × size`**：torus 是 (1.25, 1.25, 0.25) × size、plane 在 Z 上零厚。
+ *  所以这里必须查 `UNIT_EXTENT`（与场景读回那边**同一张表**）。
+ *  实测抓到过：查表之前，一个 ring 在 op 侧被算成 (size,size,size)、在参数侧是 (1.5,1.5,0.3)，
+ *  于是 numeric 报出 0.3/0.3/0.9 三个假不一致 —— 而它其实只是两张表不同步。
+ *  （旧实现在这里对 plane 打了特例补丁；查表之后那个特例自然消失。） */
 export function boxesFromOps(ops) {
   const boxes = []
   for (const op of ops ?? []) {
@@ -43,13 +97,10 @@ export function boxesFromOps(ops) {
     const size = FINITE(a.size) ? a.size : 1
     const scale = Array.isArray(a.scale) && a.scale.length === 3 ? a.scale : [1, 1, 1]
     const c = Array.isArray(a.location) && a.location.length === 3 ? a.location : [0, 0, 0]
-    const half = scale.map((v) => (v * size) / 2)
+    const unit = UNIT_EXTENT[a.kind] ?? [1, 1, 1]
+    const half = scale.map((v, i) => (v * size * (unit[i] ?? 1)) / 2)
     const min = [c[0] - half[0], c[1] - half[1], c[2] - half[2]]
     const max = [c[0] + half[0], c[1] + half[1], c[2] + half[2]]
-    if (a.kind === 'plane') {
-      min[2] = c[2]
-      max[2] = c[2]
-    }
     boxes.push({ name: String(a.name), kind: a.kind, centre: [...c], min, max })
   }
   return boxes
@@ -66,19 +117,16 @@ export function extentsFromBoxes(boxes) {
 }
 
 /** 参数叶子 → 同一种表示法。只收会被 lowering 的 item，保证与 ops 列表**按序对齐**。 */
-export function extentsFromParams(items) {
+export function extentsFromParams(items, kindAvailable = () => true) {
   const out = []
   for (const item of items ?? []) {
-    if (!lowersToOp(item)) continue
-    const w = item.w.v
-    const d = item.d.v
-    const h = item.feature === 'box' ? item.h.v : null
-    const c = placementOf(item, h ?? undefined)
+    if (!lowersToOp(item, kindAvailable)) continue
+    const { size, base } = PARAM_SIDE_GEOMETRY[item.feature](item)
     out.push({
       name: String(item.id ?? out.length),
-      x: { centre: c[0], size: w },
-      y: { centre: c[1], size: d },
-      z: { centre: c[2], size: h === null ? 0 : h },
+      x: { centre: base[0], size: size[0] },
+      y: { centre: base[1], size: size[1] },
+      z: { centre: base[2], size: size[2] },
     })
   }
   return out
@@ -106,7 +154,29 @@ export function expectedObjectsFromOps(ops) {
   return out
 }
 
-export const SCENE_TOLERANCE = 1e-6
+/**
+ * 场景读回的容差。
+ *
+ * **为什么是相对值**：限制精度的不是浮点算术，是**下游对曲面基元的多边形近似** ——
+ * 球/柱/环/锥的包围盒会比理想形状略小。实测：`uv_sphere` 直径 2 报回 **1.999999**，
+ * 即约 1e-6 的绝对偏差 —— **刚好等于原来的绝对容差 1e-6**，也就是说那次"通过"
+ * 只差 1e-15 就要翻面。这不是"有余量"，是压线。
+ *
+ * 这和"判据的精度不能超过输入的精度"是同一条，只是这里输入受**实现**限制：
+ *  - 取 1e-5 相对：2 米的球 ⇒ 容差 2e-5，是实测偏差的 20 倍，不再压线
+ *  - 对真实建模误差（毫米级 ⇒ 1e-3 相对）仍然极敏感
+ *  - 绝对值下限兜住接近 0 的坐标
+ * 每行都会把实际用的 `tolerance` 报出来，压线与否看得见。
+ */
+export const SCENE_RELATIVE_TOLERANCE = 1e-5
+const SCENE_ABSOLUTE_FLOOR = 1e-9
+/** 旋转是弧度、无量纲，不能用长度推出的容差；M1 的 ops 从不设旋转，这里取一个极小绝对值。 */
+const SCENE_ROTATION_EPSILON = 1e-9
+
+export function sceneToleranceFor(...values) {
+  const scale = Math.max(0, ...values.map((v) => Math.abs(Number(v) || 0)))
+  return Math.max(SCENE_ABSOLUTE_FLOOR, SCENE_RELATIVE_TOLERANCE * scale)
+}
 
 /**
  * 每种基元在 `size = 1` 时的**单位尺寸**（还要再乘 `size` 与 `scale`）。
@@ -163,7 +233,7 @@ export function compareScene(expected, scene) {
     const locationDelta = axisDelta(want.location, got.location)
     const scaleDelta = axisDelta(want.scale, got.scale)
     const rotationPublished = Array.isArray(got.rotation_euler)
-    const rotationIsZero = !rotationPublished || got.rotation_euler.every((r) => Math.abs(r) <= SCENE_TOLERANCE)
+    const rotationIsZero = !rotationPublished || got.rotation_euler.every((r) => Math.abs(r) <= SCENE_ROTATION_EPSILON)
     // 尺寸断言的三个前置条件，缺一个就不做 —— 而"为什么没做"必须写进 rows：
     //   1. 下游为**这个对象**发布了 dimensions；
     //   2. 我们知道这种基元的单位尺寸（否则"期望值"就是我编的，torus 就是反例）；
@@ -175,6 +245,8 @@ export function compareScene(expected, scene) {
     const dimensionsDelta =
       Array.isArray(got.dimensions) && expectedSize && rotationIsZero ? axisDelta(expectedSize, got.dimensions) : null
     const sizeAsserted = dimensionsDelta !== null
+    // 这一行用的容差随**这个对象多大**变化 —— 曲面基元的包围盒偏差是按比例缩放的。
+    const tol = sceneToleranceFor(...want.location, ...want.scale, ...(expectedSize ?? []))
     const sizeNotAssertedReason = sizeAsserted
       ? null
       : !Array.isArray(got.dimensions)
@@ -188,10 +260,10 @@ export function compareScene(expected, scene) {
       typeIsMesh &&
       rotationIsZero &&
       locationDelta !== null &&
-      locationDelta <= SCENE_TOLERANCE &&
+      locationDelta <= tol &&
       scaleDelta !== null &&
-      scaleDelta <= SCENE_TOLERANCE &&
-      (!sizeAsserted || dimensionsDelta <= SCENE_TOLERANCE)
+      scaleDelta <= tol &&
+      (!sizeAsserted || dimensionsDelta <= tol)
     rows.push({
       object: want.name,
       verdict: ok ? 'match' : 'mismatch',
@@ -204,6 +276,8 @@ export function compareScene(expected, scene) {
       size_asserted: sizeAsserted,
       size_not_asserted_reason: sizeNotAssertedReason,
       dimensions_delta: dimensionsDelta,
+      // 这一行判定时实际用的容差（绝对值，米）—— 压线与否必须看得见。
+      tolerance: tol,
       expected_size_m: expectedSize,
       // 观测到的（不是断言的）：顶点/面数能让人和模型一眼看出 cube(8/6) 还是 plane(4/1)，
       // 但"期望值"下游没有发布，所以我们只报出来，不据此判成败。
