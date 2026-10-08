@@ -104,3 +104,28 @@ entry = {
 而不是按 `against_blender` 报出去 —— 名字必须如实，否则就是制造静默缺口。
 
 `dimensions` 到位后，同一份比对代码只需多读一个字段，即可升级为真正的 `against_blender`。
+
+## 8. 另外发现的下游缺陷（不是请求，但同一批做更省事）
+
+**`agh_blender_stop` 在关闭竞态下报失败，而进程实际已退出。** 实测（2026-10-08）：
+
+```
+两次调用均 ok:false, blockers:["transport: fetch failed"], mode:"token",
+         stage:"close", forceKilled:false
+随后 agh_blender_probe:  alive:false, processAlive:false
+```
+
+判定：这是**保守方向**的失败（没谎报成功），但"受控关闭已被确认"下游给不出保证 ——
+任何"stop 返回 ok 才继续"的编排都会误判。建议：让 stop 在 bridge 断连时回退到
+"按 PID/端口确认进程已退出"并据此给结论，或在返回值里明确区分
+"未能确认" 与 "确认失败"。
+
+（`agh-ortho` 自己不调用 stop，所以这条不影响本插件；记在这里是为了 M3 一起处理。）
+
+## 9. 优先级
+
+| 项 | 依赖什么 | 建议顺序 |
+|---|---|---|
+| `describe_scene()` 加 `dimensions` | 无（只读侧） | **1** —— 解锁 `against_blender` 档 |
+| `catalog()` 发布 `primitives` 与能力集标识 | 无 | 2 —— 消掉 `agh-ortho` 合成的 `capabilitySet` |
+| `stop` 的确认语义 | 无 | 3 —— 与上两条同一批 |

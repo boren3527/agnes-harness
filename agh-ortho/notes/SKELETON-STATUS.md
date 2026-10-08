@@ -441,6 +441,119 @@ parameters.json 保住了模型传入的参数
 **⚠ 包已改动 ⇒ 源码的 integrity 变成了 `sha256-8c44580ce599b7e525d1877df1eefbf3eeb21e606dae35f425c0f9d2b8d03373`，
 而已装的是 `sha256-117f18ff…`（旧）。两者漂移了，再想用 `save` 之前必须重装一次。**
 
+### 9.9 能力协商第 1 级：**接通**（2026-10-08）
+
+CONTRACT §13 第 6 项那个悬了很久的"待实测"有答案了：**跨插件 `ctx.tools.invoke` 可用。**
+
+在真实会话里（`agh_blender_start` 拉起受管理实例后）调用 `agh_ortho_catalog`，从转录里独立核出的载荷：
+
+```
+"acquisition":"tool:agh_blender_ops_catalog"      ← 第 1 级真的接通了
+"stale":false                                      ← 活实例，不是快照
+limits: maxOpsPerBatch=64, maxObjects=512, nameCharset=A-Za-z0-9_-.", nameMaxLength=96
+ops: 10（与直接调 agh_blender_ops_catalog 拿到的完全一致，逐项带 mutates/destructive）
+```
+
+深度也够：`preset.ts:84` 的 `depthLimit: 2`，嵌套调用是"调用方深度 + 1"，模型调我们的工具（1）→
+内部 invoke（2）**正好卡在上限内**，允许一级嵌套。
+
+### 9.9.1 这次实测同时抓到一个"载荷在说谎"的缺陷（已修）
+
+同一份载荷里出现了**自相矛盾**：
+
+```json
+"acquisition": "tool:agh_blender_ops_catalog",          // 真实
+"sources": { "tool": { "available": false,              // 假话：骨架期硬编码的
+                       "why": "not wired yet; ..." } }   // 而第 1 级已经接通了
+```
+
+而且 catalog 的**工具描述**里也还写着"从下游在线取能力是下一步" —— 那句是**直接给模型看的**。
+模型没有出错：它忠实转述了这两处假话（回报里同时出现"acquisition 是 tool"和"source 是 fallback"）。
+
+修法：`sources` 里每一级改成报告 **`inUse`**（由 `acquisition` 反推）+ `attempted` + `reason`，
+**不再有任何硬编码的可用性**；两处工具描述同步改准。
+并在自检里加了针对这条的回归断言（正例 `sources.tool.inUse === true`，降级例翻转为 `file.inUse`）。
+
+> 教训与 §5.2 同源：**一旦某个"未接通"的常量被写进载荷或描述，接通之后它就变成假话，
+> 而下游（模型）会忠实转述。** 所以"可用性"这类事实必须每次从状态反推，不能写死。
+
+### 9.9.2 【实测】YOLO 模式会静默越过 `always` 审批
+
+那个会话里有 `x/core/yolo-switch`：`{"to": true, "operatorId": "local", "profileHash": "sha256-2fff1058…"}`。
+于是 `requiresApproval:'always'` 的 `agh_blender_start` **不弹任何提示就执行了**。
+
+这条对安全姿态很重要：**YOLO 一开，所有 `always` 闸门都失效** —— 包括会写场景的
+`agh_blender_apply_ops` 和本插件的 `agh_ortho_save`。跑无人实验时务必知道当前模式。
+
+顺带把四个会话的审批语义全部对齐（从转录核实）：
+
+| 会话 | save 调用 | YOLO | 结果 |
+|---|---|---|---|
+| `f02877c7` | 0 | **true** | YOLO ⇒ `always` 的 `agh_blender_start` 静默执行 |
+| `88f6d419` | 2 | false | **save 成功那次，走的是真实审批路径** |
+| `3594ea0f` | 1 | false | `APPROVAL_REJECTED` —— 关 TUI 时模态框还挂着，`PermissionModal.close()` 把它判为拒绝 |
+| `0ae47e3c` | 1 | false | `APPROVAL_REJECTED` —— 无头 `-p`，无 TTY ⇒ fail-closed |
+
+所以 §9.7 的"审批路径也验过了"这句是有证据的，不是转述。
+
+### 9.9.3 【实测】"防装成旧版本"守卫在真实场景下生效了
+
+2026-10-08 的那次重装里，我的流程漏了 `disable` + `remove`（前两次都做了，这次忘了），
+包仍处于 **enabled** 状态。结果：
+
+```
+install  operation: state=failed, progress=50
+         error: { code: "E_PACKAGE_STATE",
+                  safeMessage: "The package operation cannot run in the current state." }
+```
+
+**install 在包已安装/已启用时会被拒绝** —— 所以"重装"从来不是幂等的替换，它必须走完整循环。
+更关键的是：install 失败后 `Get-InstalledRecord` 返回的是**上一次**的记录。没有守卫的话，
+脚本会拿**旧的** integrity/capabilityHash 去 trust + enable，然后报"成功"
+（`trust` 也确实返回了 `completed`，`enable` 也返回了 `completed`），**而装上去的还是旧版**。
+
+守卫当场判 `False` 并拦住了这次静默失败。**这是它第一次在真实场景下起作用**（不是自检里的构造用例）。
+
+正确顺序（`tools/reinstall.ps1` 就是按这个写的，我不该手写流程）：
+
+```
+inspect → disable → remove → install → trust → enable → status → audit 核对
+```
+
+> 结论：脚本存在的意义不是省打字，而是**把顺序固化下来**。我手写流程时漏了一步就踩了这个坑 ——
+> 而脚本里那一步是被注释解释过的。
+
+### 9.9.4 【实测】修复后的复测通过，并发现**同会话热重载生效**
+
+同一个会话里出现了两份 `sources` 载荷，构成前后对照：
+
+```
+第 1 处（旧构建）: {"tool":{"available":false,"why":"not wired yet..."},"file":{"available":false,...},"fallback":{"available":true}}
+第 2 处（新构建）: {"tool":{"inUse":true,"attempted":true,"reason":null},"file":{"inUse":false,...},"fallback":{"inUse":false}}
+```
+
+第 2 份正是修复后的形状，且与 `acquisition:"tool:agh_blender_ops_catalog"` / `stale:false` 完全自洽。
+**结论：载荷不再自相矛盾；第 1 级来源在真实会话里稳定可用。**
+
+顺带一条**运维事实**：会话 `f02877c7` 是在旧构建下启动的，重装之后**没有新开会话**，
+下一次工具调用就用上了新构建 —— 说明扩展的重载会作用到已运行的会话。
+（这是单次观察，但至少说明"重装后必须新开会话"这个担心不成立。我之前对用户说过的那句话是错的。）
+
+### 9.9.5 【实测·下游】`agh_blender_stop` 在关闭竞态下报失败，而进程实际已退出
+
+```
+两次调用均 ok:false, blockers:["transport: fetch failed"], mode:"token", stage:"close", forceKilled:false
+随后 agh_blender_probe:  alive:false, health:"fetch failed", processAlive:false
+磁盘上的 stop-report.json 与返回值一致
+```
+
+即：**bridge 在关闭过程中断连，stop 拿不到确认**，而实例其实已经退出。
+这是**保守方向**的失败 —— 它没有谎报成功（这一点比反过来好得多），但意味着
+"**一次受控关闭已被确认**"这件事下游目前给不出保证。任何依赖"stop 返回 ok 才继续"的编排都会误判。
+
+候选加入给下游的清单（见 `DOWNSTREAM-REQUEST-readback.md` §8），并提醒：本插件不受影响
+（我们不调用 stop），但**凡是把它当闸门的编排都会踩到**。
+
 ## 10. 未决项
 
 
@@ -450,8 +563,9 @@ parameters.json 保住了模型传入的参数
    再回来考虑 `classify` + `policyVersion`，约束 M。）
 2. **`enforcement` 口径不一致**（§9.7）：模型运行时上下文说 `unavailable`，工具结果说
    `level:"partial", scope:["file"]`。查清哪个是真的，以及 Windows 上文件策略到底能强制到什么程度。
-3. **能力协商第 1 级**：要不要接 `ctx.tools.invoke('agh_blender_ops_catalog')`？接的话必须
-   按"缺席即降级"写（它要求 Blender 已启动，见 §4.1），且要在**已启动 Blender** 的环境里实测一次。
+3. ~~能力协商第 1 级~~ —— **已完成且实测接通**，见 §9.9：`acquisition: tool:agh_blender_ops_catalog`、
+   `stale: false`、限额与 op 列表与直接调下游完全一致；深度上限（2）恰好容得下一级嵌套。
+   同时修掉了这次实测抓出的"载荷自相矛盾"，并加了回归断言。
 4. **工作区热改覆盖层**：`<workspace>/.agnes/agh-ortho/capability.json`。`agh.capability.json`
    在包内 ⇒ 改它要重装 ⇒ §6 承诺的"只更新一张表"被打折。
 5. **保留策略执行不了**（§9.5）：工具面没有 `rm`。要么在插件外删，要么给 seam 加一个 rm。

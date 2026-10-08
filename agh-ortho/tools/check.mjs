@@ -296,6 +296,57 @@ const verifyArtifact = saved.artifacts.find((a) => a.path.endsWith('verify.json'
 const verifyText = fs1.files.get(relKey(verifyArtifact.path))
 check('verify.json records residual 0, needs_blender false, and its caveats', (() => { const v = JSON.parse(verifyText); return v.residual_max === 0 && v.needs_blender === false && Array.isArray(v.caveats) && v.caveats.length === 3 })())
 
+// --- 8b. 能力协商第 1 级（跨插件 invoke）与它的四级降级 ---
+// 下游 catalog 的真实形状（读自 agh_ops.py 的 catalog()）：ops 是**字典**，没有 primitives 列表。
+const LIVE_CATALOG = {
+  version: 1,
+  limits: { maxOpsPerBatch: 8, maxObjects: 3, nameCharset: 'A-Za-z0-9_-.', nameMaxLength: 12 },
+  ops: {
+    'mesh.primitive_add': { mutates: false, destructive: false, summary: 'add a primitive' },
+    'mesh.prism_add': { mutates: false, destructive: false, summary: 'an M3 op that does not exist yet' },
+  },
+  errorCodes: { E_ARG_RANGE: 'argument out of range' },
+  notes: ['read the scene before and after a build'],
+}
+const catalogTool = byName['agh_ortho_catalog']
+const withLive = { tools: { invoke: async () => ({ structured: { ok: true, blockers: [], catalog: LIVE_CATALOG } }) } }
+
+const live = (await catalogTool.execute({}, withLive)).structured
+check('live: acquisition names the tool it came from', live.negotiated.acquisition === 'tool:agh_blender_ops_catalog', live.negotiated.acquisition)
+// 这一条是针对真实缺陷加的回归：sources 里曾经硬编码 tool.available=false，
+// 结果同一份载荷里 acquisition 已经是 tool:... —— 一句自我矛盾的假话。
+check('live: sources.tool.inUse follows the acquisition, not a hardcoded flag', live.sources.tool.inUse === true && live.sources.file.inUse === false, JSON.stringify(live.sources))
+check('live: not stale - it saw the real downstream', live.negotiated.stale === false)
+check('live: limits come from the catalog', live.negotiated.limits.maxOpsPerBatch === 8 && live.negotiated.limits.nameMaxLength === 12)
+check('live: the ops dictionary is converted to our list, flags included', live.negotiated.ops.length === 2 && live.negotiated.ops.every((o) => o.mutates === false) && live.negotiated.ops.some((o) => o.name === 'mesh.prism_add'))
+check('live: the missing primitives list stays null instead of being faked', live.negotiated.primitives === null)
+
+// 降级 1：下游没有受管理实例 —— 这是**正常分支**，不是异常
+const noInstance = (await catalogTool.execute({}, { tools: { invoke: async () => ({ structured: { ok: false, blockers: ['no managed Blender instance in this workspace; call agh_blender_start first'] } }) } })).structured
+check('absent instance degrades to the shipped snapshot', noInstance.negotiated.acquisition === 'file:agh.capability.json', noInstance.negotiated.acquisition)
+check('degraded: sources flips to file, and the reason survives', noInstance.sources.tool.inUse === false && noInstance.sources.file.inUse === true && noInstance.sources.tool.attempted === true, JSON.stringify(noInstance.sources))
+check('and the reason is recorded, not swallowed', /no managed Blender instance/.test(noInstance.negotiated.negotiation.reason ?? ''), noInstance.negotiated.negotiation.reason)
+
+// 降级 2：目标工具不在本轮披露集里 —— invoke 抛 TOOL_NOT_FOUND
+const notFound = (await catalogTool.execute({}, { tools: { invoke: async () => { throw Object.assign(new Error('unknown tool agh_blender_ops_catalog'), { code: 'TOOL_NOT_FOUND' }) } } })).structured
+check('a throwing invoke degrades and records the code', notFound.negotiated.acquisition === 'file:agh.capability.json' && /TOOL_NOT_FOUND/.test(notFound.negotiated.negotiation.reason ?? ''), notFound.negotiated.negotiation.reason)
+
+// 降级 3：这个上下文根本没有 tools seam（自检、裸调用）
+const noSeam = (await catalogTool.execute({}, {})).structured
+check('no tools seam: recorded as not attempted, still degrades', noSeam.negotiated.acquisition === 'file:agh.capability.json' && noSeam.negotiated.negotiation.attempted === false, JSON.stringify(noSeam.negotiated.negotiation))
+
+// 降级 4：形状不对（少了 limits/ops）
+const junk = (await catalogTool.execute({}, { tools: { invoke: async () => ({ structured: { ok: true, catalog: { version: 1 } } }) } })).structured
+check('a payload without limits/ops degrades', junk.negotiated.acquisition === 'file:agh.capability.json' && /lacks limits or ops/.test(junk.negotiated.negotiation.reason ?? ''), junk.negotiated.negotiation.reason)
+
+// 最要紧的一条：实时限额必须真的**约束行为**，而不只是被显示出来。
+const tooMany = { ...SAMPLE, assembly: Array.from({ length: 4 }, (_, i) => ({ id: `b${i}`, feature: 'box', w: { v: 1 }, d: { v: 1 }, h: { v: 1 } })) }
+const emitLive = (await byName['agh_ortho_emit_ops'].execute(tooMany, withLive)).structured
+check('live limits actually constrain the emitter (4 objects against a limit of 3)', emitLive.ok === false && emitLive.blockers.some((b) => b.code === 'E_LIMIT_OBJECTS'), JSON.stringify(emitLive.blockers.map((b) => b.code)))
+check('and the capability set is reported as the live one', emitLive.target_capability_set === 'agh-blender@live:catalog-v1', emitLive.target_capability_set)
+const emitFile = (await byName['agh_ortho_emit_ops'].execute(tooMany, {})).structured
+check('the same 4 objects pass against the shipped snapshot limit of 512', emitFile.ok === true, JSON.stringify(emitFile.blockers.map((b) => b.code)))
+
 // --- 9. 在真实文件系统上再走一遍（内存 fs 会把路径差异糊掉；Windows 的拼接只有真实 IO 才验得出来）---
 const realRoot = join(tmpdir(), `agh-ortho-check-${process.pid}`)
 const realFs = {

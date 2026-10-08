@@ -270,7 +270,82 @@ function readShippedCapability() {
   }
 }
 
-function resolveTargetCapabilities() {
+/**
+ * CONTRACT §6 的第 1 级来源：直接问下游的受管理实例。
+ *
+ * 三条**实测**约束决定了这段必须写成"失败即降级"：
+ *  - `agh_blender_ops_catalog` **需要一个已启动的受管理实例**（`runCatalog` → `managedInstance`），
+ *    没有实例时它返回 `{ ok:false, blockers:['no managed Blender instance ...'] }` ——
+ *    所以"缺席"是**正常分支**，不是异常；
+ *  - `ctx.tools.invoke` 是**嵌套工具调用**，失败一律**抛异常**而不是返回错误码
+ *    （TOOL_NOT_FOUND / TOOL_ARGS_INVALID / E_RELATION / E_DEPTH_EXCEEDED / BUDGET_EXCEEDED；
+ *    目标工具若需审批还会 PARK —— 见 core/src/step/reentry.ts 的 invokeTool）；
+ *  - 目标工具必须在本轮**已披露**的工具集里。
+ *
+ * 所以这一层**永远不抛**：任何异常、任何非 ok、任何形状不对，都记下原因并退回第 2/3 级。
+ */
+async function negotiateFromDownstream(tctx) {
+  const invoke = tctx?.tools?.invoke
+  if (typeof invoke !== 'function') return { attempted: false, reason: 'no tools seam on this tool context' }
+  let result
+  try {
+    result = await invoke('agh_blender_ops_catalog', {})
+  } catch (error) {
+    const code = error?.code ? `${error.code}: ` : ''
+    return { attempted: true, reason: `nested invoke failed (${code}${error?.message ?? error})` }
+  }
+  const report = result?.structured
+  if (!report || report.ok !== true) {
+    const why =
+      Array.isArray(report?.blockers) && report.blockers.length
+        ? report.blockers.join('; ')
+        : 'the nested result carried no ok:true report'
+    return { attempted: true, reason: `downstream answered without a catalog (${why})` }
+  }
+  const catalog = report.catalog
+  if (!catalog || !catalog.limits || !catalog.ops) {
+    return { attempted: true, reason: 'catalog payload lacks limits or ops' }
+  }
+  return { attempted: true, reason: null, catalog }
+}
+
+/**
+ * 下游 catalog → 本插件的能力面。这是**唯一**做形状转换的地方。
+ * 下游的 `ops` 是**字典**（按 op 名索引，带 mutates/destructive/summary/args），我们内部用列表。
+ * 下游**没有** `primitives` 列表、也**没有** capabilitySet 标识 —— 这是已知缺口
+ * （见 notes/DOWNSTREAM-REQUEST-readback.md §1 记的第二条候选），所以这里如实给 null / 合成一个 id。
+ */
+function capabilitiesFromCatalog(catalog) {
+  return {
+    target: 'agh-blender@live',
+    capabilitySet: `catalog-v${catalog.version ?? '?'}`,
+    primitives: null,
+    limits: catalog.limits,
+    ops: Object.entries(catalog.ops).map(([name, spec]) => ({
+      name,
+      mutates: spec?.mutates === true,
+      destructive: spec?.destructive === true,
+      summary: typeof spec?.summary === 'string' ? spec.summary : null,
+    })),
+    errorCodes: catalog.errorCodes ?? null,
+    downstreamNotes: Array.isArray(catalog.notes) ? catalog.notes : [],
+  }
+}
+
+async function resolveTargetCapabilities(tctx) {
+  const negotiated = await negotiateFromDownstream(tctx)
+  if (negotiated.catalog) {
+    return {
+      acquisition: 'tool:agh_blender_ops_catalog',
+      provenance: 'agh-blender（活实例，实时读取）',
+      // 活实例读到的就是当下的真相 ⇒ 这里**不**标 stale。这是第 1 级相对第 2 级的实质好处。
+      stale: false,
+      staleReason: null,
+      digest: null,
+      negotiation: negotiated,
+      ...capabilitiesFromCatalog(negotiated.catalog),
+    }
+  }
   const shipped = readShippedCapability()
   if (shipped.value) {
     // 两个"来源"是两个不同的轴，**不能混**：
@@ -285,6 +360,7 @@ function resolveTargetCapabilities() {
       stale: true,
       staleReason: 'shipped snapshot; it cannot observe a downstream change by itself',
       digest: shipped.digest,
+      negotiation: negotiated,
       ...rest,
     }
   }
@@ -294,6 +370,7 @@ function resolveTargetCapabilities() {
     stale: true,
     staleReason: `built-in fallback, not the real downstream${shipped.error ? `; agh.capability.json unreadable: ${shipped.error}` : ''}`,
     digest: null,
+    negotiation: negotiated,
     ...FALLBACK_CAPABILITIES,
   }
 }
@@ -552,8 +629,8 @@ function emitOps(params, caps) {
 // ---------------------------------------------------------------------------
 // 落盘：把一个 run 的全部产物算出来（纯计算，不碰 fs）
 // ---------------------------------------------------------------------------
-function assembleArtifacts(args, createdAt) {
-  const caps = resolveTargetCapabilities()
+async function assembleArtifacts(args, createdAt, tctx) {
+  const caps = await resolveTargetCapabilities(tctx)
   const emission = emitOps(args, caps)
   const boxes = boxesFromOps(emission.ops)
   const views = sixViewRects(boxes)
@@ -684,11 +761,11 @@ export const runtime = {
     registerTool({
       name: 'agh_ortho_catalog',
       description:
-        '只读。回报**协商后**的下游能力面：op 白名单（含每个 op 的 mutates/destructive）、限额、基元种类，以及这份能力是从哪来的（source）与是否可能过期（stale）。**在拼 ops 批次之前先调它**，不要凭记忆猜参数名、限额或单位。当前协商只用了随包发布的能力表快照与内置兜底；从下游工具在线取能力（需要一个已启动的 Blender）是下一步，缺席属于正常分支。',
+        '只读。回报**协商后**的下游能力面：op 白名单（含每个 op 的 mutates/destructive）、限额、基元种类，以及这份能力**从哪个渠道取到**（acquisition：tool / file / fallback）与是否可能过期（stale）。**在拼 ops 批次之前先调它**，不要凭记忆猜参数名、限额或单位。三级来源：① 向下游在线取（需要已启动的受管理 Blender 实例，且目标工具在本轮已披露）—— 取到的是实时目录，因此不标 stale；② 随包发布的能力表快照 —— 必然漂移，标 stale；③ 内置兜底。**缺席与失败都是正常分支**：会被降级并在 negotiation.reason 里记下原因，不抛错。sources 里的每一级都报告 inUse，而不是写死的可用性。',
       parameters: EMPTY_INPUT,
       meta: READ_ONLY_META,
-      async execute() {
-        const caps = resolveTargetCapabilities()
+      async execute(_args, tctx) {
+        const caps = await resolveTargetCapabilities(tctx)
         const payload = {
           ok: true,
           negotiated: caps,
@@ -703,10 +780,20 @@ export const runtime = {
               .map(([feature, rule]) => ({ feature, reason_code: rule.reasonCode, reason: rule.reason })),
             unitPolicy: 'all positions and sizes are metres; unit "m" is enforced by agh_ortho_emit_ops',
           },
+          // 每一级的**可用性必须来自事实**，不能硬编码：硬写的"未接通"在接通之后会变成载荷里的
+          // 假话，而模型会忠实转述它。这次的会话实测就抓到了这一点 —— 同一份载荷里
+          // acquisition 已经是 tool:agh_blender_ops_catalog，而 sources.tool.available 还写着 false。
           sources: {
-            tool: { available: false, why: 'not wired yet; needs a running Blender instance and a disclosed tool in this turn' },
-            file: { available: caps.acquisition === 'file:agh.capability.json', path: 'extensions/main/agh.capability.json' },
-            fallback: { available: true },
+            tool: {
+              inUse: caps.acquisition === 'tool:agh_blender_ops_catalog',
+              attempted: caps.negotiation?.attempted === true,
+              reason: caps.negotiation?.reason ?? null,
+            },
+            file: {
+              inUse: caps.acquisition === 'file:agh.capability.json',
+              path: 'extensions/main/agh.capability.json',
+            },
+            fallback: { inUse: caps.acquisition === 'fallback' },
           },
           blockers: [],
         }
@@ -717,11 +804,11 @@ export const runtime = {
     registerTool({
       name: 'agh_ortho_emit_ops',
       description:
-        '只读、纯函数。把**意图层**参数 JSON lowering 成可以直接塞进 agh_blender_apply_ops 的 ops 数组：不做插件间调用，也不写任何东西 —— 真正写场景由调用方交给下游的 agh_blender_apply_ops（它已是 always 审批）。写出 emitter_version 与 target_capability_set，使产物可长期依赖。落不下去的意图进 unlowered[]，并区分 "下游表达不了" 与 "本 emitter 还没做" 两种原因 —— 这个区分必须一路传到用户面前。单位必须是米（mm 会爆 E_ARG_RANGE）。',
+        '只读、纯函数。把**意图层**参数 JSON lowering 成可以直接塞进 agh_blender_apply_ops 的 ops 数组：本工具自己不写任何东西 —— 真正写场景由调用方交给下游的 agh_blender_apply_ops（它已是 always 审批）。它读的是协商层给出的能力面，而协商层为了拿到实时能力可能向下游做一次**只读的嵌套调用**（agh_blender_ops_catalog）—— 那一步是失败即降级的，缺席不会让本工具失败。写出 emitter_version 与 target_capability_set，使产物可长期依赖。落不下去的意图进 unlowered[]，并区分 "下游表达不了" 与 "本 emitter 还没做" 两种原因 —— 这个区分必须一路传到用户面前。单位必须是米（mm 会爆 E_ARG_RANGE）。',
       parameters: EMIT_OPS_INPUT,
       meta: READ_ONLY_META,
-      async execute(args) {
-        return respond(emitOps(args, resolveTargetCapabilities()))
+      async execute(args, tctx) {
+        return respond(emitOps(args, await resolveTargetCapabilities(tctx)))
       },
     })
 
@@ -731,8 +818,8 @@ export const runtime = {
         '只读、纯函数、**不落盘**。把参数 JSON 渲染成正交六视图的 SVG（主视图/俯视图/左视图/右视图/仰视图/后视图），并给出第一角法或第三角法的图面排布。下游没有相机 op，严格正交六视图下游给不了，所以这里自己算正交投影 —— 零依赖。SVG 是文本，因此**模型可以直接读视图几何**：工具产出的图片像素进不了模型，文本可以。M1 只返回文本；"落盘 + 描述符（run-uuid / report.json / 幂等 / 清理）"归 agh_ortho_save。',
       parameters: EMIT_OPS_INPUT,
       meta: READ_ONLY_META,
-      async execute(args) {
-        const caps = resolveTargetCapabilities()
+      async execute(args, tctx) {
+        const caps = await resolveTargetCapabilities(tctx)
         const emission = emitOps(args, caps)
         const boxes = boxesFromOps(emission.ops)
         const views = sixViewRects(boxes)
@@ -799,8 +886,8 @@ export const runtime = {
         '只读、纯函数。numeric 档校验（CONTRACT §9）：参数 → ops → 包围盒 → 六视图 → **从视图反解** → 与参数比对，残差必须为 0，且同一个轴被 4 张视图观测、4 个观测值必须彼此相等。走的是两条**独立路径**：一侧直接读参数叶子，另一侧读 lowering 产出的 ops —— 共用一条路径的话校验就是同义反复。**不需要 Blender**，这就是"扩下游之前就能交付价值"的关键解耦。它只证明几何自洽，不证明几何与真实照片一致（那是 against_blender 档，M1 不做）。',
       parameters: EMIT_OPS_INPUT,
       meta: READ_ONLY_META,
-      async execute(args) {
-        const caps = resolveTargetCapabilities()
+      async execute(args, tctx) {
+        const caps = await resolveTargetCapabilities(tctx)
         const emission = emitOps(args, caps)
         const boxes = boxesFromOps(emission.ops)
         const views = sixViewRects(boxes)
@@ -904,7 +991,7 @@ export const runtime = {
           })
         }
 
-        const assembled = assembleArtifacts(args, new Date().toISOString())
+        const assembled = await assembleArtifacts(args, new Date().toISOString(), tctx)
         const files = assembled.files.map((file) => ({ ...file, absolutePath: absolute(file.name) }))
         try {
           await writeRun(fs, {
