@@ -93,6 +93,25 @@ for (const tool of tools) {
   check(`tool definition: ${tool.name}`, problems.length === 0, problems.join('; '))
 }
 
+// 工具的 description 就是**模型唯一必然读到的**东西（尤其冷启动：它不会去读 notes）。
+// 所以"进来先做什么""哪一步不能跳过"必须写在里面，且**不能与现状矛盾** —— 两处都实测踩过。
+const byNameDesc = Object.fromEntries(tools.map((t) => [t.name, t.description]))
+check(
+  'fit description teaches the cold-start essentials (photo_check, the anchor declaration, the candidate gate)',
+  /photo_check/.test(byNameDesc.agh_ortho_fit) &&
+    /w_over_h_min/.test(byNameDesc.agh_ortho_fit) &&
+    /proportions_only/.test(byNameDesc.agh_ortho_fit) &&
+    /-candidate/.test(byNameDesc.agh_ortho_fit) &&
+    /另一个\**\s*run_id/.test(byNameDesc.agh_ortho_fit),
+  byNameDesc.agh_ortho_fit.slice(0, 60),
+)
+// 下游 0.1.8 已经发布 dimensions ⇒ 描述里"验不了最终尺寸"就成了假话（实测：读回 20/20 断言了尺寸）。
+check(
+  'verify description matches reality: size IS assertable now, primitive kind is not',
+  /能\**断言最终尺寸/.test(byNameDesc.agh_ortho_verify) && !/验不了\**最终尺寸/.test(byNameDesc.agh_ortho_verify),
+  byNameDesc.agh_ortho_verify.slice(0, 60),
+)
+
 // --- 2. 可选：用内核真正用的校验 ---
 let typeboxDir = null
 for (const entry of existsSync(join(repoRoot, 'packages')) ? readdirSync(join(repoRoot, 'packages')) : []) {
@@ -240,6 +259,45 @@ const saved = (await save.execute(SAMPLE, { fs: fs1, session: { workspaceRoot: w
 
 check('save writes a run and reports ok', saved.ok === true && saved.idempotent_replay === false, JSON.stringify(saved.blockers))
 check('save returns 10 artifacts (the sheet + 6 views + 3 json)', saved.artifacts.length === 10 && saved.artifacts.some((a) => a.path.endsWith('sheet.svg')), saved.artifacts.map((a) => a.path.split('\\').pop()).join(','))
+
+// 交付包里"验了什么"的结论必须落盘。没有这一块，一个 numeric 档的包里证据只有残差 ——
+// 实测：kuson / kuson-candidate 的 report.json 里根本没有 anchor/photo_check/... 任何一个键。
+const reportOnDisk = JSON.parse(fs1.files.get(`.agnes/agh-ortho/runs/${saved.run_id}/report.json`))
+check(
+  'report.json carries the cheap-tier verdicts, not just the residual',
+  ['anchor', 'photo_check', 'overlaps', 'parts', 'placement', 'generated'].every((k) => reportOnDisk.checks?.[k] !== undefined) &&
+    reportOnDisk.checks.photo_check.rows.length === 0 &&
+    /no photo_check/.test(reportOnDisk.checks.photo_check.note) &&
+    Array.isArray(reportOnDisk.checks.parts.taxonomy) &&
+    reportOnDisk.checks.anchor.present === true &&
+    reportOnDisk.checks.overlaps.listing_threshold === 0.5,
+  Object.keys(reportOnDisk.checks ?? {}).join(','),
+)
+check('report.json says out loud that this pack has no model file', reportOnDisk.scene_file === null)
+
+// `scene_file`：把下游导出的 .blend **登记**进包里（不复制），二进制必须按**字节**算。
+const fsSceneReg = memoryFs()
+const blendText = 'BLENDER-v1-角色-不是-ascii'
+// 内存 fs 的键是**归一化后的绝对路径**（反斜杠 → 正斜杠），不是工作区相对路径。
+fsSceneReg.files.set('D:/ws/outputs/kuson.blend', blendText)
+const blendPath = 'D:\\ws\\outputs\\kuson.blend'
+const sceneSaved = (await save.execute({ ...SAMPLE, run_id: 'scene-a', scene_file: blendPath }, { fs: fsSceneReg, session: { workspaceRoot: ws } })).structured
+const external = sceneSaved.artifacts.find((a) => a.kind === 'scene')
+check('scene_file is registered as an 11th artifact, last, and does not break the first-is-sheet rule', sceneSaved.artifacts.length === 11 && sceneSaved.artifacts[0].path.endsWith('sheet.svg') && sceneSaved.artifacts[10] === external, sceneSaved.artifacts.map((a) => a.kind).join(','))
+check(
+  'the external descriptor keeps its own path and binary-correct bytes/sha256 (not UTF-8 text arithmetic)',
+  external?.path === blendPath &&
+    external?.mime === 'application/x-blender' &&
+    external?.bytes === Buffer.byteLength(blendText, 'utf8') &&
+    external?.bytes !== blendText.length &&
+    external?.sha256 === createHash('sha256').update(Buffer.from(blendText, 'utf8')).digest('hex'),
+  `${external?.path} ${external?.bytes} ${external?.sha256?.slice(0, 8)}`,
+)
+check('the model file is registered, never copied into the run directory', ![...fsSceneReg.files.keys()].some((k) => k.includes('/runs/') && k.endsWith('.blend')))
+check('report.json records which scene file this pack points at', JSON.parse(fsSceneReg.files.get('.agnes/agh-ortho/runs/scene-a/report.json')).scene_file?.path === blendPath)
+const fsSceneMiss = memoryFs()
+const missing = (await save.execute({ ...SAMPLE, run_id: 'scene-b', scene_file: 'D:\\ws\\outputs\\nope.blend' }, { fs: fsSceneMiss, session: { workspaceRoot: ws } })).structured
+check('a scene_file that cannot be read is a blocker, not a silent absence', missing.blockers.some((b) => b.code === 'E_SCENE_FILE_UNREADABLE') && missing.artifacts.length === 10, JSON.stringify(missing.blockers.map((b) => b.code)))
 check('marker.json and report.json are on disk', fs1.files.has(`.agnes/agh-ortho/runs/${saved.run_id}/marker.json`) && fs1.files.has(`.agnes/agh-ortho/runs/${saved.run_id}/report.json`))
 check('write created the parent directories itself', fs1.dirs.has(`.agnes/agh-ortho/runs/${saved.run_id}`))
 

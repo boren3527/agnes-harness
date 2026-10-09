@@ -332,9 +332,20 @@ agh_ortho_save { <同一组参数>, "run_id": "<名字>-candidate" }
 agh_blender_start
 agh_blender_apply_ops { "ops": <上一步 fit 返回的 ops，原样> }
 agh_ortho_fit { <同一组参数>, "against_scene": true }
-agh_ortho_save { <同一组参数>, "run_id": "<有意义的名字>" }   ← 与候选轮**不同**的 id
+agh_blender_capture { "width": 1600, "height": 1200 }
+agh_blender_export { "destination": "<工作区>/outputs/<名字>.blend" }
+agh_ortho_save { <同一组参数>, "run_id": "<有意义的名字>", "scene_file": "<上面那个 .blend 的绝对路径>" }
 agh_blender_stop { "force": true }
 ```
+
+- `scene_file` 让 `save` 把那个 `.blend` **登记**成第 11 个产物（按**原始字节**算 sha256/bytes，**不复制**）：
+  包里因此第一次有了"模型本身"。读不到它是 `E_SCENE_FILE_UNREADABLE`（blocker），**不是**悄悄没有。
+- `agh_blender_capture` 渲的是**当前 GL 视口（透视）**，不是正交六视图 —— 别拿它和 `sheet.svg` 比。
+  工具**从不**把图片放进结果（实测那样会让这一轮直接失败并毒化会话），图只能由人打开看。
+- `agh_blender_export` 的 `destination` **必须是不存在的路径**（它绝不覆盖）；导出走 staging 副本、
+  `mainFileUntouched: true`（Blender 主文件全程没被写过）。**但**场景里仍有 `--factory-startup`
+  的 Cube/Light/Camera，它们**也会被写进 `.blend`**（ops 里没有删除指令）—— 打开时会多一个
+  2×2×2 的方块与一盏灯，那不是我们的模型。
 
 - `apply_ops` / `save` / `stop` 都可能要人批准（`stop` 在有未保存改动时**会拒绝**，除非 `force: true`；这些实例是 `--factory-startup` 的一次性场景，丢弃没有损失）。
 - `save` **先落盘 report.json 再返回** —— 消费者以磁盘上的 `report.json` 为准，不以返回值或转述为准。

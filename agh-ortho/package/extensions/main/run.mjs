@@ -47,6 +47,10 @@ export function classifyFile(name) {
       return { mime: 'text/csv', kind: 'csv' }
     case 'png':
       return { mime: 'image/png', kind: 'image' }
+    // 下游导出的 .blend：**外部产物**（它在工作区里由下游的 Host 落盘，不在 run 目录内）。
+    // 登记它而不复制它 —— 交付包里因此第一次有了"模型本身"，而 run 目录保持只读形状。
+    case 'blend':
+      return { mime: 'application/x-blender', kind: 'scene' }
     default:
       return { mime: 'application/octet-stream', kind: 'other' }
   }
@@ -75,6 +79,34 @@ export function descriptor({ name, absolutePath, text, preview, createdAt, meta 
 
 export function sha256Hex(text) {
   return createHash('sha256').update(text, 'utf8').digest('hex')
+}
+
+/**
+ * 为**已经存在于磁盘上**的产物建描述符（例如下游导出的 `.blend`）。
+ *
+ * 为什么必须走这一条而不是 `descriptor({text})`：`descriptor` 是按 UTF-8 文本算 bytes/sha256 的，
+ * 二进制文件那样算**一定是错的**（字节数会变、sha256 更不用说）。所以这里按原始字节算，
+ * 并且**不复制**这个文件 —— 描述符只引用它（`path` 就是它的真实位置）。
+ * 代价要在载荷里说清楚：这个产物**不在 run 目录内**，所以它不是"复制了一份的交付"，
+ * 而是"指向工作区里那个文件的登记"。
+ */
+export function descriptorOfBytes({ name, absolutePath, data, preview, createdAt, meta = null }) {
+  const bytes = createHash('sha256').update(data).digest('hex')
+  const { mime, kind } = classifyFile(name)
+  return {
+    contract: CONTRACT_VERSION,
+    id: randomUUID(),
+    path: absolutePath,
+    sha256: bytes,
+    bytes: data.length,
+    mime,
+    kind,
+    createdAt,
+    producer: PRODUCER,
+    preview,
+    text: null,
+    ...(meta === null ? {} : { meta }),
+  }
 }
 
 export function makeMarker({ runId, createdAt }) {
@@ -130,6 +162,24 @@ export async function writeRun(fs, { runId, createdAt, files, extra }) {
   const paths = runPaths(runId)
   const descriptors = []
   for (const file of files) {
+    // 外部产物（`data` 已给出）：它已经躺在磁盘上了，**只登记、不重写**。
+    // 它必须自带 absolutePath（真实位置），否则描述符会指到 run 目录里一个不存在的文件。
+    if (file.data !== undefined) {
+      if (typeof file.absolutePath !== 'string' || file.absolutePath.length === 0) {
+        throw new Error(`${file.name}: an externally produced artifact must carry its own absolutePath`)
+      }
+      descriptors.push(
+        descriptorOfBytes({
+          name: file.name,
+          absolutePath: file.absolutePath,
+          data: file.data,
+          preview: file.preview,
+          createdAt,
+          meta: file.meta ?? null,
+        }),
+      )
+      continue
+    }
     // 写失败就抛（seam 的契约是抛，不是返回错误码）—— 由调用方转成 blockers。
     await fs.write(paths.file(file.name), file.text)
     descriptors.push(

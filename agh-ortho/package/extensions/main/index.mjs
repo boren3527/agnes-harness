@@ -12,7 +12,7 @@
  */
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { SCENE_ABSOLUTE_FLOOR, SCENE_RELATIVE_TOLERANCE, boxesFromOps, compareScene, expectedObjectsFromOps, extentsFromBoxes, extentsFromParams, placementOf } from './geometry.mjs'
 import {
   ARTIFACT_ROOT_SEGMENTS,
@@ -360,6 +360,10 @@ const SAVE_INPUT = {
     // 产物包是交付物，所以它必须能记录**读回验证** —— 否则包里只有"我自洽"，
     // 而证明不了"下游照做了"，等于交付物比这一轮实际验过的少。
     against_scene: { type: 'boolean' },
+    // 下游导出的场景文件（`.blend`）的**真实路径**。给了它，交付包里才第一次有"模型本身"。
+    // 它由 agh_blender_export 落盘在 run 目录之外（例如 outputs/xxx.blend），这里只登记、不复制：
+    // 描述符的 path 指向那个文件，sha256/bytes 按**原始字节**算。
+    scene_file: { type: 'string', minLength: 2 },
   },
   required: EMIT_OPS_INPUT.required,
   additionalProperties: false,
@@ -997,6 +1001,10 @@ async function assembleArtifacts(args, createdAt, tctx) {
   }
 
   const files = []
+  // `scene_file` 读不到时必须**显式失败**，不能当成"没有给" —— 否则交付包看起来是完整的，
+  // 而里面其实没有模型。
+  const blockers = [...emission.blockers]
+  const outline = numericOutline(views)
   // ③ 图纸先落：这是复核者该打开的那个文件。六张分图仍在，但"一张图纸"才是 review 对象。
   const sheet = renderSheet(views, placement, { projection: args.projection })
   files.push({
@@ -1058,11 +1066,36 @@ async function assembleArtifacts(args, createdAt, tctx) {
     },
   })
 
+  // 交付包里的"模型本身"。下游 `agh_blender_export` 已经把场景落成 `.blend`（在 run 目录之外，
+  // 例如 `outputs/xxx.blend`），这里**登记**它：描述符按原始字节算 sha256/bytes，path 指向真实文件。
+  // 不复制：复制一份 .blend 会把 run 目录从"我们写的产物"变成"混进外来二进制的地方"。
+  let sceneFile = null
+  if (typeof args.scene_file === 'string' && args.scene_file.length > 0) {
+    try {
+      const data = await tctx.fs.read(args.scene_file)
+      const name = basename(args.scene_file)
+      files.push({
+        name,
+        data,
+        absolutePath: args.scene_file,
+        preview: `模型本身（外部产物）：${name}，${data.length} 字节，由下游导出后落在 run 目录之外；描述符**只登记不复制**，消费方按 path 打开。它证明"这个场景真的被建出来过"，与 ops.json 描述的是同一份几何`,
+        meta: { external: true, register_only: true, producer_tool: 'agh_blender_export' },
+      })
+      sceneFile = { name, path: args.scene_file, bytes: data.length }
+    } catch (error) {
+      blockers.push({
+        code: 'E_SCENE_FILE_UNREADABLE',
+        message: `scene_file could not be read (${error?.message ?? error}). The pack will NOT contain the model file — do not read its absence as "there is no model".`,
+        path: args.scene_file,
+      })
+    }
+  }
+
   return {
     files,
     ok: emission.ok && aligned && checked.within_tolerance && (!scene || (scene.available === true && scene.ok === true)),
     blockers: [
-      ...emission.blockers,
+      ...blockers,
       ...(aligned
         ? []
         : [
@@ -1093,6 +1126,20 @@ async function assembleArtifacts(args, createdAt, tctx) {
       object_count: fromParams.length,
       unit: args.unit,
       projection: args.projection,
+      // 便宜那一档的**结论**必须进交付物。没有它，一个 `numeric` 档的交付包落盘的证据只有残差，
+      // "验了什么"只活在对话里 —— 审计者只能自己重跑 fit。这里放**摘要**（与 scene_readback 摘要并列），
+      // 不是全文：正文仍在 fit 的返回里。
+      checks: {
+        anchor: anchorReport(args),
+        declared_confidence: declaredConfidence(args),
+        photo_check: photoCheckFindings(args, outline),
+        overlaps: overlapFindings(boxes),
+        parts: partCensus(args),
+        placement: placementReport(boxes),
+        generated: generatedReport(args),
+      },
+      // 包里到底有没有模型本身？null = 这一轮没有导出，不是"有但没登记"。
+      scene_file: sceneFile,
       // ③ 交付物里必须有"图纸"这一项：复核对象是它，不是六张分图。
       sheet: {
         artifact: 'sheet.svg',
@@ -1982,7 +2029,7 @@ export const runtime = {
     registerTool({
       name: 'agh_ortho_verify',
       description:
-        '只读、纯函数。numeric 档校验（CONTRACT §9）：参数 → ops → 包围盒 → 六视图 → **从视图反解** → 与参数比对，残差必须为 0，且同一个轴被 4 张视图观测、4 个观测值必须彼此相等。走的是两条**独立路径**：一侧直接读参数叶子，另一侧读 lowering 产出的 ops —— 共用一条路径的话校验就是同义反复。**不需要 Blender**，这就是"扩下游之前就能交付价值"的关键解耦。它只证明几何自洽，不证明几何与真实照片一致。传 against_scene:true 会再跑一档 **scene_readback**（半档，名字如实）：向下游读一次场景（agh_blender_scene，只读、无需审批），比对"我打算创建的对象"是否按**确切名字**存在、类型是 MESH、location 与 scale 与我们发出的 ops 一致 —— 这是本插件第一次引入外部事实，因此能抓到 numeric 抓不到的"ops 发了但下游没建出来 / 名字被占用改成了 .001"。它**验不了**最终尺寸（下游不发布 dimensions）与基元种类（catalog 不发布每类顶点/面数）；这两条会在返回里逐条列在 cannot_assert 里，因为"验不了什么"必须和"验到了什么"一样明确。缺实例或读不到场景时不会抛错，会报 E_SCENE_UNAVAILABLE 并明确说明**本档没有发生**，不要把 available:false 读成通过。',
+        '只读、纯函数。numeric 档校验（CONTRACT §9）：参数 → ops → 包围盒 → 六视图 → **从视图反解** → 与参数比对，残差必须为 0，且同一个轴被 4 张视图观测、4 个观测值必须彼此相等。走的是两条**独立路径**：一侧直接读参数叶子，另一侧读 lowering 产出的 ops —— 共用一条路径的话校验就是同义反复。**不需要 Blender**，这就是"扩下游之前就能交付价值"的关键解耦。它只证明几何自洽，不证明几何与真实照片一致。传 against_scene:true 会再跑一档 **scene_readback**（半档，名字如实）：向下游读一次场景（agh_blender_scene，只读、无需审批），比对"我打算创建的对象"是否按**确切名字**存在、类型是 MESH、location 与 scale 与我们发出的 ops 一致 —— 这是本插件第一次引入外部事实，因此能抓到 numeric 抓不到的"ops 发了但下游没建出来 / 名字被占用改成了 .001"。它**能**断言最终尺寸（下游 0.1.8 起发布 dimensions，容差是每行印出来的相对值，不是固定 1e-6）；**验不了**的是基元种类（catalog 不发布每类顶点/面数）与"与照片一致"；这两条会在返回里逐条列在 cannot_assert 里，因为"验不了什么"必须和"验到了什么"一样明确。缺实例或读不到场景时不会抛错，会报 E_SCENE_UNAVAILABLE 并明确说明**本档没有发生**，不要把 available:false 读成通过。',
       parameters: VERIFY_INPUT,
       meta: READ_ONLY_META,
       async execute(args, tctx) {
@@ -2081,7 +2128,7 @@ export const runtime = {
       // 闭环里"便宜的那一半"的入口。它把一份候选参数变成**可审计的结论 + 该改哪里**，
       // 一次调用给全，让一轮迭代只付一次嵌套协商的代价。只读、不落盘 —— 落盘归 save。
       description:
-        '只读、纯函数、**不落盘**。把一份候选参数 JSON 变成一份**可审计的结论**，并明确告诉你**该改哪里**。一次调用给出：逐条 validation（每条都带 ok）、三态清单（区分"下游做不到"与"我还没做"）、numeric 自洽（残差必须为 0）、六视图的**数值轮廓**（outline，供你拿照片做粗核对 —— 你看见用户上传的照片，看不见工具产出的图像素）、六张 SVG，**外加一张整图纸的指针（sheet）**：六视图按第一角法/第三角法排在一张图上、全图一个比例尺 —— 复核就看这一张，而且必须在进 apply_ops 之前看（正文不进这个载荷，见 sheet.inline_from；20 个对象约 30 KB，同一份几何不值得发两遍）、conf 的如实标注、scale_anchor 的换算与脆弱性、以及逐项逐轴的 revise_hints。verdict 为 fit 时才进下一步：apply_ops 建模，再用 against_scene:true 跑一次做读回比对。**边界说清楚**：numeric 与读回只证明"我自洽、下游照做了"，**都不证明与照片一致** —— 那一段只能靠你拿 outline 和照片比，加上人的眼睛。',
+        '只读、纯函数、**不落盘**。把一份候选参数 JSON 变成一份**可审计的结论**，并明确告诉你**该改哪里**。一次调用给出：逐条 validation（每条都带 ok）、三态清单（区分"下游做不到"与"我还没做"）、numeric 自洽（残差必须为 0）、六视图的**数值轮廓**（outline，供你拿照片做粗核对 —— 你看见用户上传的照片，看不见工具产出的图像素）、六张 SVG，**外加一张整图纸的指针（sheet）**：六视图按第一角法/第三角法排在一张图上、全图一个比例尺 —— 复核就看这一张，而且必须在进 apply_ops 之前看（正文不进这个载荷，见 sheet.inline_from；20 个对象约 30 KB，同一份几何不值得发两遍）、conf 的如实标注、scale_anchor 的换算与脆弱性、以及逐项逐轴的 revise_hints。**进来先按这个顺序看三样**：① `validation` + `revise_hints` —— verdict=revise 时**只改被点名的位置**，一轮只改一处，否则无法归因是哪一步改好的；② `photo_check` —— **你必须在参数里写下从照片读到的比例区间**：`photo_check: { front: { w_over_h_min, w_over_h_max } }`（相对半宽 ≤30%，容差按你声明的小数位推），fit 才会拿它和你算出的 `outline` 自动对一遍；**不写它就等于这一档没有发生**，"像不像照片"会退回纯人眼；③ `anchor` —— 照片里没有已知长度的参照物时，必须**显式**在 `assumptions` 里写 `"proportions_only"`（或 `"authored_dimensions"`），**不要编一个看起来合理的米数**，否则它是 blocking。**verdict=fit 之后不要直接 apply_ops**：先 `agh_ortho_save` 落一个**候选**（run_id 带 `-candidate`，不碰 Blender），请人打开 `sheet.svg` 复核；人放行后才 apply_ops → `against_scene:true` 的 fit → 用**另一个** run_id 落交付包（同一个 run_id 会被幂等吃掉读回）。**边界说清楚**：numeric 与读回只证明"我自洽、下游照做了"，**都不证明与照片一致** —— 那一段只能靠你拿 `outline` / 那张图纸和照片比，加上人的眼睛。',
       parameters: FIT_INPUT,
       meta: READ_ONLY_META,
       async execute(args, tctx) {
@@ -2233,7 +2280,7 @@ export const runtime = {
       // 先把 report.json 落到磁盘再返回 —— 变更型工具的结果一旦被判非法会被替换成
       // TOOL_OUTCOME_UNKNOWN，结果与失败原因会**一起永久丢失**；返回值只是"方便读的副本"。
       description:
-        '这是本插件唯一会写盘的工具，因此 requiresApproval=always。把一个 run 的全部产物落到工作区的 .agnes/agh-ortho/runs/<run-id>/：**一张六视图图纸 sheet.svg**、六个分视图 SVG、参数 JSON、ops 批次、numeric 校验结果，外加 marker.json 与 report.json（描述符数组，依据 agh-blender/docs/UPSTREAM-ARTIFACT-CONTRACT.md）。**先落盘报告再返回**：消费者应以磁盘上的 report.json 为准，不以返回值或转述为准。传同一个 run_id 再调一次是幂等的 —— 直接返回已落盘的描述符，不重新生成。每个描述符都带一句实质 preview，因为模型看不到图片像素，preview 是它唯一必然能读到的内容。',
+        '这是本插件唯一会写盘的工具，因此 requiresApproval=always。把一个 run 的全部产物落到工作区的 .agnes/agh-ortho/runs/<run-id>/：**一张六视图图纸 sheet.svg**、六个分视图 SVG、参数 JSON、ops 批次、numeric 校验结果，外加 marker.json 与 report.json（描述符数组，依据 agh-blender/docs/UPSTREAM-ARTIFACT-CONTRACT.md）。另可传 `scene_file`（下游 `agh_blender_export` 落盘的 .blend 的**真实路径**）：它会被**登记**成第 11 个产物（按原始字节算 sha256/bytes，**不复制**），于是包里第一次有了"模型本身"。**先落盘报告再返回**：消费者应以磁盘上的 report.json 为准，不以返回值或转述为准（`report.json` 里除了描述符还带 `checks` —— 便宜那一档的结论摘要，以及 `scene_file`）。传同一个 run_id 再调一次是幂等的 —— 直接返回已落盘的描述符，不重新生成（因此**复核用的候选与最终交付必须用两个不同的 run_id**：同一个 id 再调，`against_scene` 只会拿回旧描述符，读回永远不会被记录，返回里会明确报 `readback_not_recorded:true`）。每个描述符都带一句实质 preview，因为模型看不到图片像素，preview 是它唯一必然能读到的内容。',
       parameters: SAVE_INPUT,
       meta: {
         isReadOnly: false,
@@ -2313,7 +2360,11 @@ export const runtime = {
         }
 
         const assembled = await assembleArtifacts(args, new Date().toISOString(), tctx)
-        const files = assembled.files.map((file) => ({ ...file, absolutePath: absolute(file.name) }))
+        const files = assembled.files.map((file) => ({
+          ...file,
+          // 外部产物自带真实路径（在 run 目录之外），不能被 run 目录里的同名路径覆盖。
+          absolutePath: file.absolutePath ?? absolute(file.name),
+        }))
         try {
           await writeRun(fs, {
             runId,
