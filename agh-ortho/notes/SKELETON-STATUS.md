@@ -791,6 +791,41 @@ report 记录 e78794a2bc…377b  /  磁盘 5374f77d81…4fa9
 **这一层层的教训归到一句**：`@()` 包一层、少写一个 `$cli`，都是"看起来等价"的写法。
 它们不是靠读代码发现的，是靠**跑**发现的 —— 与 §9.11.4 同一族（六处改动边界的伤也是"看"没发现、"跑"才发现）。
 
+## 9.14 第一轮"图纸复核 → 建模"完整闭环（`photo-round-3`，2026-10-09）
+
+第一次把 ③ 的**人看图纸**那一关真的插进流程里跑了一遍，并因此抓出两个缺陷。
+
+**流程（与规程 §1 一致）**：候选那轮**没有实例** ⇒ 能力表回落到 `file:agh.capability.json`
+（`agh-blender@0.1.8:primitives-6`，闸门 applied）；人打开 `sheet.svg` 看过并放行；④⑤⑥ 时**有实例**
+⇒ 走 `tool:agh_blender_ops_catalog`（`agh-blender@live:catalog-v1`，闸门 not_applied）；
+⑦ `stop {force:true}` 这次**没有**出现 §9.9.5 的关闭竞态（`elapsedMs 2037`、`confirmed:true`、
+`forceKilled:false`）。
+
+**交付包独立核过（不依赖模型转述）**：10 个描述符、`artifacts[0]` 是 `sheet.svg`、
+每个描述符的 sha256/bytes 与磁盘一致；`verify.json` 的 `tier = scene_readback`（两档都在）、
+`caveats` 3 条；numeric 残差 `1.1102230246251565e-16 ≤ 1e-9`；读回 **20/20 match**、
+missing/mismatched 0、`size_asserted: true`、**20 行 `dimensions_delta` 全 0**、
+每行容差 1.5e-6 … 9.6e-6；`--factory-startup` 的 3 个对象（Cube/Light/Camera）报成 `extra`
+（不是失败）；`head` 读回 `[0.39, 0.16, 0.352]`、`arm_L` 位置 `[−0.2625, 0, 0.656]` —— 与参数一字不差。
+
+**候选与交付的关系**：`ops` 数组**逐字节相同**，只有 6 个能力来源字段不同（live vs 快照）；
+候选那份**仍然没有读回**（没被回填），这正是"候选 = 复核时看到的版本"该有的样子。
+
+**这一轮核验抓到的两个缺陷（都已修，各带回归断言）**：
+
+| # | 缺陷 | 证据 | 修法 |
+|---|---|---|---|
+| 1 | `parameters.json` 的**键序跟着调用方走** ⇒ 同值不同字节 | 同一组参数，`photo-round-3-candidate` 是 `id,feature,w,d,h,at` / `frame = up,front,handed`，`photo-round-3` 是 `at,d,feature,h,id,w` / `front,handed,up` | `canonicalParams()`：顶层按 `INTENT_KEYS`、assembly 项按声明顺序、其余按键名排序（JSON 键序无语义，规范化不丢信息） |
+| 2 | `scene_readback.asserts` **写死 "within 1e-6"**，而同一份载荷的 `rows[].tolerance` 最大到 **9.6e-6** | 断言清单与它旁边的数字自相矛盾，读者只能拒绝背书 | 三个容差数字都从 `SCENE_RELATIVE_TOLERANCE` / `SCENE_ABSOLUTE_FLOOR` 拼出来（断言里也不抄字面量，而是从常量推） |
+
+两条是同一族（"把会变的事实写成常量" / "判定与报告必须是同一个数"）的第 4、第 5 次现身。
+
+**一条读法（必须随交付说出去）**：这份参数的 6 条 `unresolved` 里最根本的是
+"画面里没有任何已知真实长度的物体" ⇒ 所有数值只是**相对于图形总高的比例**，
+所以图纸只该核**比例、体量个数、排布**，**不该拿去量绝对米数**。
+
+自检 183 → **188 条断言全部通过**。
+
 ## 10. 未决项
 
 
@@ -814,9 +849,10 @@ report 记录 e78794a2bc…377b  /  磁盘 5374f77d81…4fa9
 9. ~~M2 的 lowering~~ —— **已完成**（§9.11）：`column` / `sheet` / `ring` / `dome` / `spire` 五件
    都能 lower，`approx` 与 `unsupported` 分开记；M3/M4 才轮到 `roof.gable` / `prism` / `extrude` /
    `opening`（要扩下游）。
-10. **图纸这一环还没在真实会话里走过**：本机只有单元断言 + 一次真实 ops 的探针
-    （20 个对象 → 978×602、29944 字符、全图比例尺 114.229）。"先 save 候选 → 人看 `sheet.svg` →
-    才 `apply_ops`"这条**顺序**还没被跑过一遍，也就没验证过"人真的会在这时候看、并且看得懂"。
+10. ~~图纸这一环还没在真实会话里走过~~ —— **2026-10-09 走通了一遍**，见 §9.14：候选（无实例）→
+    人看 `sheet.svg` 放行 → ④⑤⑥（有实例）→ ⑦ 干净关闭。仍未验的是"**新会话**里从零跑第一轮"
+    （本次是旧会话复用参数），以及 §9.12 ③ 那条"候选与交付必须用两个 `run_id`"的规矩在被违反时
+    会不会被看出来（工具会报 `readback_not_recorded:true`，但没人真的踩过一次）。
 11. **截图能不能进 AGH 会话**（仍未验，5 分钟实验）：用户**粘贴**=可以；按路径读=未知；
     `computer_use` 截图=未知。它同时卡着参数路与网格路的复核工作流设计（§9.12 ③ 与 StdGEN/CharacterGen 那条路）。
 

@@ -71,13 +71,18 @@ entry = {
 
 1. 起一个受管理实例 → `mesh.primitive_add{kind:'cube', name:'v', size:1, scale:[12.4,8.6,9.3]}`
    → `agh_blender_scene`：`objects['v'].dimensions` 必须等于 `[12.4, 8.6, 9.3]`，各分量差 ≤ 1e-6。
+   ⚠️ 注意这一条的精度**高于我方判据**：立方体尺寸应当逐位精确，所以拿 1e-6 当验收是对的；
+   但我方读回的容差是**相对**的（`SCENE_RELATIVE_TOLERANCE = 1e-5` × 最大坐标，下限 1e-9），
+   因为限制精度的是曲面基元的多边形近似（实测 `uv_sphere` 直径 2 报回 1.999999）。
 2. 同一条链路对 `plane` 成立：`dimensions` 的第 3 个分量为 `0`（平面零厚）。
 3. 对 `cylinder` / `cone` 再各来一条：这一条会顺带把"`size` 是直径"这个语义也钉死
    （我们的 capability 快照里记的是 `radius = size/2`，但没被真实场景验过）。
 4. `describe_scene()` 在有相机/空物体存在的场景里仍然成功返回（不抛）。
 5. `dimensions` 为 `None` 的对象不得让 `agh_blender_scene` 或 `/scene` 报错。
 
-第 1、2 条通过之后，`agh-ortho` 的 `against_blender` 档就有意义了。
+第 1、2 条**已通过**（0.1.8 起 `describe_scene()` 发布 `dimensions`），读回因此能断言尺寸。
+但这一档的名字是 `scene_readback`（半档），**不是** `against_blender`：图像级比对仍然做不到，
+理由见上一节"不加相机 / 正交渲染 op"这条决定 —— 它是**永久**的，不是"以后再说"。
 
 ## 5. 成对要改的东西（同一次变更）
 
