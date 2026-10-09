@@ -1110,6 +1110,49 @@ MESH-PLAN 任务 1.1。自检 203 → **208 全过**；新 integrity `sha256-8ed
 `compareScene` 对**带旋转**的对象本来就不做尺寸断言，而无旋转时"世界 AABB"与"局部包围盒 × scale"是同一个数。
 欠账关闭，理由在此。
 
+## 9.23 剪影档 + 源图档（2026-10-09 夜，`agh-blender@0.4.0`）
+
+**这一晚补的两档，都是"声明必须可核对"这条主线的延伸。**
+
+### 剪影档（"轮廓像不像"第一次可判）
+
+- 新模块 `silhouette.mjs`（零依赖，只用 `node:zlib`）：解 PNG（手写反 filter 1–5 型）→ 覆盖率 / 包围盒 /
+  四边是否贴边 / 宽高比；**只接受带 alpha 的图**，RGB 图**直接拒绝**（猜背景色会静默决定判定结果）。
+- 像素↔米**只认** `ortho_scale + sensor_fit + 图像尺寸`；`AUTO` 按**较长边**。
+- 容差 = `max(2 像素折算成米, 相对 1%)` —— **判据精度不超过渲染精度**（渲染是采样，1 像素就是它的极限）。
+- 接进 `fit`（进 verdict）与 `save`（进 `report.json.checks`）；**读不到图 = blocker**，且**单独列在**
+  `silhouette_blockers`（否则"没发生"会在载荷里消失）。
+- 下游实测教训**升级成 blocking**：相机偏半格 ⇒ 2.0 m 量成 **1.2 m**（被裁的图给出"看起来合法"的数）
+  ⇒ `E_SILHOUETTE_CROPPED`。
+- 16 条断言**全部用自造 PNG**（已知面积/包围盒/aspect；两种分辨率在**米**上一致；已知对/已知错各一；
+  RGB 图被拒；空图为空；无尺度则无判定）。
+
+### 源图档（"源自这张图"第一次可核）
+
+- 声明了 `source.input_image_sha256` 而**没给 `image_file`** ⇒ **blocking**（没有东西能核的声明就是装饰）；
+  给了则按**真实字节**算 sha256 比对，**不符/读不到都 blocking**；源图**登记进包**（只登记不复制）。
+- `fit` 把它纳入 verdict（断言写的是**因果**：相符仍是 fit、不符变 revise）；`save` 记进 `checks.image`。
+
+### 这一晚踩的坑（都记着）
+
+| 现象 | 教训 |
+|---|---|
+| `SILHOUETTE_INPUT` 被 `SAVE_INPUT` 引用却声明在后面 → TDZ | **TDZ 第三次**（前两次 `PHOTO_CHECK` / `MESH_SOURCE`）：schema 常量一律声明在最前 |
+| 照抄 `verify` 的写法，在 `fit` 里 `blockers.push(...)` → `ReferenceError` | **`fit` 没有 `blockers` 数组**（结论走 verdict）：别把另一个工具的局部变量当通用件 |
+| `const { createHash } = await import('node:crypto')` → 重名 | 文件里已有；**先看已有 import 再加** |
+| 夹具的 `photo_check` 写的是 0（别处用例留下的）→ 把"一致"用例挡了 | 断言要对准**本档**，并知道夹具其它字段在说什么 |
+| 用 `1e-9` 去比一个 `toFixed(6)` 的报告值 | **"判据精度不能超过输入精度"第 7 次** —— 这次输在自己手里 |
+
+### 快照与下游
+
+`agh.capability.json` 升到 **`agh-blender@0.4.0`**：`capabilitySet` 换新格式
+（`primitives-6.ops-16.limits-64-512`，只影响**兜底常量**），op 表加入 `camera.add` / `render.still`，
+并记下两条现场事实：**下游把 `sensor_fit` 钉死为 VERTICAL**（⇒ `ortho_scale` 就是画幅世界高度，与本插件
+`metresPerPixel = ortho_scale / height` 完全对齐）、**`ortho_scale` 读回是 float32**（对本插件无影响：
+只用它推容差、不用它推 aspect —— aspect 与尺度无关）。
+
+提交：`511f5d7b`（剪影档）· `9aa0febb`（裁切 blocking + 快照 0.4.0）· `8fedc041`（源图档）。
+
 ## 10. 未决项
 
 

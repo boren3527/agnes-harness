@@ -279,6 +279,24 @@ StdGEN 那类项目的核心贡献不是网格，是**语义分解**（身体/�
 - **安装后必须核**：`package status` 到 `actual=running` 再开新对话 —— 否则新会话里整包工具不存在
   （实测症状：工具清单里没有 `agh_ortho_*`）。
 
+### 3.13 两个可选输入：`silhouette` 与 `image_file`
+
+两个都是**便宜且立刻可验**的档，建议在收敛那一轮一起给上：
+
+- **`silhouette: { path, ortho_scale, sensor_fit }`** —— 一张**带透明通道**的正交渲图，多一档**可判**的
+  "轮廓像不像"：剪影折算成米后**同时**与 `outline`（几何自洽）和 `photo_check`（像不像照片）比。
+  - **`ortho_scale` 必填**：它是像素↔米的唯一依据，缺了就没有判定（不是"跳过"）。
+  - **贴边即 blocking**（`E_SILHOUETTE_CROPPED`）：被裁的图会给出**看起来合法**的数 —— 下游实测过一个
+    2.0 m 的物体量成 1.2 m。
+  - 容差按**渲染分辨率**推（≥2 像素折算），所以别用高分辨率空盼更高精度。
+  - 图从哪来：下游 `camera.add{type:"ORTHO", ortho_scale}` + `render.still{transparent:true}`；
+    或人在 Blender GUI 里手渲一张（`Film > Transparent` 开）。
+- **`image_file`**（源照片的真实路径）—— 核对参数里声明的 `source.input_image_sha256`：
+  - **声明了却不给文件 = blocking**（没有东西能核的声明就是装饰）；
+  - 相符才通过，并把**源图登记进交付包** ⇒ "这张图 → 这个网格"第一次是可核的事实。
+
+（两档都进 `fit` 的 verdict，也都进 `save` 的 `report.json.checks`；读不到都是**明确 blocker**，不是"没发生"。）
+
 ## 4. 归因纪律：⑤ 失败时**默认不要改参数**
 
 失败有三种方向，应对完全不同：
