@@ -761,8 +761,13 @@ report 记录 e78794a2bc…377b  /  磁盘 5374f77d81…4fa9
 
 ### 自检与 integrity
 
-自检从 168 → **183 条断言全部通过**（新增：8h 的 6 条 mesh 断言 + 8i 的 6 条图纸断言 +
-2 条重放读回断言 + 1 条载荷 note 断言）。`notes/` 里改字不动 integrity；动了 `package/` 就要重装。
+自检从 168 → **190 条断言全部通过**（新增：8h 的 6 条 mesh 断言 + 8i 的 6 条图纸断言 +
+2 条重放读回断言 + 1 条载荷 note 断言 + 4 条"参数文件规范键序"断言 + 1 条"断言清单容差不写死"断言
++ 2 条"工具描述必须教冷启动要点"断言）。`notes/` 里改字不动 integrity；动了 `package/` 就要重装。
+
+**统计口径的一个坑（实测）**：用 PowerShell 管道数自检行数会**少算** —— 很长的一行会把下一行
+并进同一行（实测 **188 vs 190**，我差点把 188 写进报告）。要数就用
+`cmd /c "node agh-ortho\tools\check.mjs > out.txt"` 重定向再数。
 
 **真实安装（2026-10-09 15:34，本机实测）**：源码与已装记录同为
 `sha256-f2c7943a7f90dd1b3bfc67826620b1b4bd9ad387eac138d2c606bc208a24a4cf`，
@@ -825,6 +830,126 @@ missing/mismatched 0、`size_asserted: true`、**20 行 `dimensions_delta` 全 0
 所以图纸只该核**比例、体量个数、排布**，**不该拿去量绝对米数**。
 
 自检 183 → **188 条断言全部通过**。
+
+## 9.15 为"冷启动"铺路：把要点写进**工具描述**（2026-10-09）
+
+冷启动那一轮（新会话、从零、只贴一张照片）里，模型**唯一必然读到的**东西是**工具描述** ——
+它不会去读 `notes/`。所以那次开跑之前，把三件"不写就必然踩"的事写进了 `agh_ortho_fit` 的描述：
+
+1. 进来先按顺序看 `validation`/`revise_hints` → `photo_check` → `anchor`
+2. **必须在参数里写下 `photo_check` 区间**（`photo_check.front.w_over_h_min/_max`，相对半宽 ≤30%）——
+   不写它就等于这一档没有发生，"像不像照片"会静默退回纯人眼
+3. **没有已知长度参照物时必须显式声明 `assumptions: ["proportions_only"]`**（或 `authored_dimensions`），
+   不要编一个看起来合理的米数
+4. `verdict=fit` 之后**不要直接 apply_ops**：先落候选 `run_id`（带 `-candidate`）→ 人看 `sheet.svg` →
+   再 apply_ops → 交付包用**另一个** `run_id`
+
+**同时改掉一句与现状矛盾的话**：`agh_ortho_verify` 的描述里写着"验不了最终尺寸（下游不发布
+dimensions）"——**下游 0.1.8 早就发布了**，读回也确实在断言尺寸（§9.14：20 行 `dimensions_delta`
+全 0）。这是"把会变的事实写成常量"的第 6 次现身，只是这次它写在**给模型看的文字**里。
+两条都加了断言（描述里必须出现冷启动要点；描述不得再说"验不了最终尺寸"）。
+
+## 9.16 冷启动一轮：从零到交付（`kuson`，2026-10-09）
+
+第一次**全新会话、只贴一张照片**跑完 ①→⑥。三件"不写就必然踩"的事**都没踩**，而且 photo_check
+**第一次真的抓到了东西**。
+
+**流程**：① 读照片出候选参数（`proportions_only`，无编造的绝对米数）→ ② fit 第 1 轮 `revise`
+（**blocking 1**）→ ② fit 第 2 轮 `fit` → ③b 候选包 `kuson-candidate`（10 描述符，`sheet.svg`
+是第 1 号，14512 B）→ ④ 起实例 + 8/8 ops → ⑤ 读回 8/8 → ⑥ 交付包 `kuson` → ⑦ 干净关闭
+（`elapsedMs 2019`，不是那个竞态）。
+
+**photo_check 的第一次实战收获**：第 1 轮它声明主视图宽高比 `0.33–0.42`，而模型自己算出 `0.296`
+⇒ **blocking**。根因不是"读数写错"，是**几何本身错了**：它当时的头只有 0.36（照片约 0.57），
+腿又多伸 0.23 挂到地面以下，两个错误正好把比值压到 0.296。修正后声明 `0.53–0.60`、算出 `0.567`、
+`inside: true`（相对半宽 0.0619 ≤ 0.3）。**这一档的边界也第一次被实证**：它能抓量级错误，
+第 2 轮之后它就**没有分辨力**了 —— 它比对的是"模型自己写的两个数"，不是照片。
+
+**归因纪律的一次真实越界（模型主动交代）**：第 1 轮它做的不是"改一处"，而是**重排了整条竖向标尺**
+（同一套像素读数重算 z），`frame` 的修正只是解掉一个独立校验项。所以"fit 通过了"**不能归因到某一步**。
+
+**交付包独立核过**：10 描述符 sha256/bytes 全符；`verify.json` 两档（numeric 残差
+`5.551115123125783e-17 ≤ 1e-9` + `scene_readback` 8/8 `match`、`missing`/`mismatched` 空、
+`size_asserted: true`、**8 行 `dimensions_delta` 全 0**、逐行容差 2.16e-6…7.96e-6）；
+`Camera/Cube/Light` 报成 `extra` 不算失败；`capability_source = tool:agh_blender_ops_catalog`、
+`target = agh-blender@live:catalog-v1`、`primitive_gate = not_applied: the target publishes no primitives list`。
+与候选对比：`parameters.json` **逐字节相同**、`ops` 数组**逐字节相同**、`sheet.svg` **sha256 相同**
+（`0496f803…`）—— 只有 `verify.json` 变大（9699 → 18836 B，多出读回那一档）。候选那份**仍无读回**。
+
+**这一轮暴露的两个真窟窿**：
+
+1. **交付包不含便宜档的结论**：`report.json` / `verify.json` 里都**没有** `anchor` / `photo_check` /
+   `parts` / `overlaps` / `placement` 任何一个键。也就是说 `numeric` 档的交付包**落盘的证据只有残差**，
+   "验了什么"只存在于对话里；审计者只能自己重跑 fit。（补丁：把这几段的结论摘要写进 `report.json`
+   的 `checks` 段 —— **已在 §9.17 修掉**。）
+2. **交付包里没有模型本身**：这一轮 8 个网格真实存在于实例里，但 `stop` 之后场景就没了，
+   `.blend` 没有落盘。模型文件目前**不在**产物里。（补丁：`save` 的 `scene_file` —— **已在 §9.17 修掉**。）
+
+**关于"能不能看见模型"，我更正自己前面两个判断**（两处都写在会话里过，这里是更正）：
+下游**有** `agh_blender_capture`（离屏渲染当前 3D 视图 → 只回报 PNG 的 path/sha256/bytes，
+**从不把图片作为内容块返回**，理由是"实测两次"那样会毒化会话）与 `agh_blender_export`
+（把场景导出成独立 `.blend`，`destination` 是不存在的路径，**绝不覆盖**）。
+所以我之前说的"没有相机 op ⇒ 看不到"只对**图像级自动比对**成立（那一档确实永远做不到）；
+**给人看**这条路是通的 —— 而且 `agh_blender_capture` 与 `file.stage_export` / `file.checkpoint`
+（写进实例目录、拒绝覆盖）是同一个形状。
+
+**并且这一轮跳过了**：人**没有看图纸**就进了 ④（用户明确选择跳过）。所以这一轮的结论里
+**不含任何"像照片"的成分**，只有"自洽 + 下游照做"。这条要如实记着，别把"全绿"读成"像"。
+
+## 9.17 补上 §9.16 的两个窟窿（2026-10-09）
+
+两个都在同一次改动里修掉，各带回归断言（自检 190 → **197**）：
+
+**① `report.json` 现在带 `checks`**：`anchor` / `declared_confidence` / `photo_check` / `overlaps` /
+`parts` / `placement` / `generated` 的**结论摘要**，与已有的 `scene_readback` 摘要并列。
+在此之前，一个 `numeric` 档的交付包**落盘的证据只有残差** —— "验了什么"只活在对话里。
+（实测依据：`kuson` 与 `kuson-candidate` 的 `report.json` 里这三个键一个都没有。）
+
+**② `save` 能登记模型本身**：新可选入参 `scene_file`（下游 `agh_blender_export` 落盘的 `.blend`
+的**真实路径**）⇒ 成为第 11 个描述符，`kind: 'scene'`、`mime: 'application/x-blender'`、
+**按原始字节**算 sha256/bytes（不是 UTF-8 文本算术 —— 二进制那样算一定是错的），
+并且**只登记、不复制**（描述符的 `path` 指向工作区里那个文件，run 目录保持"只由我们写"的形状）。
+读不到它时是 `E_SCENE_FILE_UNREADABLE`（blocker）而不是"悄悄没有"：**别把包里的缺席读成"没有模型"**。
+`report.json` 另有一项 `scene_file`（`null` = 这一轮没有导出，不是"有但没登记"）。
+
+这一轮同时确认（写进 §8 的命令序列与用户须知）：
+
+- `agh_blender_capture` 渲的是**当前 GL 视口（透视）**，不是正交六视图；工具**从不**把图片放进结果
+  —— 这回答了 §10 里那个悬了很久的问题：**工具产出的图片进不了模型，只能进人的眼睛**
+  （要让模型看，必须由人把图**贴进对话**）。
+- 导出的 `.blend` 里**会带上** `--factory-startup` 的 Cube/Light/Camera（ops 里没有删除指令）。
+  这不是缺陷，但打开时会多一个 2×2×2 的方块；要"只有我们那 8 个对象"的干净件，得另跑一批
+  `object.delete` + `data.purge_unused`，而那会让"ops.json 描述这个场景"不再成立 —— 未决。
+
+## 9.18 第一个"含模型本身"的交付包（`kuson-scene`）+ `.blend` 不可复现的实测（2026-10-09）
+
+`kuson-scene` 是第一个把 §9.17 那两个补丁用上的包，独立核过：
+
+- **11 个描述符**：7 个 `image`（图纸 + 六视图）→ 3 个 `json` → **1 个 `scene`**（最后一个）；
+  sha256/bytes 与磁盘全符。第 11 个：`kind: 'scene'`、`mime: 'application/x-blender'`、
+  `path = D:\agnes-harness\outputs\kuson-scene.blend`、`bytes 645556`、
+  `meta = {external: true, register_only: true, producer_tool: 'agh_blender_export'}`，
+  **文件确实存在且尺寸相符** 且**没有被复制进 run 目录**。
+- **`report.json` 的 `checks` 填上了**（§9.16 的窟窿①）：`anchor.present=false / declared_ratios_only=true`、
+  `photo_check.rows[0].inside=true`（`computed 0.567`）、`overlaps.significant=[]`、
+  `parts = body(2) + clothing(6)`、`placement.on_ground/centred = true/true`、`generated.declared=[]`。
+  此后一个包**落盘的证据**不再只有残差。
+- 两档校验：numeric `5.55e-17 ≤ 1e-9`；读回 8/8 match、8 行 `dimensions_delta` 全 0。
+
+**`.blend` 不可复现，这是实测**：`kuson.blend`（`516c24e0…`）与 `kuson-scene.blend`（`0be28679…`）
+**字节数完全相同（645556）、逐字节比有 7419 字节不同**，首个差异在偏移 20064、最后一个在 454944
+（散布全文件，不是尾部一小段）。这就是 Blender 把会话/内存标识写进文件的结果 —— 与"生成网格不可复现"
+是同一条道理，只是对象换成了场景文件。后果必须写清楚：
+
+- 描述符里的 sha256 是**这一份文件**的身份，**不是这个场景**的身份；
+- **不要**用哈希去判断两次导出"是不是同一份东西"。要判同一性，看 `ops.json` 与读回；
+- 对照一下我们**自己**那一侧：`kuson-candidate` / `kuson` / `kuson-scene` 三个 run 的 `sheet.svg`
+  **sha256 完全相同**（`0496f803…`）—— 参数→ops→图纸这条路是**可复现**的，
+  下游导出**不可复现**。两条路的可复现性不同，**别混**。
+
+**仍未做**：`.blend` 里带着 `--factory-startup` 的 Cube/Light/Camera（Cube 是 2×2×2 带 Material）。
+要"只含那 8 个对象"的干净件，需要另加 `object.delete` + `data.purge_unused`，而那会让
+"`ops.json` 描述这个场景"不再成立（ops 里会多出删除指令）—— 属于未决，见 §10。
 
 ## 10. 未决项
 
