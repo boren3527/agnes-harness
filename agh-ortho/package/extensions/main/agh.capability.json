@@ -1,11 +1,11 @@
 {
   "schema": "agh.capability/1",
-  "target": "agh-blender@0.1.8",
-  "target_measured_against": "agh-blender@0.1.7",
-  "target_note": "0.1.8 只改了 describe_scene()（开始发布 dimensions / rotation_euler），OPS / OP_MANIFEST / limits / catalog() 一行未动，所以下面这些条目仍然描述 0.1.8。**下游一旦改 op 或限额，这个文件必须同步更新** —— 实测被抓到过：它写着 0.1.7 而实际装的是 0.1.8，载荷里就跟着报了错的目标版本（stale:true 是唯一的分辨线索）。",
+  "target": "agh-blender@0.3.1",
+  "target_measured_against": "agh-blender@0.3.1",
+  "target_note": "0.3.1 起 catalog() **自己发布** primitives 与 capabilitySet（由校验 kind 的同一个元组导出）；同时新增 mesh.import 等 op（op 表 10 → 15）。本快照只在**没有活实例**时兜底 —— 有实例时必须用实时目录。**下游一旦改 op 或限额，这个文件必须同步更新**（实测被抓到过：它写着 0.1.7 而实际装的是 0.1.8，于是载荷里的目标版本是错的、stale:true 是唯一线索）。",
   "capabilitySet": "primitives-6",
-  "capabilitySetNote": "下游 catalog() 不发布能力集标识；本字段由本插件按『包版本 + 基元种类数』合成。这是 CONTRACT §5.2 要求 target_capability_set 与下游实际发布内容之间的一个已知缺口。",
-  "observedAt": "2026-10-08",
+  "capabilitySetNote": "0.3.1 起该标识由**下游权威发布**（`catalog().capabilitySet`），本字段只是无实例时的兜底副本。有实时目录时 `capabilitiesFromCatalog` 优先取下游的值 —— 这里写的值不参与那个判定。",
+  "observedAt": "2026-10-09",
   "source": "agh-blender/package/extensions/main/bridge/agh_ops.py → OPS / OP_MANIFEST / catalog()；包版本取自 agh-blender/package/package.json",
   "unit": "m",
   "primitives": ["cube", "uv_sphere", "cylinder", "cone", "torus", "plane"],
@@ -28,6 +28,7 @@
   },
   "ops": [
     { "name": "mesh.primitive_add", "mutates": false, "destructive": false },
+    { "name": "mesh.import", "mutates": false, "destructive": false, "note": "导入外部生成的网格（.glb/.obj）。它的 size/location 是**调用方的期望值，会被比对并回报，但不施加**（下游 agh_ops.py 明写）⇒ 摆放必须另发 object.transform。" },
     { "name": "object.transform", "mutates": true, "destructive": false },
     { "name": "object.duplicate", "mutates": false, "destructive": false },
     { "name": "object.delete", "mutates": true, "destructive": true },
@@ -38,7 +39,8 @@
     { "name": "file.checkpoint", "mutates": false, "destructive": false },
     { "name": "file.stage_export", "mutates": false, "destructive": false }
   ],
-  "authorityNote": "mutates / destructive 必须以 agh_ops.py 的 OP_MANIFEST 为准，不能手抄别的表：它们驱动审批决策，写错的后果不是报错，而是审批行为静默变化（CONTRACT §11-2）。本文件里的值于 2026-10-08 逐条对照 OP_MANIFEST 抄录，其中 mesh.primitive_add / object.duplicate / material.set / file.checkpoint / file.stage_export 的 mutates 是 false —— 与 CONTRACT §3.1 表格给人的印象不同。",
+  "opsNote": "这里只抄录本插件**会用到或需要判存在性**的 op；0.3.1 的实时目录里有 15 个（含 start/probe 等非 op 工具不计）。判『目标支不支持 X』一律以**实时 catalog().ops** 为准。",
+  "authorityNote": "mutates / destructive 必须以 agh_ops.py 的 OP_MANIFEST 为准，不能手抄别的表：它们驱动审批决策，写错的后果不是报错，而是审批行为静默变化（CONTRACT §11-2）。本文件里的值于 2026-10-09 对照 OP_MANIFEST 抄录，其中 mesh.primitive_add / mesh.import / object.duplicate / material.set / file.checkpoint / file.stage_export 的 mutates 是 false —— 与 CONTRACT §3.1 表格给人的印象不同。",
   "missing": ["extrude", "revolve", "boolean", "自定义顶点/网格", "相机控制/正交六视图渲染"],
   "stalenessPolicy": "下游加 op 或改限额后本文件即过期。本插件不假设它新鲜：每次读取都标 stale，并要求调用方自行核对。"
 }

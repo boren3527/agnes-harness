@@ -83,7 +83,7 @@ function sceneAsserts(sizeAsserted) {
 function sceneCannotAssert(sizeAsserted) {
   const out = []
   if (!sizeAsserted) {
-    out.push('the final size in metres: scene.describe publishes no dimensions, so whether size=1 means a unit edge is still unverified')
+    out.push('the primitive KIND: the downstream catalog publishes no per-kind vertex/face counts, and agreement with the original photograph would need a camera op it deliberately does not provide')
   }
   out.push('the primitive kind beyond type=MESH: the downstream catalog publishes no per-kind vertex/face counts, so vertices/polygons are reported as evidence and not asserted')
   // 即使下游补上 dimensions，这一条也永远补不上 —— 所以它必须一直在这里，不能靠"以后再说"。
@@ -214,6 +214,11 @@ const MESH_SOURCE = {
     weights: { type: 'string' },
     seed: { type: 'integer' },
     input_image_sha256: { type: 'string' },
+    // 文件**自己的空间**：网格不可复算，所以它必须自报"哪根轴朝上、什么单位、生成器保证的长度是多少"。
+    // 这三项都**不是**猜测的余地：缺了 buildMesh 直接报 blocker（静默猜轴向会出一个"看起来对、量起来错"的模型）。
+    up_axis: { type: 'string' },
+    unit: { type: 'string' },
+    declared_height: { type: 'number' },
     note: { type: 'string' },
   },
   required: ['kind'],
@@ -364,6 +369,9 @@ const SAVE_INPUT = {
     // 它由 agh_blender_export 落盘在 run 目录之外（例如 outputs/xxx.blend），这里只登记、不复制：
     // 描述符的 path 指向那个文件，sha256/bytes 按**原始字节**算。
     scene_file: { type: 'string', minLength: 2 },
+    // 外部生成的网格（StdGEN 那类）的**真实路径**：登记成描述符（只登记不复制），
+    // 并顺带读同目录的 source.json（unit/upAxis/declaredHeight 的声明）。
+    mesh_file: { type: 'string', minLength: 2 },
   },
   required: EMIT_OPS_INPUT.required,
   additionalProperties: false,
@@ -617,6 +625,80 @@ function buildBox(item, name, blockers) {
   ]
 }
 
+/** 外部生成的网格（StdGEN / CharacterGen 那类）：**声明驱动**。
+ *
+ *  emit 阶段是纯函数、**不读盘**，所以这里只认参数里写下的声明：`path`（文件在哪）、
+ *  `source.up_axis` / `source.unit` / `source.declared_height`（**文件自己的空间**）。
+ *  缩放不是猜的：`scale = h / declared_height`（h = 参数里声明的目标高度，单位米）。
+ *
+ *  分工（这是本设计的要点）：**纯层只管"声明齐不齐"，有盘的那层（`save`）管"声明真不真"** ——
+ *  save 会读 source.json 与文件本身、量出包围盒，与声明不符即 **blocking**。
+ *  `size` 是**声明过的意图尺寸**（米）：op 侧靠它算包围盒，于是两条路径比对的是同一组数。
+ */
+function buildMesh(item, name, blockers) {
+  const source = item.source ?? {}
+  const path = typeof item.path === 'string' && item.path.length > 0 ? item.path : null
+  const w = leafNumber(item, 'w', blockers)
+  const d = leafNumber(item, 'd', blockers)
+  const h = leafNumber(item, 'h', blockers)
+  const upAxis = typeof source.up_axis === 'string' ? source.up_axis.toUpperCase() : null
+  const unit = typeof source.unit === 'string' ? source.unit : null
+  const declared = Number(source.declared_height)
+  if (!path) {
+    blockers.push({
+      code: 'E_ARG_MISSING',
+      message: `"${item.id}": a mesh item must declare the file it came from (path, e.g. .agnes/agh-ortho/meshes/<name>/mesh.glb) — without it the mesh cannot be imported and its provenance cannot be re-checked`,
+    })
+    return []
+  }
+  if (upAxis === null || !['X', 'Y', 'Z'].includes(upAxis)) {
+    blockers.push({
+      code: 'E_ARG_MISSING',
+      message: `"${item.id}": source.up_axis must name the axis the FILE is up (X/Y/Z). Guessing it silently produces a rotated, plausible-looking model — that is a silent error, so it is refused.`,
+    })
+    return []
+  }
+  if (unit === null || !['m', 'cm', 'mm', 'normalised'].includes(unit)) {
+    blockers.push({
+      code: 'E_ARG_RANGE',
+      message: `"${item.id}": source.unit must be one of m/cm/mm/normalised — a mesh file (esp. OBJ) carries no unit at all, so it has to be declared.`,
+    })
+    return []
+  }
+  if (!Number.isFinite(declared) || declared <= 0) {
+    blockers.push({
+      code: 'E_ARG_RANGE',
+      message: `"${item.id}": source.declared_height must be a positive number — the length the generator guarantees INSIDE the file. It is what turns the file's own space into metres.`,
+    })
+    return []
+  }
+  if (w === null || d === null || h === null) return []
+  return [
+    {
+      op: 'mesh.import',
+      args: {
+        path,
+        name,
+        upAxis,
+        scale: h / declared,
+        // **不发 location**：导入那一刻对象还没被摆放（下游明写 size/location"只比对不施加"），
+        // 所以它会拿"声明的落点"比"导入后的实际位置"——**必然报 false**。那是噪音不是发现
+        // （实测：location.ok:false，而随后那条 object.transform 把位置设对了）。
+        // 落点交给下面那条 object.transform，读回自会核对它。
+        size: [w, d, h],
+      },
+    },
+    // **两条 op，不是一条**：下游在 agh_ops.py 里明写 "size/location are the caller's expectation,
+    // not a transform: compared and reported, never [applied]" —— 也就是说 mesh.import 只会**核对**我们
+    // 报的期望值并回报，**不会**把对象摆到那里。所以摆放必须另发一条 object.transform，
+    // 否则对象停在原点（实测：第 3 步 location 未生效，正是这个原因）。
+    {
+      op: 'object.transform',
+      args: { name, location: placementOf(item, h) },
+    },
+  ]
+}
+
 // ---------------------------------------------------------------------------
 // M2 的 lowering：CONTRACT §4.3 里另外五种意图
 //
@@ -634,10 +716,33 @@ function primitiveAvailable(caps, kind) {
   return { ok: false, gated: true, why: `the target declares primitives ${list.join('/')} and has no "${kind}"` }
 }
 
+/** 目标有没有这张 **op**。与基元闸门是**两件事**：基元闸门管 `mesh.primitive_add` 的 kind，
+ *  这里管"该操作在不在目标的 op 表里"（例如 `mesh.import`）。
+ *
+ *  保守方向与 primitiveAvailable 一致：**目录里没有 op 表时返回 ok（无法判定，不假装拒绝）**；
+ *  有表而不含该项 ⇒ 如实 `ok:false`，由调用方报成 unlowered / no_downstream_op。
+ *  下游**没有义务**支持导入 —— 缺就如实说缺，这跟"我还没实现"是两回事。 */
+function opAvailable(caps, name) {
+  const list = Array.isArray(caps?.ops)
+    ? caps.ops.map((o) => o?.name).filter((n) => typeof n === 'string')
+    : null
+  if (!list || list.length === 0) {
+    return { ok: true, gated: false, why: 'the catalog publishes no op table, so this could not be gated' }
+  }
+  if (list.includes(name)) return { ok: true, gated: true, why: null }
+  return { ok: false, gated: true, why: `the target's op table has no "${name}" (it publishes: ${list.join(', ')})` }
+}
+
 /** 把 caps 变成 geometry 侧要的判据。
  *  **参数侧必须应用与 op 侧相同的闸门**：否则闸门拒绝某项时，op 侧少一个而参数侧多一个
  *  ⇒ 报成"内部不一致"，把"下游没有这种基元"这个真实原因掩盖成一条假告警。 */
-const kindAvailableFor = (caps) => (kind) => primitiveAvailable(caps, kind).ok
+const kindAvailableFor = (caps) => (kind) =>
+  // 带点的名字是一条 **op**（`mesh.import`），不是基元 kind：按 op 表判定。
+  // 两条路径（参数侧 / op 侧）必须用同一个判定，否则闸门拒绝时会出现"参数侧多一个、op 侧少一个"
+  // 的假"内部不一致"，把"下游没有这张 op"这个真实原因掩盖掉。
+  typeof kind === 'string' && kind.includes('.')
+    ? opAvailable(caps, kind).ok
+    : primitiveAvailable(caps, kind).ok
 
 /** 只读取、不报错（用于"可选"的字段，别把可选当缺失）。 */
 function optionalLeaf(item, key) {
@@ -744,15 +849,20 @@ const LOWERING = {
       'a dome is a hemisphere, but the downstream has only a full uv_sphere: the sphere is centred on the base plane, so its lower half is buried and its upper half gives the dome. The object itself therefore measures (dia, dia, dia), not the dome height.',
   },
   spire: { status: 'exact', kind: 'cone', build: buildSpire },
-  // 外部生成的网格（StdGEN / CharacterGen 那类）。**下游白名单里没有导入 op** ——
-  // 所以它今天进不了受管理场景，但**声明出来**而不是丢掉，有两个理由：
-  //   ① 它的来源（模型/权重/seed）必须随产物走 —— 网格**不可复算**，不记就永远导不回来；
+  // 外部生成的网格（StdGEN / CharacterGen 那类）。**能力驱动**：目标目录里声明了
+  // `mesh.import` 就是 exact（emitOps 的 op 闸门会核），没声明就如实落进 unlowered / no_downstream_op。
+  // 声明出来而不是丢掉，有三个理由：
+  //   ① 来源（模型/权重/seed/输入图哈希）必须随产物走 —— 网格**不可复算**，不记就永远导不回来；
   //   ② 报告要如实说"这一类部件的**形状三档都验不了**"（numeric / photo_check 不适用，
-  //      读回只验得到存在 / 位置 / 尺寸）。
+  //      读回只验得到存在 / 位置 / 尺寸）；
+  //   ③ 真实尺寸由**文件**决定，所以参数里必须声明文件自己的空间（up_axis / unit / declared_height）。
   mesh: {
-    status: 'unsupported',
+    status: 'exact',
+    requiresOp: 'mesh.import',
+    build: buildMesh,
     reasonCode: 'no_downstream_op',
-    reason: 'no mesh import op downstream (mesh.import{path} is on DOWNSTREAM-REQUEST); a generated mesh can only be declared and recorded today',
+    reason:
+      'the downstream catalog does not declare a mesh import op (mesh.import is on DOWNSTREAM-REQUEST). A generated mesh can only be declared and recorded until it does.',
   },
   'roof.gable': {
     status: 'unsupported',
@@ -861,6 +971,16 @@ function emitOps(params, caps) {
       }
     }
 
+    // op 闸门（与基元闸门是两件事）：规则要求的那张 op 不在目标目录里，就报 unlowered。
+    // 缺 op 与"我还没实现"必须分得开，所以 reason_code 用 no_downstream_op（与 unsupported 规则同一码）。
+    if (rule.requiresOp) {
+      const gate = opAvailable(caps, rule.requiresOp)
+      if (!gate.ok) {
+        unlowered.push({ id, feature, reason_code: 'no_downstream_op', reason: gate.why })
+        continue
+      }
+    }
+
     let name = objectName(id, rule.status)
     if (usedNames.has(name)) {
       const renamed = uniqueName(name, usedNames)
@@ -957,6 +1077,64 @@ function emitOps(params, caps) {
 // ---------------------------------------------------------------------------
 // 落盘：把一个 run 的全部产物算出来（纯计算，不碰 fs）
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 外部网格：**世界**包围盒
+// ---------------------------------------------------------------------------
+/** 从 GLB 字节里读出**世界**包围盒。
+ *
+ *  **为什么必须是"世界"**：glTF 允许把变换放在**节点**上，accessor 只描述局部坐标。
+ *  实测抓到过：一个 0.4×2×0.4 的方块被 Blender 导出成 accessor ±1 + 节点 `scale(0.2,1,0.2)` ——
+ *  只看 accessor 会把它读成 2×2×2，**尺寸量错 5 倍**。所以 scale/translation 必须乘进去。
+ *
+ *  **明确的局限**（宁可说"量不了"，也不给错数）：
+ *   - 带**旋转**的节点：轴对齐盒子本来就表述不了 ⇒ 返回 `rotated: true`，调用方**拒绝给出尺寸判定**；
+ *   - 只处理**顶层**节点（`nodes[].children` 里的嵌套变换没跟） ⇒ 由 `nodes` 计数与调用方的说明兜住。
+ */
+function glbWorldBounds(bytes) {
+  const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes)
+  if (buf.length < 20 || buf.toString('latin1', 0, 4) !== 'glTF') return { ok: false, why: 'not a GLB (bad magic)' }
+  let off = 12
+  let json = null
+  while (off + 8 <= buf.length) {
+    const len = buf.readUInt32LE(off)
+    const type = buf.toString('latin1', off + 4, off + 8)
+    if (type === 'JSON') {
+      try {
+        json = JSON.parse(buf.subarray(off + 8, off + 8 + len).toString('utf8'))
+      } catch (error) {
+        return { ok: false, why: `the JSON chunk did not parse (${error?.message ?? error})` }
+      }
+    }
+    off += 8 + len
+  }
+  if (!json) return { ok: false, why: 'no JSON chunk' }
+  const nodes = Array.isArray(json.nodes) ? json.nodes : []
+  const meshes = Array.isArray(json.meshes) ? json.meshes : []
+  const lo = [Infinity, Infinity, Infinity]
+  const hi = [-Infinity, -Infinity, -Infinity]
+  let counted = 0
+  let rotated = false
+  for (const node of nodes) {
+    if (node?.mesh === undefined) continue
+    const prim = meshes[node.mesh]?.primitives?.[0]
+    const acc = prim && json.accessors ? json.accessors[prim.attributes?.POSITION] : null
+    if (!acc || !Array.isArray(acc.min) || !Array.isArray(acc.max)) continue
+    const q = Array.isArray(node.rotation) ? node.rotation : null
+    if (q && q.some((v, i) => Math.abs(v - [0, 0, 0, 1][i]) > 1e-6)) rotated = true
+    const s = Array.isArray(node.scale) ? node.scale.map((v) => Math.abs(v)) : [1, 1, 1]
+    const t = Array.isArray(node.translation) ? node.translation : [0, 0, 0]
+    counted += 1
+    for (let i = 0; i < 3; i += 1) {
+      const a = acc.min[i] * s[i] + t[i]
+      const b = acc.max[i] * s[i] + t[i]
+      lo[i] = Math.min(lo[i], a, b)
+      hi[i] = Math.max(hi[i], a, b)
+    }
+  }
+  if (counted === 0) return { ok: false, why: 'no mesh node with a POSITION accessor could be read' }
+  return { ok: true, size: hi.map((v, i) => v - lo[i]), min: lo, max: hi, nodes: counted, rotated }
+}
+
 async function assembleArtifacts(args, createdAt, tctx) {
   const caps = await resolveTargetCapabilities(tctx)
   const emission = emitOps(args, caps)
@@ -1096,9 +1274,152 @@ async function assembleArtifacts(args, createdAt, tctx) {
     }
   }
 
+  // 外部**网格**（StdGEN/CharacterGen 那类）：同样**只登记不复制**，但比 .blend 多一件事 ——
+  // 网格的**真实尺寸只有文件知道**，所以顺带读同目录的 `source.json`（生成脚本写的声明）。
+  // 闸门挂在**项自己的 path** 上，而不是可选的 `mesh_file` 入参 —— 实测抓到过：不传 mesh_file 时，
+  // 声明被读了、被记了，却**没有任何一道闸门看它一眼**，而且 ok:true / blockers:[]（静默通过）。
+  // 声明不被比较就是装饰，所以判定从"项"出发；mesh_file 只决定"要不要把它登记成描述符"。
+  const meshItemWithPath = (Array.isArray(args.assembly) ? args.assembly : []).find(
+    (it) => it && it.feature === 'mesh' && typeof it.path === 'string' && it.path.length > 0,
+  )
+  const wantDescriptor = typeof args.mesh_file === 'string' && args.mesh_file.length > 0
+  const meshPath = wantDescriptor ? args.mesh_file : (meshItemWithPath?.path ?? null)
+
+
+  // 没有 sidecar 就是 blocker：unit/upAxis/declaredHeight 缺一个，都会静默地把模型转错方向或缩放错。
+  let meshFile = null
+  let meshSource = null
+  let meshMeasured = null
+  const dirOf = (p) => String(p).replace(/[\\/][^\\/]*$/, '')
+  if (meshPath !== null) {
+    try {
+      const data = await tctx.fs.read(meshPath)
+      const name = basename(meshPath)
+      files.push({
+        name,
+        data,
+        absolutePath: meshPath,
+        preview: `外部生成的网格：${name}，${data.length} 字节；描述符**只登记不复制**。网格**不可复算**，所以必须与 source.json 的声明（unit/upAxis/declaredHeight）一起交付`,
+        meta: { external: true, register_only: true, producer_tool: 'external mesh generator' },
+      })
+      meshFile = { name, path: meshPath, bytes: data.length }
+    } catch (error) {
+      blockers.push({
+        code: 'E_MESH_FILE_UNREADABLE',
+        message: `mesh_file could not be read (${error?.message ?? error}). The pack will NOT contain the mesh — do not read its absence as "there is no mesh".`,
+        path: meshPath,
+      })
+    }
+    const sidecarPath = `${dirOf(meshPath)}/source.json`
+    try {
+      const raw = await tctx.fs.read(sidecarPath)
+      const parsed = JSON.parse(typeof raw === 'string' ? raw : Buffer.from(raw).toString('utf8'))
+      meshSource = {
+        path: sidecarPath,
+        generator: parsed.generator ?? null,
+        unit: parsed.unit ?? null,
+        upAxis: parsed.upAxis ?? null,
+        declaredHeight: parsed.declaredHeight ?? null,
+        declaredHeightKind: parsed.declaredHeightKind ?? null,
+      }
+    } catch (error) {
+      blockers.push({
+        code: 'E_MESH_SOURCE_UNREADABLE',
+        message: `the mesh's source.json could not be read next to ${meshPath} (${error?.message ?? error}). Without it the mesh's unit/upAxis/declaredHeight are unknown — and guessing them silently rotates or rescales the model.`,
+        path: sidecarPath,
+      })
+    }
+
+    // ---- 声明 vs 测量：这是"不静默"的最后一道闸 ----
+    const item = (Array.isArray(args.assembly) ? args.assembly : []).find((x) => x && x.path === meshPath)
+    if (meshSource && item?.source) {
+      const pairs = [
+        ['unit', meshSource.unit, item.source.unit],
+        ['up_axis', meshSource.upAxis, item.source.up_axis],
+        ['declared_height', meshSource.declaredHeight, item.source.declared_height],
+      ]
+      const bad = pairs.filter(([, fileSays, paramsSay]) => paramsSay !== undefined && fileSays !== null && String(fileSays) !== String(paramsSay))
+      if (bad.length > 0) {
+        blockers.push({
+          code: 'E_MESH_SOURCE_MISMATCH',
+          message: `the file's source.json disagrees with the parameters: ${bad.map(([key, fileSays, paramsSay]) => `${key}: file says ${JSON.stringify(fileSays)}, parameters say ${JSON.stringify(paramsSay)}`).join('; ')}`,
+          path: sidecarPath,
+        })
+      }
+    }
+    try {
+      const bytes = await tctx.fs.read(meshPath)
+      const bounds = glbWorldBounds(bytes)
+      if (!bounds.ok) {
+        blockers.push({
+          code: 'E_MESH_UNMEASURABLE',
+          message: `the mesh could not be measured (${bounds.why}). A size claim that cannot be measured must not be recorded as verified.`,
+          path: meshPath,
+        })
+      } else if (bounds.rotated) {
+        blockers.push({
+          code: 'E_MESH_MEASUREMENT_LIMITED',
+          message: `a node carries a rotation, so an axis-aligned world box would be wrong. Size is NOT asserted — we would rather say "cannot measure" than print a wrong number.`,
+          path: meshPath,
+        })
+      } else if (item?.source && typeof item.source.up_axis === 'string') {
+        const up = String(item.source.up_axis).toUpperCase()
+        const num = (key) => (item[key] && typeof item[key].v === 'number' && Number.isFinite(item[key].v) ? item[key].v : null)
+        const w = num('w')
+        const d = num('d')
+        const h = num('h')
+        if (w !== null && d !== null && h !== null) {
+          // 参数用我们的空间（up=Z）；文件用自己的空间（由 up_axis 声明）⇒ 按声明换轴再比。
+          const declared = up === 'Y' ? [w, h, d] : up === 'Z' ? [w, d, h] : [h, w, d]
+          const rel = declared.map((v, i) => Math.abs(bounds.size[i] - v) / Math.max(Math.abs(v), 1e-9))
+          const worst = Math.max(...rel)
+          meshMeasured = {
+            up_axis: up,
+            size_in_file: bounds.size.map((v) => Number(v.toFixed(6))),
+            size_declared: declared,
+            nodes_measured: bounds.nodes,
+            worst_relative_difference: Number(worst.toFixed(6)),
+          }
+          // 第三道闸门：**文件自己的声明 vs 文件的实测**。
+          // 前两道各管一半（sidecar vs 参数、参数 vs 实测），于是 sidecar 的 declaredHeight 被读进来、
+          // 被记下来，却从来没有一道闸门看它一眼 —— 实测抓到过：sidecar 声明 3、实测 2，无人拦。
+          if (meshSource && Number.isFinite(Number(meshSource.declaredHeight))) {
+            const declaredHeight = Number(meshSource.declaredHeight)
+            const axisIndex = up === 'Y' ? 1 : up === 'Z' ? 2 : 0
+            const measuredAlongUp = bounds.size[axisIndex]
+            const relUp = Math.abs(measuredAlongUp - declaredHeight) / Math.max(Math.abs(declaredHeight), 1e-9)
+            meshMeasured.declared_height_from_file = declaredHeight
+            meshMeasured.measured_along_up_axis = Number(measuredAlongUp.toFixed(6))
+            meshMeasured.up_axis_relative_difference = Number(relUp.toFixed(6))
+            if (relUp > SCENE_RELATIVE_TOLERANCE) {
+              blockers.push({
+                code: 'E_MESH_DECLARED_HEIGHT_MISMATCH',
+                message: `the file's own source.json declares declaredHeight=${declaredHeight}, but the mesh measures ${measuredAlongUp.toFixed(4)} along the declared ${up} axis. A declaration that nothing compares is decoration, so this gate exists: either the declaration or the generator's output is wrong.`,
+                path: sidecarPath,
+              })
+            }
+          }
+          if (worst > SCENE_RELATIVE_TOLERANCE) {
+            blockers.push({
+              code: 'E_MESH_SIZE_MISMATCH',
+              message: `declared ${declared.map((v) => v.toFixed(4)).join('×')} m (up=${up}) but the file measures ${bounds.size.map((v) => v.toFixed(4)).join('×')} — worst relative difference ${(worst * 100).toFixed(2)}%. A generated mesh is not reproducible, so this cannot be "fixed" by regenerating: either the declaration or the file is wrong.`,
+              path: meshPath,
+            })
+          }
+        }
+      }
+    } catch (error) {
+      blockers.push({
+        code: 'E_MESH_UNMEASURABLE',
+        message: `the mesh could not be re-read for measurement (${error?.message ?? error}).`,
+        path: meshPath,
+      })
+    }
+  }
+
   return {
     files,
-    ok: emission.ok && aligned && checked.within_tolerance && (!scene || (scene.available === true && scene.ok === true)),
+    ok: blockers.length === 0 && emission.ok && aligned && checked.within_tolerance && (!scene || (scene.available === true && scene.ok === true)),
     blockers: [
       ...blockers,
       ...(aligned
@@ -1112,6 +1433,11 @@ async function assembleArtifacts(args, createdAt, tctx) {
     ],
     extra: {
       createdAt,
+      // **失败也必须能只靠磁盘读出来**：report.json 是权威副本（宿主可能把工具结果换成
+      // TOOL_OUTCOME_UNKNOWN，结果与失败原因会一起丢）。所以 ok 与 blockers 必须写进报告本身 ——
+      // 否则消费方看到"产物齐全"就会误读成"这单通过了"（实测被这样提醒过）。
+      ok: blockers.length === 0,
+      blockers: blockers.map((b) => ({ code: b.code, message: b.message, path: b.path ?? null })),
       tier: scene ? 'scene_readback' : 'numeric',
       residual_max: checked.max,
       residual_tolerance: checked.tolerance,
@@ -1145,6 +1471,9 @@ async function assembleArtifacts(args, createdAt, tctx) {
       },
       // 包里到底有没有模型本身？null = 这一轮没有导出，不是"有但没登记"。
       scene_file: sceneFile,
+    mesh_file: meshFile,
+    mesh_source: meshSource,
+    mesh_measured: meshMeasured,
       // ③ 交付物里必须有"图纸"这一项：复核对象是它，不是六张分图。
       sheet: {
         artifact: 'sheet.svg',
@@ -1356,8 +1685,13 @@ function threeState(emission) {
       .filter(([, r]) => r.status === 'approx')
       .map(([f]) => f),
     emitter_ready_features: Object.entries(LOWERING)
-      .filter(([, r]) => r.status !== 'unsupported')
+      .filter(([, r]) => r.status !== 'unsupported' && r.requiresOp === undefined)
       .map(([f]) => f),
+    // 这些规则**本版已经能 lower**，但要真发出去还取决于目标是否声明了那张 op ⇒
+    // **不能**混进 emitter_ready_features（那等于声称一个目标可能没有的能力）。
+    emitter_ready_when_target_declares: Object.entries(LOWERING)
+      .filter(([, r]) => r.status !== 'unsupported' && r.requiresOp !== undefined)
+      .map(([f, r]) => ({ feature: f, requires_op: r.requiresOp })),
     unlowered_total: un.length,
     downstream_cannot: pick('no_downstream_op'),
     downstream_has_no_primitive: pick('no_downstream_primitive'),
@@ -1853,7 +2187,11 @@ function reviseHints(params, emission, caps, { checked, aligned, fromParams, out
     add(
       'warning',
       String(g.id),
-      `"${g.id}" is declared as ${g.source_kind}: it will not enter the scene (no import op downstream), its SHAPE cannot be verified by any tier here, and ${kindNote}${missingNote}`,
+      `"${g.id}" is declared as ${g.source_kind}: ${
+        (emission.unlowered ?? []).some((u) => u.id === g.id)
+          ? 'it will NOT enter the scene (the target declares no import op)'
+          : 'it enters the scene through the import op the target declares'
+      }, its SHAPE cannot be verified by any tier here, and ${kindNote}${missingNote}`,
       g.missing_for_reproducibility.length > 0
         ? 'record model / seed / input_image_sha256 in source, or the artifact is a one-off you can never regenerate'
         : 'keep the source block with the artifact; shape has to be judged visually, not by these tiers',

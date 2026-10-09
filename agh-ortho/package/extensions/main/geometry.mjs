@@ -49,6 +49,8 @@ const PARAM_SIDE_GEOMETRY = {
   // 体块 / 竖板：w × d × h（sheet 的 d 是板厚）
   box: boxLike,
   sheet: boxLike,
+  // 外部网格：**声明过的意图尺寸**（w × d × h，米）。文件本身的真实大小由 save 读盘复核。
+  mesh: boxLike,
   // 柱 / 锥体：dia × dia × h
   column: (it) => diaLike(it, true),
   spire: (it) => diaLike(it, true),
@@ -70,6 +72,8 @@ const PARAM_KIND = {
   ring: 'torus',
   dome: 'uv_sphere',
   spire: 'cone',
+  // 带点的名字是一条 **op**（不是基元 kind）：参数侧用**同一个**闸门判定，见 kindAvailableFor。
+  mesh: 'mesh.import',
 }
 
 /** 一个 assembly item 是否会被 lowering 成 op —— 两条路径必须用同一个判定，否则会错位。 */
@@ -91,7 +95,31 @@ export function lowersToOp(item, kindAvailable = () => true) {
  *  （旧实现在这里对 plane 打了特例补丁；查表之后那个特例自然消失。） */
 export function boxesFromOps(ops) {
   const boxes = []
+  // 外部网格的**摆放**在另一条 op 上（mesh.import 只声明几何、不摆放）⇒ 先把 transform 收一遍，
+  // 否则 op 侧的盒子会落在原点，与参数侧（底边贴地、中心 z=h/2）不一致 —— 那是**假**的内部不一致。
+  const placement = new Map()
   for (const op of ops ?? []) {
+    if (op?.op === 'object.transform' && op.args?.name && Array.isArray(op.args.location)) placement.set(op.args.name, op.args.location)
+  }
+  for (const op of ops ?? []) {
+    // 外部网格：文件自身的包围盒只有文件知道，而 emit 阶段不读盘（纯函数）。
+    // 所以 op 里带的是**声明过的意图尺寸** `size`（米），op 侧就用它 ——
+    // 于是参数侧与 op 侧算的是同一组数；"文件真的这么大吗"由 save 读盘量（不符即 blocking）。
+    if (op?.op === 'mesh.import') {
+      const a = op.args ?? {}
+      const size = Array.isArray(a.size) && a.size.length === 3 && a.size.every(FINITE) ? a.size : null
+      if (!size) continue
+      const c = Array.isArray(placement.get(a.name)) ? [...placement.get(a.name)] : Array.isArray(a.location) && a.location.length === 3 ? a.location : [0, 0, 0]
+      const half = size.map((v) => v / 2)
+      boxes.push({
+        name: String(a.name),
+        kind: 'mesh',
+        centre: [...c],
+        min: [c[0] - half[0], c[1] - half[1], c[2] - half[2]],
+        max: [c[0] + half[0], c[1] + half[1], c[2] + half[2]],
+      })
+      continue
+    }
     if (!op || op.op !== 'mesh.primitive_add') continue
     const a = op.args ?? {}
     const size = FINITE(a.size) ? a.size : 1
@@ -138,8 +166,29 @@ export function extentsFromParams(items, kindAvailable = () => true) {
  */
 export function expectedObjectsFromOps(ops) {
   const out = []
+  // 外部网格的**摆放**在第二条 op 上（`mesh.import` 只比对不施加）⇒ 位置要先收一遍。
+  const transforms = new Map()
   for (const op of ops ?? []) {
-    if (!op || op.op !== 'mesh.primitive_add') continue
+    if (op?.op === 'object.transform' && op.args?.name) transforms.set(op.args.name, op.args)
+  }
+  for (const op of ops ?? []) {
+    if (!op) continue
+    // 外部网格：期望的**世界尺寸**就是 import 里声明的 size（文件自身的尺寸已经在文件里），
+    // 而 scale **不可知** —— 它来自文件的节点变换，emit 阶段不读盘 ⇒ 置 null，
+    // 由 compareScene 跳过 scale 断言并写明原因（"不知道"要比"编一个"诚实）。
+    if (op.op === 'mesh.import') {
+      const args = op.args ?? {}
+      const t = transforms.get(args.name)
+      out.push({
+        name: args.name,
+        kind: 'mesh',
+        dimensions: Array.isArray(args.size) && args.size.length === 3 ? [...args.size] : null,
+        location: Array.isArray(t?.location) ? [...t.location] : Array.isArray(args.location) ? [...args.location] : [0, 0, 0],
+        scale: null,
+      })
+      continue
+    }
+    if (op.op !== 'mesh.primitive_add') continue
     const args = op.args ?? {}
     out.push({
       name: args.name,
@@ -231,7 +280,10 @@ export function compareScene(expected, scene) {
       continue
     }
     const locationDelta = axisDelta(want.location, got.location)
+    // 外部网格的 scale **不可知**（来自文件的节点变换，emit 阶段不读盘）⇒ want.scale 为 null，
+    // 于是这里得到 null，下面据此**跳过** scale 断言并写明原因。
     const scaleDelta = axisDelta(want.scale, got.scale)
+    const scaleAsserted = scaleDelta !== null
     const rotationPublished = Array.isArray(got.rotation_euler)
     const rotationIsZero = !rotationPublished || got.rotation_euler.every((r) => Math.abs(r) <= SCENE_ROTATION_EPSILON)
     // 尺寸断言的三个前置条件，缺一个就不做 —— 而"为什么没做"必须写进 rows：
@@ -239,14 +291,18 @@ export function compareScene(expected, scene) {
     //   2. 我们知道这种基元的单位尺寸（否则"期望值"就是我编的，torus 就是反例）；
     //   3. 对象**没有旋转** —— `obj.dimensions` 是"本地包围盒 × scale"，一旦旋转，世界 AABB ≠ 它。
     const unit = UNIT_EXTENT[want.kind]
-    const expectedSize = unit ? unit.map((u, i) => u * want.size * want.scale[i]) : null
+    // 外部网格带**显式** dimensions（import 里声明的 size）；基元仍按 unit × size × scale 算。
+    const expectedSize = Array.isArray(want.dimensions) ? [...want.dimensions] : unit ? unit.map((u, i) => u * want.size * want.scale[i]) : null
     // 三个前置条件必须**每一个都出现在这个条件里** —— 上面注释写了三条，代码里只写两条就是个 bug
     // （自检抓到过：旋转的对象尺寸仍然被"断言"了，于是 size_not_asserted_reason 成了 null）。
     const dimensionsDelta =
       Array.isArray(got.dimensions) && expectedSize && rotationIsZero ? axisDelta(expectedSize, got.dimensions) : null
     const sizeAsserted = dimensionsDelta !== null
     // 这一行用的容差随**这个对象多大**变化 —— 曲面基元的包围盒偏差是按比例缩放的。
-    const tol = sceneToleranceFor(...want.location, ...want.scale, ...(expectedSize ?? []))
+    const tol = sceneToleranceFor(...want.location, ...(want.scale ?? []), ...(expectedSize ?? []))
+    const scaleNotAssertedReason = scaleAsserted
+      ? null
+      : 'the imported mesh\u2019s scale comes from the file\u2019s own node transform, and the emit stage does not read files — so this line asserts presence, type and location, not scale'
     const sizeNotAssertedReason = sizeAsserted
       ? null
       : !Array.isArray(got.dimensions)
@@ -261,8 +317,7 @@ export function compareScene(expected, scene) {
       rotationIsZero &&
       locationDelta !== null &&
       locationDelta <= tol &&
-      scaleDelta !== null &&
-      scaleDelta <= tol &&
+      (!scaleAsserted || scaleDelta <= tol) &&
       (!sizeAsserted || dimensionsDelta <= tol)
     rows.push({
       object: want.name,
@@ -270,6 +325,8 @@ export function compareScene(expected, scene) {
       type_is_mesh: typeIsMesh,
       location_delta: locationDelta,
       scale_delta: scaleDelta,
+      scale_asserted: scaleAsserted,
+      scale_not_asserted_reason: scaleNotAssertedReason,
       rotation_published: rotationPublished,
       rotation_is_zero: rotationIsZero,
       // 这一项的真假说明"尺寸语义"到底验没验；为假时 reason 说明为什么没验。

@@ -276,6 +276,102 @@ check(
 check('report.json says out loud that this pack has no model file', reportOnDisk.scene_file === null)
 
 // `scene_file`：把下游导出的 .blend **登记**进包里（不复制），二进制必须按**字节**算。
+// `mesh_file`：外部网格 + **同目录的 source.json**。判据是"声明 vs 测量"，而测量必须是**世界**尺寸：
+// glTF 可以把变换放在**节点**上（accessor 只描述局部坐标）—— 实测抓到过 Blender 把 0.4×2×0.4 的方块
+// 导成 accessor ±1 + 节点 scale(0.2,1,0.2)，**只看 accessor 会量错 5 倍**。
+const makeGlb = (scale) => {
+  const json = JSON.stringify({
+    asset: { version: '2.0' },
+    scenes: [{ nodes: [0] }],
+    nodes: scale ? [{ name: 'body', mesh: 0, scale }] : [{ name: 'body', mesh: 0 }],
+    meshes: [{ primitives: [{ attributes: { POSITION: 0 } }] }],
+    accessors: [{ type: 'VEC3', componentType: 5126, count: 8, min: [-1, -1, -1], max: [1, 1, 1] }],
+  })
+  const body = Buffer.from(json, 'utf8')
+  const padded = body.length % 4 === 0 ? body : Buffer.concat([body, Buffer.alloc(4 - (body.length % 4), 0x20)])
+  const header = Buffer.alloc(12)
+  header.write('glTF', 0, 'latin1')
+  header.writeUInt32LE(2, 4)
+  header.writeUInt32LE(12 + 8 + padded.length, 8)
+  const chunkHead = Buffer.alloc(8)
+  chunkHead.writeUInt32LE(padded.length, 0)
+  chunkHead.write('JSON', 4, 'latin1')
+  return Buffer.concat([header, chunkHead, padded])
+}
+const MESH_DIR = 'D:/ws/.agnes/agh-ortho/meshes/kuson'
+const MESH_PATH_WIN = 'D:\\ws\\.agnes\\agh-ortho\\meshes\\kuson\\mesh.glb'
+const meshItem = (over = {}) => ({
+  id: 'body_mesh',
+  feature: 'mesh',
+  part: 'body',
+  w: { v: 0.4 },
+  d: { v: 0.4 },
+  h: { v: 2 },
+  path: MESH_PATH_WIN,
+  source: { kind: 'generated_mesh', unit: 'm', up_axis: 'Y', declared_height: 2 },
+  ...over,
+})
+const meshFs = (glb) => {
+  const f = memoryFs()
+  f.files.set(`${MESH_DIR}/mesh.glb`, glb)
+  // **按真实 seam 的形状存**：host 的 fs.read 返回 Uint8Array，不是字符串。
+  // （这里若存字符串，`raw.toString('utf8')` 那条错分支就永远跑不到 —— 曾经的假 PASS 就是这么来的。）
+  f.files.set(`${MESH_DIR}/source.json`, Buffer.from(JSON.stringify({ generator: 'StdGEN', unit: 'm', upAxis: 'Y', declaredHeight: 2 }), 'utf8'))
+  return f
+}
+const readReport = (fs, runId) => {
+  const key = [...fs.files.keys()].find((k) => k.endsWith(`/runs/${runId}/report.json`))
+  if (!key) throw new Error(`report.json for ${runId} not found in the memory fs (keys: ${[...fs.files.keys()].slice(0, 8).join(', ')})`)
+  return JSON.parse(fs.files.get(key))
+}
+
+const fsMeshOk = meshFs(makeGlb([0.2, 1, 0.2])) // 世界 = 0.4 × 2 × 0.4
+const meshSaved = (await save.execute({ ...SAMPLE, assembly: [meshItem()], run_id: 'mesh-a', mesh_file: MESH_PATH_WIN }, { fs: fsMeshOk, session: { workspaceRoot: ws } })).structured
+const meshDesc = meshSaved.artifacts.find((a) => a.kind === 'mesh')
+check(
+  'mesh_file is registered as a descriptor with its own path (not copied) and binary-correct bytes',
+  meshDesc?.path === MESH_PATH_WIN && meshDesc?.bytes === makeGlb([0.2, 1, 0.2]).length && meshDesc?.sha256 === createHash('sha256').update(makeGlb([0.2, 1, 0.2])).digest('hex'),
+  JSON.stringify(meshDesc),
+)
+const meshReport = readReport(fsMeshOk, 'mesh-a')
+check(
+  'mesh: the measured size is the WORLD size (accessor ±1 × node scale 0.2/1/0.2 = 0.4×2×0.4)',
+  meshReport.mesh_measured?.worst_relative_difference === 0 && meshReport.mesh_measured?.size_in_file.join(',') === '0.4,2,0.4',
+  JSON.stringify(meshReport.mesh_measured),
+)
+check(
+  'mesh: the file sidecar is carried into the pack next to the measurement',
+  meshReport.mesh_source?.upAxis === 'Y' && meshReport.mesh_source?.unit === 'm' && meshReport.mesh_source?.declaredHeight === 2,
+  JSON.stringify(meshReport.mesh_source),
+)
+
+// 同一条几何，声明成 3 m 高 ⇒ 必须挡住（而不是默默记下"验过了"）
+const meshBad = (await save.execute({ ...SAMPLE, assembly: [meshItem({ h: { v: 3 } })], run_id: 'mesh-b', mesh_file: MESH_PATH_WIN }, { fs: meshFs(makeGlb([0.2, 1, 0.2])), session: { workspaceRoot: ws } })).structured
+check(
+  'mesh: a declaration that disagrees with the file is a BLOCKER, not a warning',
+  meshBad.blockers.some((b) => b.code === 'E_MESH_SIZE_MISMATCH'),
+  JSON.stringify(meshBad.blockers.map((b) => b.code)),
+)
+
+// 没有 sidecar ⇒ 缺 unit/upAxis ⇒ 挡（猜轴向会出一个"看起来对、量起来错"的模型）
+const fsNoSidecar = memoryFs()
+fsNoSidecar.files.set(`${MESH_DIR}/mesh.glb`, makeGlb([0.2, 1, 0.2]))
+const meshNoSidecar = (await save.execute({ ...SAMPLE, assembly: [meshItem()], run_id: 'mesh-c', mesh_file: MESH_PATH_WIN }, { fs: fsNoSidecar, session: { workspaceRoot: ws } })).structured
+check(
+  'mesh: a missing source.json is a blocker (unit/upAxis are not guessable)',
+  meshNoSidecar.blockers.some((b) => b.code === 'E_MESH_SOURCE_UNREADABLE'),
+  JSON.stringify(meshNoSidecar.blockers.map((b) => b.code)),
+)
+
+// 只看 accessor 的实现会把这条**判成合格** ⇒ 这是"世界 vs 局部"的回归锚
+const fsLocalOnly = meshFs(makeGlb(null))
+const meshLocalOnly = (await save.execute({ ...SAMPLE, assembly: [meshItem()], run_id: 'mesh-d', mesh_file: MESH_PATH_WIN }, { fs: fsLocalOnly, session: { workspaceRoot: ws } })).structured
+check(
+  'mesh: a mesh whose size lives only in the accessor is caught (2×2×2 vs declared 0.4×0.4×2)',
+  meshLocalOnly.blockers.some((b) => b.code === 'E_MESH_SIZE_MISMATCH'),
+  JSON.stringify(readReport(fsLocalOnly, 'mesh-d').mesh_measured),
+)
+
 const fsSceneReg = memoryFs()
 const blendText = 'BLENDER-v1-角色-不是-ascii'
 // 内存 fs 的键是**归一化后的绝对路径**（反斜杠 → 正斜杠），不是工作区相对路径。
@@ -554,7 +650,7 @@ const sceneGood = (await verifyTool.execute({ ...SAMPLE, against_scene: true }, 
 check('scene: the tier is named honestly, not against_blender', sceneGood.tier === 'scene_readback' && sceneGood.needs_blender === true, sceneGood.tier)
 check('scene: objects match by exact name with location and scale', sceneGood.ok === true && sceneGood.scene.matched === 2 && sceneGood.scene.missing.length === 0 && sceneGood.scene.mismatched.length === 0, JSON.stringify(sceneGood.scene.rows.map((r) => r.verdict)))
 check('scene: factory objects are reported as extra, not treated as failure', sceneGood.scene.extra_objects.includes('Cube'))
-check('scene: the gap is stated, not hidden', sceneGood.scene.cannot_assert.some((t) => /dimensions/.test(t)) && sceneGood.scene.cannot_assert.some((t) => /primitive kind/.test(t)), JSON.stringify(sceneGood.scene.cannot_assert))
+check('scene: the gaps are stated, not hidden (the primitive KIND and the permanent camera gap)', sceneGood.scene.cannot_assert.some((t) => /kind/i.test(t)) && sceneGood.scene.cannot_assert.some((t) => /camera op/.test(t)), JSON.stringify(sceneGood.scene.cannot_assert))
 check('scene: size is NOT asserted while the downstream publishes no dimensions', sceneGood.scene.size_asserted === false && sceneGood.scene.dimensions_published === false)
 check('scene: the camera gap is permanent and always stated', sceneGood.scene.cannot_assert.some((t) => /camera op/.test(t)))
 
@@ -643,6 +739,95 @@ check('scene: and the negotiation layer still asks for the live catalog', called
 
 // --- 8d. fit：闭环里"便宜的那一半" ---
 const fitTool = byName['agh_ortho_fit']
+
+// ---- 网格路（MESH-PLAN 1.1）：能放下就 lowering，放不下就如实说"目标没有这张 op" ----
+const MCAP_CATALOG = {
+  ...LIVE_CATALOG,
+  capabilitySet: 'primitives-6+import',
+  ops: { ...LIVE_CATALOG.ops, 'mesh.import': { mutates: false, destructive: false, summary: 'import a mesh file into the scene' } },
+}
+const withMCap = { tools: { invoke: async () => ({ structured: { ok: true, blockers: [], catalog: MCAP_CATALOG } }) } }
+const MCAP_ITEM = {
+  id: 'body_mesh',
+  feature: 'mesh',
+  part: 'body',
+  w: { v: 0.5, conf: 0.4 },
+  d: { v: 0.3, conf: 0.4 },
+  h: { v: 1.62, conf: 0.5 },
+  path: '.agnes/agh-ortho/meshes/kuson/body.glb',
+  source: { kind: 'generated_mesh', model: 'StdGEN', seed: 0, input_image_sha256: 'a'.repeat(64), up_axis: 'Z', unit: 'normalised', declared_height: 1 },
+}
+const MCAP_ARGS = { schema_version: 1, unit: 'm', frame: SAMPLE.frame, projection: 'first_angle', assembly: [MCAP_ITEM] }
+const emitMCap = byName['agh_ortho_emit_ops']
+
+const noImportCaps = (await emitMCap.execute(MCAP_ARGS, withLive)).structured
+check(
+  'mesh: with no mesh.import in the target it is unlowered with the RIGHT reason code',
+  noImportCaps.unlowered.length === 1 && noImportCaps.unlowered[0].reason_code === 'no_downstream_op' && noImportCaps.ops.length === 0,
+  JSON.stringify(noImportCaps.unlowered),
+)
+const capFitNoImport = (await fitTool.execute({ ...MCAP_ARGS, against_scene: false }, withLive)).structured
+check(
+  'mesh: the emitter does not claim it can place meshes just because it owns a rule for them',
+  !capFitNoImport.three_state.emitter_ready_features.includes('mesh') &&
+    capFitNoImport.three_state.emitter_ready_when_target_declares.some((e) => e.feature === 'mesh' && e.requires_op === 'mesh.import') &&
+    capFitNoImport.three_state.downstream_cannot.some((d) => d.feature === 'mesh'),
+  JSON.stringify(capFitNoImport.three_state.emitter_ready_when_target_declares),
+)
+
+const withImportCaps = (await emitMCap.execute(MCAP_ARGS, withMCap)).structured
+const meshOpCaps = withImportCaps.ops.find((o) => o.op === 'mesh.import')
+check(
+  'mesh: with the op declared it lowers, and scale comes from the DECLARED height (not guessed)',
+  withImportCaps.unlowered.length === 0 &&
+    Boolean(meshOpCaps) &&
+    meshOpCaps.args.scale === 1.62 &&
+    meshOpCaps.args.upAxis === 'Z' &&
+    meshOpCaps.args.size[2] === 1.62 &&
+    /meshes\/kuson\/body\.glb$/.test(meshOpCaps.args.path),
+  JSON.stringify(meshOpCaps?.args),
+)
+
+check(
+  'mesh: it lowers to TWO ops — import (declaring only the geometry expectation) + transform (actually placing it)',
+  withImportCaps.ops.filter((o) => o.op === 'mesh.import').length === 1 &&
+    withImportCaps.ops.some((o) => o.op === 'object.transform' && o.args.name === 'body_mesh' && Array.isArray(o.args.location)) &&
+    // import 里**不能**带 location：那一刻对象还没被摆放，这个自检必然报 false（噪音，不是发现）
+    withImportCaps.ops.find((o) => o.op === 'mesh.import').args.location === undefined,
+  JSON.stringify(withImportCaps.ops.map((o) => ({ op: o.op, args: Object.keys(o.args) }))),
+)
+
+const fsNoMeshFile = meshFs(makeGlb([0.2, 1, 0.2]))
+const noMeshFileBad = (await save.execute({ ...SAMPLE, assembly: [meshItem({ h: { v: 3 } })], run_id: 'mesh-e' }, { fs: fsNoMeshFile, session: { workspaceRoot: ws } })).structured
+check(
+  'mesh: the gate is keyed on the ITEM path, not on the optional mesh_file (no mesh_file = still measured, still blocked)',
+  noMeshFileBad.blockers.some((b) => b.code === 'E_MESH_SIZE_MISMATCH') && noMeshFileBad.ok === false,
+  JSON.stringify({ ok: noMeshFileBad.ok, codes: noMeshFileBad.blockers.map((b) => b.code) }),
+)
+check(
+  'mesh: a blocked run records ok:false and its blockers in report.json (the disk copy must be self-sufficient)',
+  readReport(fsNoMeshFile, 'mesh-e').ok === false && readReport(fsNoMeshFile, 'mesh-e').blockers.some((b) => b.code === 'E_MESH_SIZE_MISMATCH'),
+  JSON.stringify({ ok: readReport(fsNoMeshFile, 'mesh-e').ok, codes: readReport(fsNoMeshFile, 'mesh-e').blockers.map((b) => b.code) }),
+)
+
+const meshFitCaps = (await fitTool.execute({ ...MCAP_ARGS, against_scene: false }, withMCap)).structured
+check(
+  'mesh: numeric stays aligned (parameter side vs op side) for a mesh item',
+  meshFitCaps.numeric?.residual_within_tolerance === true && Number(meshFitCaps.numeric?.residual_max) <= 1e-9,
+  JSON.stringify(meshFitCaps.numeric),
+)
+check(
+  'mesh: when the target declares the import op, no hint claims the item stays out of the scene',
+  !meshFitCaps.revise_hints.some((h) => /will NOT enter the scene|will not enter the scene/i.test(h.problem)),
+  JSON.stringify(meshFitCaps.revise_hints.map((h) => h.problem).filter((t) => /scene/i.test(t))),
+)
+
+const noAxisCaps = (await emitMCap.execute({ ...MCAP_ARGS, assembly: [{ ...MCAP_ITEM, source: { ...MCAP_ITEM.source, up_axis: null } }] }, withMCap)).structured
+check(
+  'mesh: a missing up_axis is a blocker, not a silent guess (and nothing is emitted)',
+  noAxisCaps.blockers.some((b) => b.code === 'E_ARG_MISSING' && /up_axis/.test(b.message)) && noAxisCaps.ops.length === 0,
+  JSON.stringify(noAxisCaps.blockers.map((b) => b.code)),
+)
 // 完整候选：有锚点、叶子自带 conf，所以应当判 fit
 const FIT_OK = { ...SAMPLE, scale_anchor: { pixel_len: 340, real_len: 2.1, ref: 'door_height' } }
 
@@ -854,7 +1039,7 @@ const meshFull = {
   ],
 }
 const meshFit = (await fitTool.execute(meshFull, {})).structured
-check('mesh: it is a KNOWN unsupported feature (not an unknown one that blocks)', meshFit.three_state.downstream_cannot.some((u) => u.feature === 'mesh') && !meshFit.revise_hints.some((h) => /not in the intent vocabulary/.test(h.problem)), JSON.stringify(meshFit.three_state.downstream_cannot.map((u) => u.feature)))
+check('mesh: known, never "unknown" — with the op available but the declarations missing it is a BLOCKER, not a mystery', meshFit.blockers.some((b) => b.code === 'E_ARG_MISSING') && !meshFit.revise_hints.some((h) => /not in the intent vocabulary/.test(h.problem)), JSON.stringify(meshFit.blockers.map((b) => b.code)))
 check('mesh: declared as a generated part, with its provenance carried', meshFit.generated.declared.length === 1 && meshFit.generated.declared[0].source_kind === 'generated_mesh' && meshFit.generated.declared[0].provenance.model === 'StdGEN' && meshFit.generated.declared[0].provenance.seed === 42, JSON.stringify(meshFit.generated.declared))
 check('mesh: complete provenance records nothing missing, and it is NOT reproducible', meshFit.generated.declared[0].missing_for_reproducibility.length === 0 && meshFit.generated.declared[0].reproducible === false)
 check('mesh: the report says its SHAPE cannot be verified by any tier here', /SHAPE cannot be verified/.test(meshFit.generated.note) && meshFit.revise_hints.some((h) => /SHAPE cannot be verified/.test(h.problem)), meshFit.generated.note.slice(0, 60))

@@ -51,6 +51,12 @@ export function classifyFile(name) {
     // 登记它而不复制它 —— 交付包里因此第一次有了"模型本身"，而 run 目录保持只读形状。
     case 'blend':
       return { mime: 'application/x-blender', kind: 'scene' }
+    // 外部生成的网格（只登记不复制）。glb = glTF binary —— 规范里 1 单位 = 1 米；
+    // obj **没有单位**，所以它的 unit 必须由 source.json 声明，不能猜。
+    case 'glb':
+      return { mime: 'model/gltf-binary', kind: 'mesh' }
+    case 'obj':
+      return { mime: 'model/obj', kind: 'mesh' }
     default:
       return { mime: 'application/octet-stream', kind: 'other' }
   }
