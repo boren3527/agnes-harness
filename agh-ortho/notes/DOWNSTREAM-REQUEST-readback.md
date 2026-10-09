@@ -143,8 +143,9 @@ entry = {
 | 项 | 依赖什么 | 建议顺序 |
 |---|---|---|
 | `describe_scene()` 加 `dimensions` | 无（只读侧） | ~~**1**~~ —— **已完成**（0.1.8），`scene_readback` 的 `size_asserted` 已翻成 `true` |
-| `catalog()` 发布 `primitives` 与能力集标识 | 无 | **1** —— 消掉合成的 `capabilitySet`，**并让能力闸门真正生效**（见下） |
+| `catalog()` 发布 `primitives` 与能力集标识 | 无 | **1** —— ~~消掉合成的 `capabilitySet`，**并让能力闸门真正生效**（见下）~~ **已完成**（下游 0.1.8 起发布；本地上游已透传，6 条回归断言护着，**待重装生效**） |
 | `stop` 的确认语义（bridge 断连时回退到按 PID 确认） | 无 | 2 |
+| `agh_blender_start` 支持"空场景" | 无 | 2 —— ~~让交付的 `.blend` 不再带出厂的 Cube/Light/Camera（见下）~~ **已完成**（`empty: true`，启动即清场并如实上报 `clearedAtStartup`；**待重装生效**） |
 
 **实测两次，形态完全一样**（2026-10-08）：
 
@@ -178,3 +179,24 @@ entry = {
 
 **只要 `catalog()` 把它自己已经知道的 `PRIMITIVE_KINDS`（六种基元）一并发布，闸门就双向生效。**
 这是"扩下游不改上游"那条主张里唯一还差的一块拼图 —— 现在它一半是活的，另一半靠一张会过期的表。
+
+## 5. `agh_blender_start` 支持"空场景"（新增，2026-10-09）
+
+现在的 `--factory-startup` 场景里必然有 Cube / Light / Camera，而 `agh_blender_export` 是**整场景**
+导出 ⇒ 每个交付的 `.blend` 里都会多出一个 2×2×2 的方块和一盏灯。实测：`kuson-scene.blend`
+（645556 B）里它们确实在（Cube 带 Material）。
+
+- **不是**"每次要人手动删"：循环里它们只是被读回如实报成 `extra_objects`（不算失败），
+  实例在 `stop {force:true}` 时整个丢掉，没人需要清理。它影响的**只有交付件本身干不干净**。
+- 上游能做的一次性绕法：另跑一批 `object.delete` + `data.purge_unused` 再导出。**代价**是
+  "`ops.json` 描述这个场景"不再成立（多出删除指令），所以要另写一份 `ops-cleanup.json`
+  并在报告里说明"场景 = ops.json + ops-cleanup.json"。能做，但等于用一个补丁遮住一件本该
+  由启动参数决定的事。
+- **建议**：给 `agh_blender_start` 一个入参（例如 `empty: true` / `no_factory_objects: true`），
+  启动后清空场景再握手。这样上游**一行都不用改**，而且以后**所有**轮（包括网格路）都干净 ——
+  没有删除指令、没有额外产物、没有"ops 与场景不一致"的问题。
+
+**已实现**（2026-10-09）：`empty: true` 已在 bootstrap 启动路径上落地，`scene_summary()` 新增
+`clearedAtStartup`（**未请求时如实为 `null`**，不是编一个"已清场"）。上游侧**零改动**，
+`notes/LOOP-PROCEDURE.md` §8 加一行 `"empty": true` 即可。**待重装生效**。
+

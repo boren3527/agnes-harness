@@ -329,7 +329,7 @@ agh_ortho_save { <同一组参数>, "run_id": "<名字>-candidate" }
 
 **收敛后（贵，只跑一次）**
 ```
-agh_blender_start
+agh_blender_start { "empty": true }        ← 清掉出厂 Cube/Light/Camera，于是 .blend 与 ops.json 描述同一件事
 agh_blender_apply_ops { "ops": <上一步 fit 返回的 ops，原样> }
 agh_ortho_fit { <同一组参数>, "against_scene": true }
 agh_blender_capture { "width": 1600, "height": 1200 }

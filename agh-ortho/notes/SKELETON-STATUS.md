@@ -951,6 +951,41 @@ dimensions）"——**下游 0.1.8 早就发布了**，读回也确实在断言�
 要"只含那 8 个对象"的干净件，需要另加 `object.delete` + `data.purge_unused`，而那会让
 "`ops.json` 描述这个场景"不再成立（ops 里会多出删除指令）—— 属于未决，见 §10。
 
+## 9.19 下游把两条请求都收了：能力闸门不再"反着生效"，出厂物件不再进交付件（2026-10-09）
+
+下游侧（另一个会话）一次改动收了 §9.16/§9.18 记着的两条：
+
+**① `catalog()` 发布 `primitives` + `capabilitySet`**（请求 #1）。关键是**它不再编一个标识**：
+`CAPABILITY_SET = 'primitives-%d' % len(PRIMITIVE_KINDS)` —— 从**校验 `kind` 的同一个元组**推出来，
+所以"发布出去的清单"与"真正会被接受的枚举"**不可能不一致**；并且注释明确"基元种类/op 表/限额变了
+就要 bump"。上游只做一件事：**原样透传**，并且优先用下游自报的 `capabilitySet`，缺席才退回
+`catalog-v${version}`（少编一个看起来像版本号的标识）。
+
+**闸门方向被翻回来了**（这是 §9.16 记的"恰好是反的"）：
+
+| 来源 | 有 `primitives` | `primitive_gate` |
+|---|---|---|
+| 活实例的 `catalog()`（改后） | 有 | **applied** |
+| 旧下游 / 无实例的快照 | 视情况 | `not_applied`（**如实说"无法判定"，不是假装通过**） |
+
+**而且这次是行为证据，不是断言文字**：`check.mjs` 新增 6 条，其中一条**造了一份"没有 `cone`"的
+能力面**，`spire`（cone）确实被拒成 `unlowered`、`reason_code: no_downstream_primitive` ——
+闸门要是装的，这条会红。自检 **203 PASS / 0 FAIL**（我自己复跑确认）。
+
+**一个值得单独记的教训**：那条被修掉的旧 fixture **注释写着"下游没有 primitives 列表"、断言
+`primitives === null`** —— 也就是说，**测试把 bug 固化成了要求**。fixture 描述的是"当时的下游是
+什么样"，而不是"正确的行为是什么"；下游一变，它就替 bug 站台。以后写夹具要写**形状**（"有就透传、
+没有就 null"），不要写**当时的值**。
+
+**② `agh_blender_start { empty: true }`**（请求 #5）：bootstrap 启动路径上清场，并在 `scene_summary()`
+里**如实上报** `clearedAtStartup`（未请求时是 `null`，不是编一个"已清场"）。它把"场景 = 我们的 ops
+建出来的东西"重新变成真的 —— 于是导出的 `.blend` 与 `ops.json` 描述同一件事，不需要上游补一批
+`object.delete`（那才会破坏这条等式）。**上游零改动**，只需在 §8 的命令序列里加 `"empty": true`。
+
+**两边源码都变了 ⇒ 两个包都要重装**（`agh-ortho` 已装 `sha256-643b0c43…` ≠ 源码；`agh-blender` 同理）。
+装之前，运行中的实例仍加载旧快照 `.runtime-snapshots\sha256-97cee327…`，所以实时目录**还不会**返回
+`primitives`、`empty: true` **还不会**清场 —— 这与"源码已改且被测试证明"不矛盾，两者都要说清楚。
+
 ## 10. 未决项
 
 
