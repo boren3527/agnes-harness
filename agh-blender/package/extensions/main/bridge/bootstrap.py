@@ -191,6 +191,32 @@ def scene_summary():
         'objectCount': len(names),
         'objects': names[:20],
         'sysArgv': list(sys.argv),
+        # What the requested `empty: true` actually did at startup (None when not requested).
+        # Reported rather than assumed: the caller must be able to see whether the clear happened.
+        'clearedAtStartup': STATE.get('clearedAtStartup'),
+    }
+
+
+def clear_startup_scene():
+    """Remove every object the factory startup scene carries (Cube / Light / Camera).
+
+    Runs through the main-thread queue. Rationale: `file.stage_export` writes the WHOLE scene, so
+    unless this happens here, every delivered .blend carries the factory cube. Doing it at startup
+    (instead of asking the caller to emit object.delete + purge) keeps "the scene is what our ops
+    created" true, so an exported file and its ops.json describe the same thing.
+
+    Orphaned meshes/materials are left for `data.purge_unused`; Blender does not write zero-user
+    datablocks into a saved file anyway.
+    """
+    removed = [obj.name for obj in bpy.data.objects]
+    for obj in list(bpy.data.objects):
+        bpy.data.objects.remove(obj, do_unlink=True)
+    bpy.context.view_layer.update()
+    return {
+        'removed': removed,
+        'removedCount': len(removed),
+        'objectCount': len(bpy.data.objects),
+        'isDirtyAfterClear': bool(bpy.data.is_dirty),
     }
 
 
@@ -536,6 +562,22 @@ def main():
 
     hide_splash()
     bpy.app.timers.register(pump, first_interval=0.01, persistent=True)
+
+    # `empty: true` in the launch config: clear the factory startup scene before anything can be
+    # observed. Called DIRECTLY, like hide_splash() above: main() already runs on Blender's main
+    # thread, and run_on_main_thread() would deadlock here (the pump timer cannot fire while the
+    # main thread is blocked waiting for it).
+    if CONFIG.get('empty') is True:
+        try:
+            result = clear_startup_scene()
+            STATE['clearedAtStartup'] = result
+            log('startup scene cleared: removed %d object(s), %d left'
+                % (result['removedCount'], result['objectCount']))
+        except Exception:
+            # A failed clear must not leave a half-started instance claiming to be empty.
+            STATE['clearedAtStartup'] = {'error': traceback.format_exc()[-400:]}
+            log('startup clear failed: %s' % STATE['clearedAtStartup']['error'])
+            raise
 
     server = bind_server()
     port = server.server_address[1]

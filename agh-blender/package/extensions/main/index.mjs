@@ -385,9 +385,11 @@ export const runtime = {
       return { status: response.status, ok: response.ok === true, json, text: text.slice(0, 400) }
     }
 
-    async function runStart(tctx) {
+    async function runStart(tctx, args = {}) {
       const workspaceRoot = resolve(tctx?.cwd ?? process.cwd())
       const dir = join(workspaceRoot, MANAGED_DIR_NAME)
+      // Default false: the behaviour stays exactly as before (and matches the probe's argv).
+      const empty = args?.empty === true
       const report = {
         ok: false,
         startedAt: new Date().toISOString(),
@@ -395,6 +397,7 @@ export const runtime = {
         sessionKey: tctx?.session?.key ?? null,
         toolTimeoutMs: tctx?.timeoutMs ?? null,
         enforcement: null,
+        empty,
         steps: [],
         blockers: [],
       }
@@ -466,6 +469,10 @@ export const runtime = {
         instanceDir,
         port: requestedPort,
         workspaceRoot,
+        // The bridge clears the startup scene when this is true. Kept in the config (rather than
+        // left to the caller to script) because agh_blender_export exports the whole scene: a
+        // factory-startup Cube/Light/Camera would otherwise land in every delivered .blend.
+        empty,
         createdAt: new Date().toISOString(),
       })
       report.instanceId = instanceId
@@ -1043,7 +1050,13 @@ export const runtime = {
         'P0-3 启动链探针：发现本机 blender.exe（校验版本）→ 构造固定 argv → 经 tctx.sandbox.confine() → 在 127.0.0.1 上拉起一个受管理的 GUI Blender 并完成 token 握手。会真实打开 Blender 窗口；不安装扩展、不改用户偏好、不执行任意 Python。',
       parameters: tb({
         type: 'object',
-        properties: {},
+        properties: {
+          empty: {
+            type: 'boolean',
+            description:
+              'true 时启动后清空场景再握手，使实例从真正空文档开始（默认 false，与之前行为一致）。因为 agh_blender_export 是整场景导出，factory-startup 的 Cube/Light/Camera 会跟着进每个交付的 .blend；清空会把”场景内容 = 我们发出的 ops“重新变成事实。',
+          },
+        },
         required: [],
         additionalProperties: false,
       }),
@@ -1057,8 +1070,8 @@ export const runtime = {
         deferLoading: false,
         requiresApproval: 'always',
       },
-      async execute(_args, tctx) {
-        const payload = jsonSafe(await runStart(tctx))
+      async execute(args, tctx) {
+        const payload = jsonSafe(await runStart(tctx, args))
         return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }], structured: payload }
       },
     })

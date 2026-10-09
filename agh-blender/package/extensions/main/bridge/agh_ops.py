@@ -126,6 +126,13 @@ def _counts():
 
 PRIMITIVE_KINDS = ('cube', 'uv_sphere', 'cylinder', 'cone', 'torus', 'plane')
 
+# The capability face this module publishes, so a consumer can name what it actually observed
+# instead of inferring it from the package version (which drifts silently: 0.1.7 vs 0.1.8 was caught
+# exactly that way). Bump CAPABILITY_SET whenever the primitive kinds, the op table or the limits
+# change. `primitives` is emitted from PRIMITIVE_KINDS, the same tuple that validates `kind`, so the
+# published list and the enforced enum cannot disagree.
+CAPABILITY_SET = 'primitives-%d' % len(PRIMITIVE_KINDS)
+
 
 def _op_primitive_add(args):
     kind = _enum(args.get('kind'), 'kind', PRIMITIVE_KINDS)
@@ -558,6 +565,11 @@ def catalog():
     """The machine-readable contract: what may be called, with which arguments."""
     return {
         'version': 1,
+        # Named capability face; consumers should record this rather than the package version.
+        'capabilitySet': CAPABILITY_SET,
+        # The primitive kinds `mesh.primitive_add` will accept. Published from PRIMITIVE_KINDS, so a
+        # consumer can gate on it instead of falling back to "cannot tell".
+        'primitives': list(PRIMITIVE_KINDS),
         'limits': {
             'maxOpsPerBatch': MAX_OPS_PER_BATCH,
             'maxObjects': MAX_OBJECTS,
@@ -571,6 +583,8 @@ def catalog():
             'the whole batch shares one undo step',
             'a rejected op changes nothing',
             'read the scene with scene.describe before and after a build to verify the result',
+            'capabilitySet names the capability face; primitives is the accepted set for '
+            'mesh.primitive_add.kind (a UV sphere is published as uv_sphere)',
         ],
     }
 
