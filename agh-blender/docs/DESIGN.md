@@ -579,6 +579,19 @@
 
 ---
 
+### 3.14 只读读回与导入导出（2026-10-09 实测新增）
+
+| 约束 | 来源 | 说明 |
+|---|---|---|
+| `describe_scene()` 的 `dimensions` **必须是世界 AABB**，不得用 `Object.dimensions` | **P0 实测（P0-F191）** | `Object.dimensions` 是本地 bbox × scale 且**忽略旋转**；导入器用旋转实现轴转换 ⇒ 那些对象会报**旋转前**的尺寸。用 `matrix_world @ bound_box` 八角求轴对齐范围 |
+| 没有几何的对象（相机/灯光/空物体）`dimensions` 给 **`null`**，且**不能用 `hasattr` 判断** | 同上 | 实测**每个对象都有 `dimensions`**，相机等返回 `[0,0,0]` 而不抛 ⇒ 必须按类型闸门（`MESH/CURVE/SURFACE/META/FONT`），只读路径还要 try/except 兜底 |
+| 取景**必须自己构造 view/projection 矩阵**交给 `draw_view3d` | **P0 实测（P0-F192）** | 写 `region_3d.view_*` 后**读回** `region_3d.view_matrix` 得到的是**缓存旧值**（无重绘不重算）⇒ `frame=all/none` 曾产出**字节相同**的图，取景是空操作。`mathutils.Matrix.Perspective` 在 5.2 **不存在** = 手写 GL 透视矩阵 |
+| `capture` 的"内容占比"以**几何投影**为准 | **P0 实测（P0-F193）** | 视口里有网格/坐标轴/gizmo，按颜色统计会把它们算进去；几何投影是确定性的，像素测量（`coverage.inkBox`）只作交叉验证 |
+| `mesh.import`：调用方**声明** up axis，插件**绝不猜** | **P0 实测（P0-F185~F187）** | glTF 导入器**没有**轴参数（总是按 Y-up 处理）⇒ 非 Y 声明由我们旋转纠正；OBJ 有 `up_axis`/`forward_axis`，用固定 `NEGATIVE_Y` + 声明的 up |
+| `mesh.import` 的 `size`/`location` **只比较并回报，不改几何** | **P0 实测（P0-F189）** | 它们是调用方的**期望值**（自检），当作变换会静默重塑"要求原样导入"的东西 |
+| 拒绝必须**按码明确**，且**拒绝后场景保持干净** | **P0 实测（P0-F188）** | `E_NO_SUCH_FILE`/`E_UNSUPPORTED_FORMAT`/`E_BYTE_MISMATCH`/`E_NO_MESH_IMPORTED`；导入产生的非网格残留物先移除再报错 |
+| `start` 必须裁剪旧实例目录 | **P0 实测（P0-F194）** | 保留最新 20 个；**永不删** pid 仍活着的、**永不删**即将使用的那一个 |
+
 ## 10. 决策记录
 
 | # | 决策 | 理由 |
@@ -595,6 +608,7 @@
 
 | 时间 | 变更 |
 |---|---|
+| 2026-10-09 21:05 | **0.2.0**：新增 §3.14（只读读回与导入导出七条约束）。`mesh.import` 落地并发布到 catalog；`dimensions` 改为世界 AABB（原实现忽略旋转）；**取景原来是空操作**（两种模式出图字节相同）→ 改为自建矩阵；capture 新增 `bounds`/`coveredFraction`/`touchesEdges` + 像素交叉验证；`start` 裁剪旧实例目录（保留 20）。死代码 `fit_view_to_bounds()` 已删除并留注释说明原因。证据见 `P0-EVIDENCE.md` §U（P0-F185~F198） |
 | 2026-10-06 09:12 | **v0.1.5 五项修补全部实测**：① `sys.dont_write_bytecode` 移到兄弟 import 之前（**修正 0.1.4 的无效修复**：实测 Blender 嵌入式 CPython **忽略** `PYTHONDONTWRITEBYTECODE`）② `/shutdown` 脏则 **409 `E_DIRTY`** 拒绝（用户选 A；实测完整链：拒绝 → checkpoint 存住含 `cube_a` → `force` 关闭）③ 两条停止路径都写 `stop-report.json` ④ 成功分支带 `identity.observed/expected` ⑤ 压掉 CLIXML 噪声。§3.13 重写；台账新增 §R（P0-F163~F171） |
 | 2026-10-06 00:45 | **孤儿停止首次真实运行**（`P0-EVIDENCE.md` §Q.11）。① **抦到一个破坏性缺陷（P0-F160）**：Blender 一跑就往 **runtime snapshot** 里写 `__pycache__/*.pyc` ⇒ 内容寻址快照被污染 ⇒ **任何包操作都报 `E_PACKAGE_INTEGRITY`**（本轮实测卡死，手删后 `disable` 立即恢复）；修法：spawn 时加 `PYTHONDONTWRITEBYTECODE=1` + `bootstrap.py` 里 `sys.dont_write_bytecode=True`（**未实施**）。② **机制已验证**：直接对真实 Blender 49456 跑已安装包里的 `ps_close.ps1` → `EXITED`，进程确实退出（非强杀）⇒ 方案可行。③ **工具路径失败**：`agh_blender_stop` 跑 19 秒后结果被 **`TOOL_OUTCOME_UNKNOWN` 吞掉**，窗口未关 —— **我的代码违反了 P0-F58**（副作用型工具没先落盘报告），失败原因永久丢失；最可能是 **confine 下执行工作区外 `.ps1`** 被阻/挂住。下轮三件必修事见 §Q.11.4 |
 | 2026-10-06 00:20 | **TUI 那次不是“没问”，是 `reason=timeout`**（`P0-EVIDENCE.md` §Q.10，P0-F159）。ledger 链条：#19 `tool/call agh_blender_start` → **60 秒后** #22 `approval/asked` → #23 `approval/decided verdict=rejected **via=sync** reason=timeout`。与 `-p` 那三次的 `user_rejected` **不同**：`via=sync` 证明 TUI 真问了。又拿到一条非显而易见的机制：**审批卡片 `canSelect = rows >= 4`** —— 窗口行数不够时只显示 resize 提示，**按任何键都选不动**；且 `selected` 初值是 **`reject_once`**，所以**直接回车 = 拒绝**。⇒ 下次操作：拉大窗口 + 按 allow 项的数字键（或 ↑/↓ 再回车）+ **60 秒内** |

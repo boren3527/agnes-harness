@@ -128,51 +128,12 @@ def scene_bounds(scene):
     return center, radius, count, minimum, maximum
 
 
-def fit_view_to_bounds(space, center, radius, out_w, out_h, margin=1.15):
-    """Point the region's view at the bounds from a fixed direction and back off until they fit.
-
-    Deterministic on purpose: bpy.ops.view3d.view_selected() would be the canonical fit, but
-    an operator can fail its poll and then the caller silently gets an unframed image again --
-    which is the defect this exists to fix. The maths is stated here so the result is checkable.
-    """
-    from mathutils import Vector
-
-    r3d = space.region_3d
-    # A fixed three-quarter direction: front, slightly above. Constant across runs, which is
-    # what makes two captures comparable.
-    direction = Vector((0.0, 1.0, -0.35)).normalized()
-    r3d.view_rotation = direction.to_track_quat('-Z', 'Y')
-    r3d.view_location = Vector((center[0], center[1], center[2]))
-
-    lens = float(getattr(space, 'lens', 50.0) or 50.0)
-    sensor = float(getattr(space, 'sensor_width', 36.0) or 36.0)
-    # Pin the sensor to the horizontal axis. Blender's default sensor_fit is 'AUTO', which maps
-    # sensor_width to whichever image dimension is LARGER -- so in a portrait frame the formula
-    # below would attribute 36mm to the wrong axis and under-estimate the limiting angle, letting
-    # the model clip. Pinning it makes the maths below exact instead of approximate.
-    if hasattr(space, 'sensor_fit'):
-        space.sensor_fit = 'HORIZONTAL'
-    fov_x = 2.0 * math.atan(sensor / (2.0 * lens))
-    aspect = (float(out_h) / float(out_w)) if out_w else 1.0
-    fov_y = 2.0 * math.atan(math.tan(fov_x / 2.0) * aspect)
-    half = min(fov_x, fov_y) / 2.0
-    distance = (radius / math.sin(half)) * margin if half > 0 else radius * 3.0
-    r3d.view_distance = distance
-    was_ortho = not bool(getattr(r3d, 'is_perspective', True))
-    if was_ortho:
-        # An orthographic region ignores view_distance entirely, so the fit would silently do
-        # nothing. Switch to perspective and say so in the report.
-        r3d.is_perspective = True
-    return {
-        'center': [round(v, 6) for v in center],
-        'radius': round(radius, 6),
-        'viewDistance': round(distance, 6),
-        'fovDegrees': round(math.degrees(half) * 2.0, 4),
-        'margin': margin,
-        'sensorFit': 'HORIZONTAL',
-        'wasOrthographic': was_ortho,
-    }
-
+# NOTE: a fit_view_to_bounds() used to live here. It wrote region_3d.view_location /
+# view_rotation / view_distance and then callers read region_3d.view_matrix back -- which is
+# STALE without a redraw, so frame='all' and frame='none' produced byte-identical images and
+# the fit was a no-op (measured 2026-10-09). framed_matrices() builds the matrices directly
+# instead. The dead function was removed rather than kept: it looked like the mechanism, and a
+# later reader would have called it.
 
 def _band_mean(rows, width, height, channels, top):
     band = max(1, height // 10)

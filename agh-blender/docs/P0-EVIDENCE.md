@@ -1510,3 +1510,58 @@ if (event.origin !== 'tool:computer_use' || event.trust !== 'untrusted' || data.
 | 实例 `cdf84abf` | journal 两批：`applied=7`（`object.delete` Cube + 6×`mesh.primitive_add`）与 `applied=2`（`material.set`），`objectCount=8` |
 
 ⇒ **"别人装上就能用"这条从假设变成了实测。** 剩余未验的只有与本次无关的外部配置差异（例如对方机器的 Blender 安装位置与版本探测路径）。
+
+## U. 0.2.0：mesh.import + 取景（原来是空操作）+ 实例目录保留（2026-10-09）
+
+上游提出三项。三项都实测完成；其中两处发现"别人已经写过、但坏着"，记录在案。
+
+### U.1 `mesh.import`（P0-F185 ~ P0-F190）
+
+| 编号 | 事实 |
+|---|---|
+| P0-F185 | **glTF 导入器没有任何轴参数**：`import_scene.gltf` 的属性里只有 filepath / shading / 骨骼相关项（实测枚举其 RNA）。它**总是**按 glTF 标准（Y up）处理 ⇒ 声明的 up axis 非 Y 时必须由我们旋转纠正：`Z` → 绕 X 转 −90°，`X` → 绕 Y 转 +90° |
+| P0-F186 | **OBJ 则相反**：`wm.obj_import` **有** `up_axis`（默认 Y）与 `forward_axis`（默认 NEGATIVE_Z）。实测配对 `(forward_axis=NEGATIVE_Y, up_axis=Z)` 能与我们自己的 OBJ 导出**无损往返** ⇒ 采用该固定 forward 轴 + 由调用方声明的 up 轴。`import_scene.obj` 在 Blender 4+ **已不存在** |
+| P0-F187 | **轴声明真的在起作用（对照实验）**：同一份 Z-up glb，声明 `Z` → `[3.7, 1.0, 4.0]`（立起）；故意声明 `Y` → `[3.7, 4.0, 1.0]`（躺倒）。它不是"总能凑对" |
+| P0-F188 | 拒绝语义五条全部按码拒绝、**且场景保持干净**：`E_NO_SUCH_FILE`、`E_UNSUPPORTED_FORMAT`（.stl）、`E_BYTE_MISMATCH`（声明 bytes 或 sha256 不符）、`E_NO_MESH_IMPORTED`（只含灯光/相机的 glb；导入产生的非网格对象被移除后再拒） |
+| P0-F189 | `scale` 相乘生效（`scale=2` → dims ×2）；`name` 重命名最大网格；`size`/`location` **只比较并回报、绝不改动几何**（`selfCheck.{size,location}.{requested,achieved,ok}`）——把"期望值"当断言而不是变换，避免静默重塑调用方要求原样导入的东西 |
+| P0-F190 | `catalog()` 发布 `mesh.import`：ops=11，8 个参数与 4 个拒绝码都在契约里 ⇒ **能力驱动的 lower 能看见它** |
+
+### U.2 `describe_scene()` 的 `dimensions` 改用世界 AABB（P0-F191）
+
+**实测**：`Object.dimensions` 是**本地 bbox × scale，且忽略旋转**（Blender 文档亦如此）。后果：导入器用**旋转**实现轴转换，于是那些对象的"最终尺寸"会报成**旋转前**的值。改为 `matrix_world @ bound_box` 的八个角求轴对齐范围：
+
+- 无旋转对象不变（`[12.4, 8.6, 9.3]`、plane `[2,2,0]`、cyl/cone `[3,3,3]`/`[4,4,4]` 全部照旧）
+- **有旋转才看得出差别**：`[1,2,4]` 的盒子绕 X 转 90° → 现在报 `[1,4,2]`（旧实现报 `[1,2,4]`）
+- 相机/灯光/空物体 → `null`。**注意**：实测表明**每个对象都有 `dimensions`**，相机等返回 `[0,0,0]` 而**不抛异常** ⇒ 规格里"用 `hasattr` 判 None"是**做不到的**，必须用类型闸门（`MESH/CURVE/SURFACE/META/FONT`）
+
+### U.3 取景：别人写过、但**是空操作**（P0-F192）
+
+**实测**：`frame='none'` 与 `frame='all'` 渲出的 PNG **sha 完全相同**（89 475 B，`788697314009`）。根因：那个实现写 `region_3d.view_location/view_rotation/view_distance`，随后**又读回** `region_3d.view_matrix` —— 没有重绘，region 从不重算这些矩阵，于是 `draw_view3d` 拿到的还是旧矩阵。
+
+**修法**：`framed_matrices()` 自己构造 view 与 projection 并直接交给 `draw_view3d`。附带两个坑：
+
+- **`mathutils.Matrix.Perspective` 在 Blender 5.2 不存在**（实测 `AttributeError`）⇒ 手写标准 GL 透视矩阵
+- 修后：`frame='all'` 的 `coveredFraction=0.103`、`touchesEdges=false`、`clipped=false`；`inkFraction` 从 2.2% 升到 **10.1%**；几何 `pixelBox` x∈[280,360] y∈[29,326] 与该塔（2×2×8）形状相符；像素实测 `inkBox` y∈[0.078,0.906] 不贴上下边
+- 保留 `'none'` 分支：显式请求时才用旧行为（**缺陷必须是显式选择**，不能是默认）
+
+### U.4 新增返回字段：`bounds` / `coveredFraction` / `touchesEdges`（P0-F193）
+
+几何投影（包围盒 8 角 × 交给 draw_view3d 的同一组矩阵）给出确定性度量；另附**像素独立测量** `coverage.inkBox` 用作交叉验证。
+
+**为什么不用"非背景像素占比"作为主指标**：视口渲染里还有**网格、坐标轴、gizmo**，按颜色统计会把它们算成内容 —— 实测 `inkBox` 因此几乎横跨整幅（x∈[0.003,0.991]）。两个数都给了，但**以几何为准**、像素只作上界与交叉验证。
+
+### U.5 实例目录保留（P0-F194）
+
+**实测**：一个工作区里累积了 11 个死实例目录，**没有任何机制清理**。`start` 现在在创建新目录**之前**裁剪：保留最新 20 个，**永不删** pid 仍活着的、**永不删**即将使用的那个。
+
+验证：预置 25 个死目录 → `kept=20 removed=5`（删的是最旧的）→ 结束后 **21 个**（20 + 1 新）。
+
+### U.6 本轮教训
+
+| 编号 | 教训 |
+|---|---|
+| **P0-F195** | **"别人写过"不等于"它能工作"**：取景函数存在、参数齐全、注释漂亮，但实测它对画面**毫无影响**。凡是承接别人的实现，**先做一次行为对照**（这里是"两种模式出的图 sha 是否相同"），别读代码就下结论 |
+| P0-F196 | **别凭记忆假设 API**：我写了 `Matrix.Perspective(...)`，Blender 5.2 里没有这个属性。**先探测再写** |
+| P0-F197 | **测试夹具要选不会被别人清空的落点**：我预置的 25 个目录被预检自己的 `rmSync` 先删掉了，导致第一次裁剪验证得出"只剩 1 个"的**假结论**。换独立台架后才拿到真结果 |
+| P0-F198 | **期望值写错会伪装成产品缺陷**：本轮两次 `FAIL` 全是我把期望值抄错（`[6.4,6.4,4.0]`、`[0,0,4]`），产品本身是对的。**FAIL 先怀疑断言，再怀疑实现** |
+
