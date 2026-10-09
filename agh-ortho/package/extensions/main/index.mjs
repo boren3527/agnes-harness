@@ -37,6 +37,7 @@ import {
   sixViewRects,
   svgFor,
 } from './views.mjs'
+import { silhouetteOf, compareSilhouette } from './silhouette.mjs'
 
 const EMITTER_VERSION = '0.1.0'
 
@@ -361,6 +362,24 @@ const VERIFY_INPUT = {
 }
 
 // save 的输入 = emit_ops 的输入 + 一个幂等键（上游契约 §5.3：同一 id 必须对应同一内容）。
+// 剪影输入（SILHOUETTE-PLAN）：一张**正交渲染**的、带透明通道的 PNG + 它的投影参数。
+// `ortho_scale` **必填** —— 它是像素↔米的**唯一**依据；没有它就只能猜，而猜出来的尺度会**静默决定**判定结果。
+// `width/height` 可选：给了就必须与 PNG 实际尺寸一致（又一条免费的独立核对）。尺寸本身以 PNG 为准。
+// **声明必须早于 SAVE_INPUT**：它在 SAVE_INPUT 里就被引用了（TDZ 第三次栽在这里，前两次是 PHOTO_CHECK / MESH_SOURCE）。
+const SILHOUETTE_INPUT = {
+  type: 'object',
+  properties: {
+    view: { type: 'string', enum: ['front', 'top', 'left', 'right', 'bottom', 'back'] },
+    path: { type: 'string', minLength: 2 },
+    ortho_scale: { type: 'number', exclusiveMinimum: 0 },
+    sensor_fit: { type: 'string', enum: ['HORIZONTAL', 'VERTICAL', 'AUTO'] },
+    width: { type: 'integer', exclusiveMinimum: 0 },
+    height: { type: 'integer', exclusiveMinimum: 0 },
+  },
+  required: ['path', 'ortho_scale'],
+  additionalProperties: false,
+}
+
 const SAVE_INPUT = {
   type: 'object',
   properties: {
@@ -376,6 +395,8 @@ const SAVE_INPUT = {
     // 外部生成的网格（StdGEN 那类）的**真实路径**：登记成描述符（只登记不复制），
     // 并顺带读同目录的 source.json（unit/upAxis/declaredHeight 的声明）。
     mesh_file: { type: 'string', minLength: 2 },
+    // 剪影图（可选）：交付包里也记下"轮廓像不像"这一档的结论。
+    silhouette: SILHOUETTE_INPUT,
   },
   required: EMIT_OPS_INPUT.required,
   additionalProperties: false,
@@ -1192,6 +1213,10 @@ async function assembleArtifacts(args, createdAt, tctx) {
   // 而里面其实没有模型。
   const blockers = [...emission.blockers]
   const outline = numericOutline(views)
+  // 剪影那一档：**读不到就是 blocker**（不是"没给"）—— 它同时与 outline（几何自洽）
+  // 和 photo_check（像不像照片）比，所以它必须和别的档一样影响 ok。
+  const silhouetteCheck = await silhouetteFinding(tctx, args.silhouette, outline, args.photo_check)
+  blockers.push(...silhouetteCheck.blockers)
   // ③ 图纸先落：这是复核者该打开的那个文件。六张分图仍在，但"一张图纸"才是 review 对象。
   const sheet = renderSheet(views, placement, { projection: args.projection })
   files.push({
@@ -1468,6 +1493,7 @@ async function assembleArtifacts(args, createdAt, tctx) {
         anchor: anchorReport(args),
         declared_confidence: declaredConfidence(args),
         photo_check: photoCheckFindings(args, outline),
+        silhouette: silhouetteCheck.finding,
         overlaps: overlapFindings(boxes),
         parts: partCensus(args),
         placement: placementReport(boxes),
@@ -1627,11 +1653,81 @@ function canonicalParams(args) {
 }
 
 // fit 的输入 = emit_ops 的输入 + 一个可选的"是否引入外部事实"开关。
+/** 照片读数（区间）→ 中点。没有读数就返回 null：那一档是**没发生**，不是"通过"。 */
+function photoCheckMidAspect(photoCheck, view) {
+  const reading = photoCheck?.[view]
+  if (!reading || typeof reading.w_over_h_min !== 'number' || typeof reading.w_over_h_max !== 'number') return null
+  return (reading.w_over_h_min + reading.w_over_h_max) / 2
+}
+
+/**
+ * 读一张剪影图，并与参数侧 `outline`（几何自洽）和 `photo_check`（像不像照片）比。
+ * 返回 `{ finding, blockers }`；**绝不抛错** —— 读不到/解不开/没有尺度都是**明确 blocker**，
+ * 因为"没发生"必须和"通过了"分开说。
+ */
+async function silhouetteFinding(tctx, spec, outline, photoCheck) {
+  const blockers = []
+  if (!spec) return { finding: null, blockers }
+  if (typeof tctx?.fs?.read !== 'function') {
+    blockers.push({ code: 'E_NO_FS', message: 'the silhouette comparison needs the fs seam to read the render', path: spec.path })
+    return { finding: null, blockers }
+  }
+  let bytes
+  try {
+    bytes = await tctx.fs.read(spec.path)
+  } catch (error) {
+    blockers.push({
+      code: 'E_SILHOUETTE_UNREADABLE',
+      message: `the silhouette render could not be read (${error?.message ?? error}). No silhouette comparison happened — do not read its absence as agreement.`,
+      path: spec.path,
+    })
+    return { finding: null, blockers }
+  }
+  let metrics
+  try {
+    metrics = silhouetteOf(bytes)
+  } catch (error) {
+    blockers.push({ code: 'E_SILHOUETTE_UNREADABLE', message: `the silhouette render could not be decoded (${error?.message ?? error}).`, path: spec.path })
+    return { finding: null, blockers }
+  }
+  if (Number.isInteger(spec.width) && spec.width !== metrics.width) {
+    blockers.push({ code: 'E_SILHOUETTE_SIZE_MISMATCH', message: `the caller declared width ${spec.width} but the PNG is ${metrics.width} px wide`, path: spec.path })
+  }
+  if (Number.isInteger(spec.height) && spec.height !== metrics.height) {
+    blockers.push({ code: 'E_SILHOUETTE_SIZE_MISMATCH', message: `the caller declared height ${spec.height} but the PNG is ${metrics.height} px tall`, path: spec.path })
+  }
+  const view = spec.view ?? 'front'
+  const entry = (outline ?? []).find((o) => o.view === view) ?? null
+  const compared = compareSilhouette(
+    { ...metrics, view },
+    {
+      orthoScale: spec.ortho_scale,
+      sensorFit: spec.sensor_fit,
+      // numericOutline 给的是 `u_span_m` / `v_span_m`（米），这里对齐字段名。
+      outline: entry && Number.isFinite(entry.u_span_m) && Number.isFinite(entry.v_span_m) ? { u_span: entry.u_span_m, v_span: entry.v_span_m } : null,
+      expectedAspect: photoCheckMidAspect(photoCheck, view),
+    },
+  )
+  blockers.push(...compared.blockers)
+  return {
+    finding: {
+      path: spec.path,
+      view,
+      declared_ortho_scale: spec.ortho_scale,
+      declared_sensor_fit: spec.sensor_fit ?? null,
+      compared,
+    },
+    blockers,
+  }
+}
+
 const FIT_INPUT = {
   type: 'object',
   properties: {
     ...EMIT_OPS_INPUT.properties,
     against_scene: { type: 'boolean' },
+    // 正交渲染出的剪影图（可选）：给了就多一档"轮廓像不像"的可判结论（SILHOUETTE-PLAN）。
+    silhouette: SILHOUETTE_INPUT,
   },
   required: EMIT_OPS_INPUT.required,
   additionalProperties: false,
@@ -2475,7 +2571,7 @@ export const runtime = {
       // 闭环里"便宜的那一半"的入口。它把一份候选参数变成**可审计的结论 + 该改哪里**，
       // 一次调用给全，让一轮迭代只付一次嵌套协商的代价。只读、不落盘 —— 落盘归 save。
       description:
-        '只读、纯函数、**不落盘**。把一份候选参数 JSON 变成一份**可审计的结论**，并明确告诉你**该改哪里**。一次调用给出：逐条 validation（每条都带 ok）、三态清单（区分"下游做不到"与"我还没做"）、numeric 自洽（残差必须为 0）、六视图的**数值轮廓**（outline，供你拿照片做粗核对 —— 你看见用户上传的照片，看不见工具产出的图像素）、六张 SVG，**外加一张整图纸的指针（sheet）**：六视图按第一角法/第三角法排在一张图上、全图一个比例尺 —— 复核就看这一张，而且必须在进 apply_ops 之前看（正文不进这个载荷，见 sheet.inline_from；20 个对象约 30 KB，同一份几何不值得发两遍）、conf 的如实标注、scale_anchor 的换算与脆弱性、以及逐项逐轴的 revise_hints。**进来先按这个顺序看三样**：① `validation` + `revise_hints` —— verdict=revise 时**只改被点名的位置**，一轮只改一处，否则无法归因是哪一步改好的；② `photo_check` —— **你必须在参数里写下从照片读到的比例区间**：`photo_check: { front: { w_over_h_min, w_over_h_max } }`（相对半宽 ≤30%，容差按你声明的小数位推），fit 才会拿它和你算出的 `outline` 自动对一遍；**不写它就等于这一档没有发生**，"像不像照片"会退回纯人眼；③ `anchor` —— 照片里没有已知长度的参照物时，必须**显式**在 `assumptions` 里写 `"proportions_only"`（或 `"authored_dimensions"`），**不要编一个看起来合理的米数**，否则它是 blocking。**verdict=fit 之后不要直接 apply_ops**：先 `agh_ortho_save` 落一个**候选**（run_id 带 `-candidate`，不碰 Blender），请人打开 `sheet.svg` 复核；人放行后才 apply_ops → `against_scene:true` 的 fit → 用**另一个** run_id 落交付包（同一个 run_id 会被幂等吃掉读回）。**边界说清楚**：numeric 与读回只证明"我自洽、下游照做了"，**都不证明与照片一致** —— 那一段只能靠你拿 `outline` / 那张图纸和照片比，加上人的眼睛。',
+        '只读、纯函数、**不落盘**。把一份候选参数 JSON 变成一份**可审计的结论**，并明确告诉你**该改哪里**。一次调用给出：逐条 validation（每条都带 ok）、三态清单（区分"下游做不到"与"我还没做"）、numeric 自洽（残差必须为 0）、六视图的**数值轮廓**（outline，供你拿照片做粗核对 —— 你看见用户上传的照片，看不见工具产出的图像素）、六张 SVG，**外加一张整图纸的指针（sheet）**：六视图按第一角法/第三角法排在一张图上、全图一个比例尺 —— 复核就看这一张，而且必须在进 apply_ops 之前看（正文不进这个载荷，见 sheet.inline_from；20 个对象约 30 KB，同一份几何不值得发两遍）、conf 的如实标注、scale_anchor 的换算与脆弱性、以及逐项逐轴的 revise_hints。**进来先按这个顺序看三样**：① `validation` + `revise_hints` —— verdict=revise 时**只改被点名的位置**，一轮只改一处，否则无法归因是哪一步改好的；② `photo_check` —— **你必须在参数里写下从照片读到的比例区间**：`photo_check: { front: { w_over_h_min, w_over_h_max } }`（相对半宽 ≤30%，容差按你声明的小数位推），fit 才会拿它和你算出的 `outline` 自动对一遍；**不写它就等于这一档没有发生**，"像不像照片"会退回纯人眼；③ `anchor` —— 照片里没有已知长度的参照物时，必须**显式**在 `assumptions` 里写 `"proportions_only"`（或 `"authored_dimensions"`），**不要编一个看起来合理的米数**，否则它是 blocking。**verdict=fit 之后不要直接 apply_ops**：先 `agh_ortho_save` 落一个**候选**（run_id 带 `-candidate`，不碰 Blender），请人打开 `sheet.svg` 复核；人放行后才 apply_ops → `against_scene:true` 的 fit → 用**另一个** run_id 落交付包（同一个 run_id 会被幂等吃掉读回）。**边界说清楚**：numeric 与读回只证明"我自洽、下游照做了"，**都不证明与照片一致** —— 那一段只能靠你拿 `outline` / 那张图纸和照片比，加上人的眼睛。**可选**：传 `silhouette: { path, ortho_scale, sensor_fit }`（一张**正交渲染**的、带透明通道的 PNG）就多一档**可判**的"轮廓像不像"：它把剪影折算成米，同时与 `outline`（几何自洽）和 `photo_check`（像不像照片）比；`ortho_scale` 必填（像素↔米的唯一依据，缺了就没有判定），判据容差按**渲染分辨率**推（≥2 像素折算），对不上即 blocking。',
       parameters: FIT_INPUT,
       meta: READ_ONLY_META,
       async execute(args, tctx) {
@@ -2494,9 +2590,13 @@ export const runtime = {
         const numericOk = emission.ok && aligned && checked.within_tolerance
         const outline = numericOutline(views)
         const overlaps = overlapFindings(boxes)
+        // 剪影那一档（fit 侧）：与"几何自洽"和"照片读数"一起判 —— **读不到就是 blocker**，
+        // 因为它必须与别的档一样影响 verdict，不能退化成"没提就不发生"的软选项。
+        // 注意 fit 里**没有** `blockers` 数组（那是 verify/save 的）：结论走 verdict，所以这里直接进判定。
+        const silhouetteFit = await silhouetteFinding(tctx, args.silhouette, outline, args.photo_check)
         const revise = reviseHints(args, emission, caps, { checked, aligned, fromParams, outline, overlaps, boxes })
         const validation = validationReport(args, emission, caps)
-        const verdict = numericOk && validation.ok && revise.blocking === 0 ? 'fit' : 'revise'
+        const verdict = numericOk && validation.ok && revise.blocking === 0 && silhouetteFit.blockers.length === 0 ? 'fit' : 'revise'
         // ③ 便宜的那一步的**单一复核对象**：六视图排在一张图纸上，全图一个比例尺。
         const sheet = renderSheet(views, placement, { projection: args.projection })
 
@@ -2539,6 +2639,11 @@ export const runtime = {
           },
           // ③ 那一关的可核部分：模型写下的照片读数 vs 我们算出来的轮廓。
           photo_check: photoCheckFindings(args, outline),
+          // 剪影那一档：渲染出的轮廓 vs 上面两个（就像不像照片，这是可判的那一半）。
+          silhouette: silhouetteFit.finding,
+          // 剪影那一档的 blockers **单独列出**：读不到图时 finding 是 null，若只留 finding，
+          // "没发生"就会变成载荷里看不见的东西 —— 那正是我们一直在防的。
+          silhouette_blockers: silhouetteFit.blockers,
           // 建模手滑（warning 级）
           overlaps,
           declared_relative_confidence: declaredConfidence(args),

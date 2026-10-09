@@ -1157,5 +1157,207 @@ try {
 }
 check('real fs: scratch directory cleaned up', !existsSync(realRoot))
 
+// ---------------------------------------------------------------------------
+// 剪影数值化（SILHOUETTE-PLAN §5）：**用合成 PNG 验** —— 真值全部已知，不需要下游、不需要 Blender。
+// 夹具自带一个最小 PNG 编码器，只为让测试**真的经过解码路径**（而不是喂一个假的"像素数组"）。
+// ---------------------------------------------------------------------------
+const { deflateSync } = await import('node:zlib')
+const silMod = await import('../package/extensions/main/silhouette.mjs')
+const crcTable = (() => {
+  const t = new Int32Array(256)
+  for (let n = 0; n < 256; n += 1) {
+    let c = n
+    for (let k = 0; k < 8; k += 1) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1
+    t[n] = c
+  }
+  return t
+})()
+const crc32 = (buf) => {
+  let c = -1
+  for (let i = 0; i < buf.length; i += 1) c = crcTable[(c ^ buf[i]) & 0xff] ^ (c >>> 8)
+  return (c ^ -1) >>> 0
+}
+const pngChunk = (type, data) => {
+  const len = Buffer.alloc(4)
+  len.writeUInt32BE(data.length, 0)
+  const body = Buffer.concat([Buffer.from(type, 'latin1'), data])
+  const crc = Buffer.alloc(4)
+  crc.writeUInt32BE(crc32(body), 0)
+  return Buffer.concat([len, body, crc])
+}
+const makePng = (width, height, draw, colorType = 6) => {
+  const ch = colorType === 6 ? 4 : 3
+  const rows = []
+  for (let y = 0; y < height; y += 1) {
+    const row = Buffer.alloc(width * ch + 1)
+    for (let x = 0; x < width; x += 1) {
+      const px = draw(x, y) ?? [0, 0, 0, 0]
+      for (let k = 0; k < ch; k += 1) row[1 + x * ch + k] = px[k] ?? 255
+    }
+    rows.push(row)
+  }
+  const ihdr = Buffer.alloc(13)
+  ihdr.writeUInt32BE(width, 0)
+  ihdr.writeUInt32BE(height, 4)
+  ihdr[8] = 8
+  ihdr[9] = colorType
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    pngChunk('IHDR', ihdr),
+    pngChunk('IDAT', deflateSync(Buffer.concat(rows))),
+    pngChunk('IEND', Buffer.alloc(0)),
+  ])
+}
+const blockPng = (canvas, bw, bh) =>
+  makePng(canvas, canvas, (x, y) => {
+    const x0 = Math.round((canvas - bw) / 2)
+    const y0 = Math.round((canvas - bh) / 2)
+    return x >= x0 && x < x0 + bw && y >= y0 && y < y0 + bh ? [255, 255, 255, 255] : [0, 0, 0, 0]
+  })
+
+const sil512 = silMod.silhouetteOf(blockPng(512, 200, 100))
+check(
+  'silhouette: a synthetic 200x100 block decodes to exact metrics (area, bbox, aspect, edges)',
+  sil512.width === 512 &&
+    sil512.covered_pixels === 200 * 100 &&
+    // 报告的数是 `toFixed(6)` 的 ⇒ 断言也必须在**报告的精度**内比，不能拿 1e-9 去比一个 6 位小数的数
+    //（"判据的精度不能超过输入的精度" —— 这是它第 7 次现身）。
+    Math.abs(sil512.covered_fraction - (200 * 100) / (512 * 512)) <= 5e-7 &&
+    sil512.bbox_px.width === 200 &&
+    sil512.bbox_px.height === 100 &&
+    sil512.aspect_px === 2 &&
+    sil512.touches_edges.left === false &&
+    sil512.touches_edges.top === false,
+  JSON.stringify(sil512),
+)
+check(
+  'silhouette: pixels touching the frame are reported (a cropped render must not pass as fine)',
+  (() => {
+    const s = silMod.silhouetteOf(makePng(64, 64, (x, y) => (y < 32 ? [255, 255, 255, 255] : [0, 0, 0, 0])))
+    return s.touches_edges.top === true && s.touches_edges.left === true && s.touches_edges.bottom === false
+  })(),
+)
+check(
+  'silhouette: an RGB render without alpha is REFUSED instead of guessing a background colour',
+  (() => {
+    try {
+      silMod.silhouetteOf(makePng(8, 8, () => [255, 255, 255], 2))
+      return false
+    } catch (error) {
+      return /no alpha channel/.test(String(error?.message))
+    }
+  })(),
+)
+check('silhouette: an empty render is stated as empty, not as a pass', silMod.silhouetteOf(makePng(32, 32, () => [0, 0, 0, 0])).covered_fraction === 0)
+check(
+  'silhouette: metres per pixel comes only from ortho_scale, sensor_fit and the image size',
+  Math.abs(silMod.metresPerPixel({ orthoScale: 2, sensorFit: 'VERTICAL', width: 512, height: 512 }) - 2 / 512) < 1e-12 &&
+    Math.abs(silMod.metresPerPixel({ orthoScale: 2, sensorFit: 'HORIZONTAL', width: 1024, height: 512 }) - 2 / 1024) < 1e-12 &&
+    Math.abs(silMod.metresPerPixel({ orthoScale: 2, sensorFit: 'AUTO', width: 1024, height: 512 }) - 2 / 1024) < 1e-12 &&
+    silMod.metresPerPixel({ orthoScale: 0, sensorFit: 'AUTO', width: 512, height: 512 }) === null,
+)
+const m512 = silMod.compareSilhouette({ ...silMod.silhouetteOf(blockPng(512, 200, 100)), view: 'front' }, { orthoScale: 2, sensorFit: 'VERTICAL' })
+const m2048 = silMod.compareSilhouette({ ...silMod.silhouetteOf(blockPng(2048, 800, 400)), view: 'front' }, { orthoScale: 2, sensorFit: 'VERTICAL' })
+check(
+  'silhouette: the same shape at two resolutions gives the same size in metres (A1)',
+  Math.abs(m512.size_m.width - 0.78125) < 1e-9 && Math.abs(m2048.size_m.width - 0.78125) < 1e-9 && Math.abs(m512.size_m.height - m2048.size_m.height) < 1e-9,
+  JSON.stringify({ m512: m512.size_m, m2048: m2048.size_m }),
+)
+check(
+  'silhouette: the tolerance is derived from the render resolution, never a fixed small number',
+  m512.tolerance_m >= 2 * m512.metres_per_pixel && /max\(2 px/.test(m512.tolerance_source),
+  JSON.stringify({ tol: m512.tolerance_m, mpp: m512.metres_per_pixel }),
+)
+const known = silMod.compareSilhouette(
+  { ...silMod.silhouetteOf(blockPng(512, 40, 200)), view: 'front' },
+  { orthoScale: 2, sensorFit: 'VERTICAL', outline: { u_span: 0.4, v_span: 2 } },
+)
+check(
+  'silhouette: a known 0.4x0.4x2 sample measures its 0.200 outline aspect (A2)',
+  Math.abs(known.aspect - 0.2) < 1e-9 && known.matches_outline === true && known.ok === true,
+  JSON.stringify({ aspect: known.aspect, outline_aspect: known.outline_aspect, delta: known.aspect_delta, tol: known.tolerance_m }),
+)
+const wrong = silMod.compareSilhouette(
+  { ...silMod.silhouetteOf(blockPng(512, 40, 200)), view: 'front' },
+  { orthoScale: 2, sensorFit: 'VERTICAL', outline: { u_span: 0.4, v_span: 0.4 } },
+)
+check('silhouette: a mismatch is a blocker, not a note (A3)', wrong.ok === false && wrong.blockers.some((b) => b.code === 'E_SILHOUETTE_OFF_OUTLINE'), JSON.stringify(wrong.blockers.map((b) => b.code)))
+check(
+  'silhouette: with no ortho_scale there is no verdict at all (a guessed scale would decide it silently)',
+  silMod
+    .compareSilhouette({ ...silMod.silhouetteOf(blockPng(512, 40, 200)), view: 'front' }, { outline: { u_span: 0.4, v_span: 2 } })
+    .blockers.some((b) => b.code === 'E_SILHOUETTE_NO_SCALE'),
+)
+check(
+  'silhouette: an empty render is a blocker of its own kind',
+  silMod.compareSilhouette({ view: 'front', aspect_px: null, width: 512, height: 512 }, { orthoScale: 2, sensorFit: 'VERTICAL' }).blockers.some((b) => b.code === 'E_SILHOUETTE_EMPTY'),
+)
+const photoOk = silMod.compareSilhouette({ ...silMod.silhouetteOf(blockPng(512, 40, 200)), view: 'front' }, { orthoScale: 2, sensorFit: 'VERTICAL', expectedAspect: 0.2 })
+const photoBad = silMod.compareSilhouette({ ...silMod.silhouetteOf(blockPng(512, 40, 200)), view: 'front' }, { orthoScale: 2, sensorFit: 'VERTICAL', expectedAspect: 0.9 })
+check(
+  'silhouette: the photo comparison is two-sided — it passes near the reading and blocks far from it',
+  photoOk.matches_photo === true && photoOk.ok === true && photoBad.matches_photo === false && photoBad.blockers.some((b) => b.code === 'E_SILHOUETTE_OFF_PHOTO'),
+  JSON.stringify({ near: photoOk.matches_photo, far: photoBad.matches_photo }),
+)
+
+// 接线：fit / save 真的会**用**这一档（对不上、读不到都要进判定，而不是只写进载荷）
+const baseFit = (await fitTool.execute({ ...MCAP_ARGS, against_scene: false }, withMCap)).structured
+const frontAspect = baseFit.outline.find((o) => o.view === 'front')?.w_over_h
+check('silhouette wiring: the fixture knows the front outline aspect it must reproduce', Number.isFinite(frontAspect), `front w_over_h = ${frontAspect}`)
+const silFitFs = (bw, bh) => {
+  const f = memoryFs()
+  f.files.set('D:/ws/out/front.png', blockPng(512, bw, bh))
+  return f
+}
+const silArgs = { path: 'D:/ws/out/front.png', ortho_scale: 2, sensor_fit: 'VERTICAL' }
+// 夹具里的 `photo_check` 写的是 0（那是别处用例），这里要一份**与渲染相称**的读数，
+// 否则这一档会被"照片读数 0"挡住 —— 那验证的是另一件事。
+const silFitArgs = { ...MCAP_ARGS, against_scene: false, silhouette: silArgs, photo_check: { front: { w_over_h_min: frontAspect, w_over_h_max: frontAspect } } }
+const okSil = (await fitTool.execute({ ...silFitArgs }, { fs: silFitFs(Math.round(200 * frontAspect), 200), session: { workspaceRoot: ws } })).structured
+check(
+  'silhouette wiring: fit compares the render against its own outline, and agrees when they match',
+  // 只看这一档：基座参数本身可能有别的 warning/blocker（那与本档无关），所以"一致"的标准是
+  // **本档不产生 blocker**、且 verdict 不被它改写。
+  okSil.silhouette?.compared?.ok === true &&
+    okSil.silhouette.compared.matches_outline === true &&
+    (okSil.silhouette_blockers ?? []).length === 0 &&
+    okSil.verdict === baseFit.verdict,
+  JSON.stringify({ render: okSil.silhouette?.compared?.aspect, outline: okSil.silhouette?.compared?.outline_aspect, cmp_ok: okSil.silhouette?.compared?.ok, matches: okSil.silhouette?.compared?.matches_outline, delta: okSil.silhouette?.compared?.aspect_delta, tol: okSil.silhouette?.compared?.tolerance_m, blockers: okSil.silhouette_blockers?.map((b) => ({ c: b.code, m: String(b.message).slice(0, 90) })), verdict: okSil.verdict, base: baseFit.verdict }),
+)
+const badSil = (await fitTool.execute({ ...silFitArgs }, { fs: silFitFs(Math.round(200 * frontAspect * 2), 200), session: { workspaceRoot: ws } })).structured
+check(
+  'silhouette wiring: a render that disagrees with the outline forces the verdict to revise',
+  badSil.verdict === 'revise' && badSil.silhouette?.compared?.ok === false && badSil.silhouette?.compared?.blockers?.some((b) => b.code === 'E_SILHOUETTE_OFF_OUTLINE'),
+  JSON.stringify({ verdict: badSil.verdict, codes: badSil.silhouette?.compared?.blockers?.map((b) => b.code) }),
+)
+const noScale = (await fitTool.execute({ ...MCAP_ARGS, against_scene: false, silhouette: { path: 'D:/ws/out/front.png' } }, { fs: silFitFs(100, 200), session: { workspaceRoot: ws } })).structured
+check(
+  'silhouette wiring: without ortho_scale there is no verdict (a guessed scale would decide it silently)',
+  noScale.silhouette?.compared?.blockers?.some((b) => b.code === 'E_SILHOUETTE_NO_SCALE') && noScale.verdict === 'revise',
+  JSON.stringify(noScale.silhouette?.compared?.blockers?.map((b) => b.code)),
+)
+const missSil = (await fitTool.execute({ ...MCAP_ARGS, against_scene: false, silhouette: { path: 'D:/ws/out/nope.png', ortho_scale: 2 } }, { fs: memoryFs(), session: { workspaceRoot: ws } })).structured
+check(
+  'silhouette wiring: an unreadable render is a blocker that stays visible even though there is no finding',
+  missSil.silhouette === null && missSil.silhouette_blockers?.some((b) => b.code === 'E_SILHOUETTE_UNREADABLE') && missSil.verdict === 'revise',
+  JSON.stringify(missSil.silhouette_blockers?.map((b) => b.code)),
+)
+const silSaveFs = meshFs(makeGlb([0.2, 1, 0.2]))
+silSaveFs.files.set('D:/ws/out/front.png', blockPng(512, 40, 200))
+const badSave = (
+  await save.execute(
+    { ...SAMPLE, assembly: [meshItem()], run_id: 'mesh-sil', mesh_file: MESH_PATH_WIN, silhouette: { path: 'D:/ws/out/front.png', ortho_scale: 2, sensor_fit: 'VERTICAL', width: 999 } },
+    { fs: silSaveFs, session: { workspaceRoot: ws } },
+  )
+).structured
+const badSaveReport = readReport(silSaveFs, 'mesh-sil')
+check(
+  'silhouette wiring: save records the comparison in report.json and a declared size that disagrees with the PNG blocks the pack',
+  badSave.ok === false &&
+    badSaveReport.checks?.silhouette?.compared?.ok === false &&
+    badSaveReport.blockers?.some((b) => b.code === 'E_SILHOUETTE_SIZE_MISMATCH'),
+  JSON.stringify({ ok: badSave.ok, codes: badSaveReport.blockers?.map((b) => b.code) }),
+)
+
 console.log(`\n${failures === 0 ? 'ALL PASS' : `${failures} FAILURE(S)`}`)
 process.exitCode = failures === 0 ? 0 : 1
