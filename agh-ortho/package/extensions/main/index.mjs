@@ -397,6 +397,8 @@ const SAVE_INPUT = {
     mesh_file: { type: 'string', minLength: 2 },
     // 剪影图（可选）：交付包里也记下"轮廓像不像"这一档的结论。
     silhouette: SILHOUETTE_INPUT,
+    // 源照片的真实路径（可选）：登记进包，并核 `source.input_image_sha256` 的声明。
+    image_file: { type: 'string', minLength: 2 },
   },
   required: EMIT_OPS_INPUT.required,
   additionalProperties: false,
@@ -1217,6 +1219,23 @@ async function assembleArtifacts(args, createdAt, tctx) {
   // 和 photo_check（像不像照片）比，所以它必须和别的档一样影响 ok。
   const silhouetteCheck = await silhouetteFinding(tctx, args.silhouette, outline, args.photo_check)
   blockers.push(...silhouetteCheck.blockers)
+  // 源图那一环：声明必须可核对（同时把源图登记进包，让"这张图 → 这个网格"可核）。
+  const imageCheck = await imageFinding(tctx, args)
+  blockers.push(...imageCheck.blockers)
+  if (imageCheck.bytes) {
+    files.push({
+      name: basename(args.image_file),
+      data: imageCheck.bytes,
+      absolutePath: args.image_file,
+      preview: `源照片（外部输入）：${basename(args.image_file)}，${imageCheck.bytes.length} 字节，sha256 ${String(imageCheck.finding.computed).slice(0, 12)}…；描述符**只登记不复制**。有了它，"这个网格源自这张图"才是可核对的事实，而不只是一句声明`,
+      meta: {
+        external: true,
+        register_only: true,
+        role: 'source_image',
+        sha256_verified: (imageCheck.finding.matches ?? []).every((m) => m.matches),
+      },
+    })
+  }
   // ③ 图纸先落：这是复核者该打开的那个文件。六张分图仍在，但"一张图纸"才是 review 对象。
   const sheet = renderSheet(views, placement, { projection: args.projection })
   files.push({
@@ -1494,6 +1513,8 @@ async function assembleArtifacts(args, createdAt, tctx) {
         declared_confidence: declaredConfidence(args),
         photo_check: photoCheckFindings(args, outline),
         silhouette: silhouetteCheck.finding,
+        // 源图那一环的结论（声明 vs 真实字节的 sha256）。
+        image: imageCheck.finding,
         overlaps: overlapFindings(boxes),
         parts: partCensus(args),
         placement: placementReport(boxes),
@@ -1652,6 +1673,64 @@ function canonicalParams(args) {
   )
 }
 
+/**
+ * 源图那一环：**声明必须可核对**。
+ *
+ * 背景（实测抓到的）：包里的 `source.input_image_sha256` 曾是 64 个 a 的占位符，而**没有任何一道闸门
+ * 看它一眼** —— 于是"此网格源自那张图"在包内**不可核对**，交付包在**声称**一条它证明不了的链。这里把它
+ * 变成可核对的：
+ *   - 声明了 sha 却**没给 `image_file`** ⇒ blocker（没有东西能核的声明就是装饰）；
+ *   - 给了 `image_file` ⇒ 按**真实字节**算 sha256 与每个声明比，不符即 blocker；
+ *   - 源图同时被登记成描述符（只登记不复制）—— 包里因此第一次能同时看到"这张图 → 这个网格"。
+ */
+async function imageFinding(tctx, args) {
+  const blockers = []
+  const declared = (Array.isArray(args?.assembly) ? args.assembly : [])
+    .filter((item) => item && typeof item.source?.input_image_sha256 === 'string' && item.source.input_image_sha256.trim() !== '')
+    .map((item) => ({ id: item.id ?? null, declared: item.source.input_image_sha256.trim().toLowerCase() }))
+  const file = typeof args?.image_file === 'string' && args.image_file.length > 0 ? args.image_file : null
+  if (declared.length === 0 && !file) return { finding: null, blockers, bytes: null }
+  if (!file) {
+    blockers.push({
+      code: 'E_IMAGE_NOT_VERIFIED',
+      message: `${declared.length} item(s) declare source.input_image_sha256 (${declared
+        .map((d) => d.id)
+        .join(', ')}) but no image_file was given, so nothing can check that claim. Either pass image_file (the photograph itself) or drop the field: a digest that nothing compares is decoration, and the pack would advertise a provenance chain it cannot show.`,
+    })
+    return { finding: { declared, computed: null, path: null, matches: null }, blockers, bytes: null }
+  }
+  if (typeof tctx?.fs?.read !== 'function') {
+    blockers.push({ code: 'E_NO_FS', message: 'reading the source image needs the fs seam', path: file })
+    return { finding: { declared, computed: null, path: file, matches: null }, blockers, bytes: null }
+  }
+  let bytes
+  try {
+    bytes = await tctx.fs.read(file)
+  } catch (error) {
+    blockers.push({
+      code: 'E_IMAGE_FILE_UNREADABLE',
+      message: `image_file could not be read (${error?.message ?? error}); the claimed provenance cannot be checked, and an unverifiable claim is worse than no claim.`,
+      path: file,
+    })
+    return { finding: { declared, computed: null, path: file, matches: null }, blockers, bytes: null }
+  }
+  const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes)
+  const computed = createHash('sha256').update(buf).digest('hex')
+  const matches = []
+  for (const d of declared) {
+    const ok = d.declared === computed
+    matches.push({ id: d.id, declared: d.declared, matches: ok })
+    if (!ok) {
+      blockers.push({
+        code: 'E_IMAGE_SHA_MISMATCH',
+        message: `"${d.id}" declares input_image_sha256 ${d.declared.slice(0, 12)}… but ${file} hashes to ${computed.slice(0, 12)}… — the pack claims this mesh came from that photograph, and that claim is wrong.`,
+        path: file,
+      })
+    }
+  }
+  return { finding: { declared, computed, path: file, matches, bytes: buf.length }, blockers, bytes: buf }
+}
+
 // fit 的输入 = emit_ops 的输入 + 一个可选的"是否引入外部事实"开关。
 /** 照片读数（区间）→ 中点。没有读数就返回 null：那一档是**没发生**，不是"通过"。 */
 function photoCheckMidAspect(photoCheck, view) {
@@ -1728,6 +1807,8 @@ const FIT_INPUT = {
     against_scene: { type: 'boolean' },
     // 正交渲染出的剪影图（可选）：给了就多一档"轮廓像不像"的可判结论（SILHOUETTE-PLAN）。
     silhouette: SILHOUETTE_INPUT,
+    // 源照片的**真实路径**（可选但强烈建议）：给了才会去核 `source.input_image_sha256` 那些声明。
+    image_file: { type: 'string', minLength: 2 },
   },
   required: EMIT_OPS_INPUT.required,
   additionalProperties: false,
@@ -2571,7 +2652,7 @@ export const runtime = {
       // 闭环里"便宜的那一半"的入口。它把一份候选参数变成**可审计的结论 + 该改哪里**，
       // 一次调用给全，让一轮迭代只付一次嵌套协商的代价。只读、不落盘 —— 落盘归 save。
       description:
-        '只读、纯函数、**不落盘**。把一份候选参数 JSON 变成一份**可审计的结论**，并明确告诉你**该改哪里**。一次调用给出：逐条 validation（每条都带 ok）、三态清单（区分"下游做不到"与"我还没做"）、numeric 自洽（残差必须为 0）、六视图的**数值轮廓**（outline，供你拿照片做粗核对 —— 你看见用户上传的照片，看不见工具产出的图像素）、六张 SVG，**外加一张整图纸的指针（sheet）**：六视图按第一角法/第三角法排在一张图上、全图一个比例尺 —— 复核就看这一张，而且必须在进 apply_ops 之前看（正文不进这个载荷，见 sheet.inline_from；20 个对象约 30 KB，同一份几何不值得发两遍）、conf 的如实标注、scale_anchor 的换算与脆弱性、以及逐项逐轴的 revise_hints。**进来先按这个顺序看三样**：① `validation` + `revise_hints` —— verdict=revise 时**只改被点名的位置**，一轮只改一处，否则无法归因是哪一步改好的；② `photo_check` —— **你必须在参数里写下从照片读到的比例区间**：`photo_check: { front: { w_over_h_min, w_over_h_max } }`（相对半宽 ≤30%，容差按你声明的小数位推），fit 才会拿它和你算出的 `outline` 自动对一遍；**不写它就等于这一档没有发生**，"像不像照片"会退回纯人眼；③ `anchor` —— 照片里没有已知长度的参照物时，必须**显式**在 `assumptions` 里写 `"proportions_only"`（或 `"authored_dimensions"`），**不要编一个看起来合理的米数**，否则它是 blocking。**verdict=fit 之后不要直接 apply_ops**：先 `agh_ortho_save` 落一个**候选**（run_id 带 `-candidate`，不碰 Blender），请人打开 `sheet.svg` 复核；人放行后才 apply_ops → `against_scene:true` 的 fit → 用**另一个** run_id 落交付包（同一个 run_id 会被幂等吃掉读回）。**边界说清楚**：numeric 与读回只证明"我自洽、下游照做了"，**都不证明与照片一致** —— 那一段只能靠你拿 `outline` / 那张图纸和照片比，加上人的眼睛。**可选**：传 `silhouette: { path, ortho_scale, sensor_fit }`（一张**正交渲染**的、带透明通道的 PNG）就多一档**可判**的"轮廓像不像"：它把剪影折算成米，同时与 `outline`（几何自洽）和 `photo_check`（像不像照片）比；`ortho_scale` 必填（像素↔米的唯一依据，缺了就没有判定），判据容差按**渲染分辨率**推（≥2 像素折算），对不上即 blocking。',
+        '只读、纯函数、**不落盘**。把一份候选参数 JSON 变成一份**可审计的结论**，并明确告诉你**该改哪里**。一次调用给出：逐条 validation（每条都带 ok）、三态清单（区分"下游做不到"与"我还没做"）、numeric 自洽（残差必须为 0）、六视图的**数值轮廓**（outline，供你拿照片做粗核对 —— 你看见用户上传的照片，看不见工具产出的图像素）、六张 SVG，**外加一张整图纸的指针（sheet）**：六视图按第一角法/第三角法排在一张图上、全图一个比例尺 —— 复核就看这一张，而且必须在进 apply_ops 之前看（正文不进这个载荷，见 sheet.inline_from；20 个对象约 30 KB，同一份几何不值得发两遍）、conf 的如实标注、scale_anchor 的换算与脆弱性、以及逐项逐轴的 revise_hints。**进来先按这个顺序看三样**：① `validation` + `revise_hints` —— verdict=revise 时**只改被点名的位置**，一轮只改一处，否则无法归因是哪一步改好的；② `photo_check` —— **你必须在参数里写下从照片读到的比例区间**：`photo_check: { front: { w_over_h_min, w_over_h_max } }`（相对半宽 ≤30%，容差按你声明的小数位推），fit 才会拿它和你算出的 `outline` 自动对一遍；**不写它就等于这一档没有发生**，"像不像照片"会退回纯人眼；③ `anchor` —— 照片里没有已知长度的参照物时，必须**显式**在 `assumptions` 里写 `"proportions_only"`（或 `"authored_dimensions"`），**不要编一个看起来合理的米数**，否则它是 blocking。**verdict=fit 之后不要直接 apply_ops**：先 `agh_ortho_save` 落一个**候选**（run_id 带 `-candidate`，不碰 Blender），请人打开 `sheet.svg` 复核；人放行后才 apply_ops → `against_scene:true` 的 fit → 用**另一个** run_id 落交付包（同一个 run_id 会被幂等吃掉读回）。**边界说清楚**：numeric 与读回只证明"我自洽、下游照做了"，**都不证明与照片一致** —— 那一段只能靠你拿 `outline` / 那张图纸和照片比，加上人的眼睛。**可选**：传 `silhouette: { path, ortho_scale, sensor_fit }`（一张**正交渲染**的、带透明通道的 PNG）就多一档**可判**的"轮廓像不像"：它把剪影折算成米，同时与 `outline`（几何自洽）和 `photo_check`（像不像照片）比；`ortho_scale` 必填（像素↔米的唯一依据，缺了就没有判定），判据容差按**渲染分辨率**推（≥2 像素折算），对不上即 blocking。**另传 `image_file`（源照片的真实路径）会去核参数里声明过的 `source.input_image_sha256`**：相符才算"源自这张图"，**不符即 blocking**，而**声明了却没给 `image_file` 也 blocking**（没有东西能核的声明就是装饰）；同时把源图登记进交付包，让"这张图 → 这个网格"可核。',
       parameters: FIT_INPUT,
       meta: READ_ONLY_META,
       async execute(args, tctx) {
@@ -2594,9 +2675,10 @@ export const runtime = {
         // 因为它必须与别的档一样影响 verdict，不能退化成"没提就不发生"的软选项。
         // 注意 fit 里**没有** `blockers` 数组（那是 verify/save 的）：结论走 verdict，所以这里直接进判定。
         const silhouetteFit = await silhouetteFinding(tctx, args.silhouette, outline, args.photo_check)
+        const imageFit = await imageFinding(tctx, args)
         const revise = reviseHints(args, emission, caps, { checked, aligned, fromParams, outline, overlaps, boxes })
         const validation = validationReport(args, emission, caps)
-        const verdict = numericOk && validation.ok && revise.blocking === 0 && silhouetteFit.blockers.length === 0 ? 'fit' : 'revise'
+        const verdict = numericOk && validation.ok && revise.blocking === 0 && silhouetteFit.blockers.length === 0 && imageFit.blockers.length === 0 ? 'fit' : 'revise'
         // ③ 便宜的那一步的**单一复核对象**：六视图排在一张图纸上，全图一个比例尺。
         const sheet = renderSheet(views, placement, { projection: args.projection })
 
@@ -2644,6 +2726,9 @@ export const runtime = {
           // 剪影那一档的 blockers **单独列出**：读不到图时 finding 是 null，若只留 finding，
           // "没发生"就会变成载荷里看不见的东西 —— 那正是我们一直在防的。
           silhouette_blockers: silhouetteFit.blockers,
+          // 源图那一环：声明 vs 真实字节的 sha256。
+          image: imageFit.finding,
+          image_blockers: imageFit.blockers,
           // 建模手滑（warning 级）
           overlaps,
           declared_relative_confidence: declaredConfidence(args),

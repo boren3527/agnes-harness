@@ -1367,5 +1367,53 @@ check(
   JSON.stringify({ ok: badSave.ok, codes: badSaveReport.blockers?.map((b) => b.code) }),
 )
 
+// ---- 源图那一环：声明必须可核对（E_IMAGE_*）----
+// （`createHash` 在文件开头已经 import 过了，这里不再重复声明 —— 刚才正是撞在这个重名上。）
+const imgBytes = Buffer.from('a fake photograph — only the bytes matter to the digest', 'utf8')
+const imgSha = createHash('sha256').update(imgBytes).digest('hex')
+const completeSource = (sha) => ({ kind: 'generated_mesh', model: 'StdGEN', seed: 0, input_image_sha256: sha, unit: 'm', up_axis: 'Y', declared_height: 2 })
+const imgArgs = (sha) => ({
+  ...SAMPLE,
+  assembly: [meshItem({ source: completeSource(sha) })],
+  mesh_file: MESH_PATH_WIN,
+  image_file: 'D:/ws/out/photo.png',
+})
+const imgFsOf = (withFile) => {
+  const f = meshFs(makeGlb([0.2, 1, 0.2]))
+  if (withFile) f.files.set('D:/ws/out/photo.png', imgBytes)
+  return f
+}
+const imgOkFs = imgFsOf(true)
+const imgOk = (await save.execute({ ...imgArgs(imgSha), run_id: 'img-ok' }, { fs: imgOkFs, session: { workspaceRoot: ws } })).structured
+const imgOkReport = readReport(imgOkFs, 'img-ok')
+check(
+  'image: a declared input_image_sha256 that matches the file is accepted, and the source image joins the pack',
+  imgOk.ok === true && imgOkReport.checks?.image?.computed === imgSha && imgOkReport.artifacts.some((a) => /photo\.png$/.test(String(a.path))),
+  JSON.stringify({ ok: imgOk.ok, computed: String(imgOkReport.checks?.image?.computed).slice(0, 12), artifacts: imgOkReport.artifacts.map((a) => a.kind) }),
+)
+const imgBad = (await save.execute({ ...imgArgs('b'.repeat(64)), run_id: 'img-bad' }, { fs: imgFsOf(true), session: { workspaceRoot: ws } })).structured
+check('image: a declared digest that does not match the file blocks the pack', imgBad.ok === false && imgBad.blockers.some((b) => b.code === 'E_IMAGE_SHA_MISMATCH'), JSON.stringify(imgBad.blockers.map((b) => b.code)))
+const claimArgs = imgArgs(imgSha)
+delete claimArgs.image_file
+const imgClaim = (await save.execute({ ...claimArgs, run_id: 'img-claim' }, { fs: imgFsOf(false), session: { workspaceRoot: ws } })).structured
+check(
+  'image: a declared digest with no image_file is blocked — nothing could have checked it (the 64-a placeholder case)',
+  imgClaim.ok === false && imgClaim.blockers.some((b) => b.code === 'E_IMAGE_NOT_VERIFIED'),
+  JSON.stringify(imgClaim.blockers.map((b) => b.code)),
+)
+const imgMiss = (await save.execute({ ...imgArgs(imgSha), image_file: 'D:/ws/out/nope.png', run_id: 'img-miss' }, { fs: imgFsOf(false), session: { workspaceRoot: ws } })).structured
+check(
+  'image: an unreadable image_file blocks, because an unverifiable claim is worse than no claim',
+  imgMiss.ok === false && imgMiss.blockers.some((b) => b.code === 'E_IMAGE_FILE_UNREADABLE'),
+  JSON.stringify(imgMiss.blockers.map((b) => b.code)),
+)
+const imgFit = (await fitTool.execute({ ...imgArgs(imgSha), run_id: 'ignored' }, { fs: imgFsOf(true), session: { workspaceRoot: ws } })).structured
+const imgFitBad = (await fitTool.execute({ ...imgArgs('c'.repeat(64)), run_id: 'ignored' }, { fs: imgFsOf(true), session: { workspaceRoot: ws } })).structured
+check(
+  'image: fit cannot reach "fit" on a wrong provenance claim (matching stays fit, wrong becomes revise)',
+  imgFit.verdict === 'fit' && (imgFit.image_blockers ?? []).length === 0 && imgFit.image?.computed === imgSha && imgFitBad.verdict === 'revise' && imgFitBad.image_blockers.some((b) => b.code === 'E_IMAGE_SHA_MISMATCH'),
+  JSON.stringify({ good: imgFit.verdict, bad: imgFitBad.verdict, codes: imgFitBad.image_blockers?.map((b) => b.code) }),
+)
+
 console.log(`\n${failures === 0 ? 'ALL PASS' : `${failures} FAILURE(S)`}`)
 process.exitCode = failures === 0 ? 0 : 1
