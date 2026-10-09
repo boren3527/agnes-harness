@@ -14,7 +14,15 @@ if (-not (Test-Path $vcvars)) {
   $alt = Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\2022','C:\Program Files (x86)\Microsoft Visual Studio\2022' -Recurse -Filter vcvars64.bat -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
   if ($alt) { $vcvars = $alt } else { throw "vcvars64.bat 找不到 —— 先装 VS 2022 Build Tools + C++ 工作负载" }
 }
-$cuda = 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.8'
+# 自动找 CUDA Toolkit 的版本目录 —— 写死路径会**误报"未安装"**（实测被抓过一次：
+# 明明 C:\...\CUDA\v12.8\bin\nvcc.exe 在，脚本却说"没装 CUDA Toolkit 12.8"）。
+$cudaRoot = 'C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA'
+$cuda = $null
+if (Test-Path $cudaRoot) {
+  $cand = Get-ChildItem $cudaRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'v12.8' } | Select-Object -First 1
+  if (-not $cand) { $cand = Get-ChildItem $cudaRoot -Directory -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -Last 1 }
+  if ($cand) { $cuda = $cand.FullName }
+}
 $venv = 'D:\stdgen-venv\Scripts\Activate.ps1'
 
 # 把 vcvars 设好的环境变量导入当前会话（比手抄 PATH 可靠）
@@ -22,7 +30,7 @@ cmd /c "call `"$vcvars`" >nul 2>&1 && set" | ForEach-Object {
   if ($_ -match '^([^=]+)=(.*)$') { Set-Item -Path ('env:' + $matches[1]) -Value $matches[2] -ErrorAction SilentlyContinue }
 }
 
-if (Test-Path $cuda) {
+if ($cuda -and (Test-Path $cuda)) {
   $env:CUDA_HOME = $cuda
   $env:PATH = "$cuda\bin;$env:PATH"
 } else {
