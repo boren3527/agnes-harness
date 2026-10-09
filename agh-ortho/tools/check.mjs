@@ -1249,6 +1249,14 @@ check(
   })(),
 )
 check('silhouette: an empty render is stated as empty, not as a pass', silMod.silhouetteOf(makePng(32, 32, () => [0, 0, 0, 0])).covered_fraction === 0)
+// 被裁掉的剪影**必须挡**：轮廓不完整时每个数都"看起来合法但是错的"（下游实测 1.2 m vs 真值 2.0 m）。
+const cropped = silMod.silhouetteOf(makePng(64, 64, (x, y) => (y < 40 ? [255, 255, 255, 255] : [0, 0, 0, 0])))
+const cropCmp = silMod.compareSilhouette({ ...cropped, view: 'front' }, { orthoScale: 2, sensorFit: 'VERTICAL' })
+check(
+  'silhouette: a silhouette that touches the frame is BLOCKED, not merely annotated (a cropped outline yields plausible-but-wrong numbers)',
+  cropped.touches_edges.top === true && cropCmp.ok === false && cropCmp.blockers.some((b) => b.code === 'E_SILHOUETTE_CROPPED'),
+  JSON.stringify({ edges: cropped.touches_edges, codes: cropCmp.blockers.map((b) => b.code) }),
+)
 check(
   'silhouette: metres per pixel comes only from ortho_scale, sensor_fit and the image size',
   Math.abs(silMod.metresPerPixel({ orthoScale: 2, sensorFit: 'VERTICAL', width: 512, height: 512 }) - 2 / 512) < 1e-12 &&

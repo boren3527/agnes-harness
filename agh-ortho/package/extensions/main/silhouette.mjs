@@ -156,6 +156,16 @@ export function compareSilhouette(silhouette, { orthoScale, sensorFit, outline, 
     })
     return out
   }
+  // 被裁掉的剪影必须**挡住**，不能只是记一笔：轮廓不完整时，由它推出的每个数都"看起来合法但是错的"。
+  // 下游实测过这件事 —— 相机偏了半格，一个 2.0 m 的物体量出来是 1.2 m。
+  const edge = silhouette.touches_edges
+  if (edge && (edge.left || edge.right || edge.top || edge.bottom)) {
+    const sides = ['left', 'right', 'top', 'bottom'].filter((s) => edge[s])
+    out.blockers.push({
+      code: 'E_SILHOUETTE_CROPPED',
+      message: `the silhouette touches the frame on the ${sides.join(' / ')} side(s), so its outline is incomplete and every number derived from it is plausible but wrong (the downstream measured 1.2 m for a 2.0 m object from exactly this). Frame the whole object before comparing.`,
+    })
+  }
   const sizeM = { width: silhouette.bbox_px.width * mpp, height: silhouette.bbox_px.height * mpp }
   const tolerance = Math.max(minPixels * mpp, relativeTolerance * Math.max(sizeM.width, sizeM.height))
   const aspect = sizeM.width / sizeM.height

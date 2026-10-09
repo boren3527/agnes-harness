@@ -1,10 +1,10 @@
 {
   "schema": "agh.capability/1",
-  "target": "agh-blender@0.3.1",
-  "target_measured_against": "agh-blender@0.3.1",
-  "target_note": "0.3.1 起 catalog() **自己发布** primitives 与 capabilitySet（由校验 kind 的同一个元组导出）；同时新增 mesh.import 等 op（op 表 10 → 15）。本快照只在**没有活实例**时兜底 —— 有实例时必须用实时目录。**下游一旦改 op 或限额，这个文件必须同步更新**（实测被抓到过：它写着 0.1.7 而实际装的是 0.1.8，于是载荷里的目标版本是错的、stale:true 是唯一线索）。",
-  "capabilitySet": "primitives-6",
-  "capabilitySetNote": "0.3.1 起该标识由**下游权威发布**（`catalog().capabilitySet`），本字段只是无实例时的兜底副本。有实时目录时 `capabilitiesFromCatalog` 优先取下游的值 —— 这里写的值不参与那个判定。",
+  "target": "agh-blender@0.4.0",
+  "target_measured_against": "agh-blender@0.4.0",
+  "target_note": "0.4.0 起 catalog() **自己发布** primitives 与 capabilitySet；op 表到 16 个，新增 camera.add{type:ORTHO, ortho_scale} 与 render.still（用**场景相机**渲到文件，返回 path/sha256/bytes，**绝不返回图片块**）。本快照只在**没有活实例**时兜底 —— 有实例时必须用实时目录。**下游一旦改 op 或限额，这个文件必须同步更新**（实测被抓到过：它写着 0.1.7 而实际装的是 0.1.8，于是载荷里的目标版本是错的、stale:true 是唯一线索）。",
+  "capabilitySet": "primitives-6.ops-16.limits-64-512",
+  "capabilitySetNote": "该标识由**下游权威发布**（`catalog().capabilitySet`），0.4.0 起格式为 `primitives-<n>.ops-<n>.limits-<a>-<b>`。本字段只是无实例时的兜底副本；有实时目录时 `capabilitiesFromCatalog` 优先取下游的值，这里写的值**不参与**那个判定。格式变化只影响这个兜底常量，闸门逻辑不受影响。",
   "observedAt": "2026-10-09",
   "source": "agh-blender/package/extensions/main/bridge/agh_ops.py → OPS / OP_MANIFEST / catalog()；包版本取自 agh-blender/package/package.json",
   "unit": "m",
@@ -26,6 +26,11 @@
     "torus": "major diameter; major_radius = size/2, minor_radius = size/8",
     "plane": "footprint (size=1 配合 scale 得到精确 w/d)"
   },
+  "renderSemantics": {
+    "camera.add": "type: PERSP（默认）/ ORTHO；ORTHO 时 ortho_scale 必填。**sensor_fit 被下游钉死为 VERTICAL** ⇒ ortho_scale 就是**画幅的世界高度**，与本插件 `metresPerPixel = ortho_scale / height` 完全对齐（不需要再按 AUTO 猜哪根轴）。",
+    "ortho_scale": "读回值是 float32（2.4 会报 2.4000000953674316）⇒ 若拿它比数，容差至少取相对 1e-6。本插件的判定只用它推**容差**、不用它推 aspect（aspect 与尺度无关），所以这条对我们无影响 —— 但记在这里，免得下次拿它做尺寸断言时忘了。",
+    "render.still": "用**场景相机**渲到文件（capture 渲的是**视口**）。返回 path / sha256 / bytes / width / height / ortho_scale / sensor_fit / metresPerPixel，**没有图片块**。`transparent: true` 时胶片透明 ⇒ 剪影 = alpha>0，这是本插件唯一接受的形状（RGB 图会被拒：不猜背景色）。实测教训（下游）：相机偏半格时，一个 2.0 m 的物体量出 1.2 m —— **被裁掉的图会给出看起来合法的数**，所以本插件对贴边的剪影直接 **blocking**（E_SILHOUETTE_CROPPED）。"
+  },
   "ops": [
     { "name": "mesh.primitive_add", "mutates": false, "destructive": false },
     { "name": "mesh.import", "mutates": false, "destructive": false, "note": "导入外部生成的网格（.glb/.obj）。它的 size/location 是**调用方的期望值，会被比对并回报，但不施加**（下游 agh_ops.py 明写）⇒ 摆放必须另发 object.transform。" },
@@ -37,10 +42,12 @@
     { "name": "object.join", "mutates": true, "destructive": true },
     { "name": "data.purge_unused", "mutates": true, "destructive": true },
     { "name": "file.checkpoint", "mutates": false, "destructive": false },
-    { "name": "file.stage_export", "mutates": false, "destructive": false }
+    { "name": "file.stage_export", "mutates": false, "destructive": false },
+    { "name": "camera.add", "mutates": true, "destructive": false, "note": "0.4.0 新增 ORTHO + ortho_scale。本插件**不 emit** 它（剪影档只读一张已经渲好的图）；列在这里是为了让『目标到底支不支持』有据可查。" },
+    { "name": "render.still", "mutates": false, "destructive": false, "note": "0.4.0 新增。本插件不 emit；剪影档消费它的**产物**（PNG + ortho_scale/sensor_fit）。" }
   ],
-  "opsNote": "这里只抄录本插件**会用到或需要判存在性**的 op；0.3.1 的实时目录里有 15 个（含 start/probe 等非 op 工具不计）。判『目标支不支持 X』一律以**实时 catalog().ops** 为准。",
+  "opsNote": "这里只抄录本插件**会用到或需要判存在性**的 op；0.4.0 的实时目录里有 16 个（含 light.add / object.look_at 等非本插件用途的）。判『目标支不支持 X』一律以**实时 catalog().ops** 为准。",
   "authorityNote": "mutates / destructive 必须以 agh_ops.py 的 OP_MANIFEST 为准，不能手抄别的表：它们驱动审批决策，写错的后果不是报错，而是审批行为静默变化（CONTRACT §11-2）。本文件里的值于 2026-10-09 对照 OP_MANIFEST 抄录，其中 mesh.primitive_add / mesh.import / object.duplicate / material.set / file.checkpoint / file.stage_export 的 mutates 是 false —— 与 CONTRACT §3.1 表格给人的印象不同。",
-  "missing": ["extrude", "revolve", "boolean", "自定义顶点/网格", "相机控制/正交六视图渲染"],
+  "missing": ["extrude", "revolve", "boolean", "自定义顶点/网格", "纹理/贴图类 op（线条只能随 .glb 内嵌进来）"],
   "stalenessPolicy": "下游加 op 或改限额后本文件即过期。本插件不假设它新鲜：每次读取都标 stale，并要求调用方自行核对。"
 }
