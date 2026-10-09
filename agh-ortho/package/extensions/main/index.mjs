@@ -495,14 +495,17 @@ async function readSceneForComparison(tctx) {
 /**
  * 下游 catalog → 本插件的能力面。这是**唯一**做形状转换的地方。
  * 下游的 `ops` 是**字典**（按 op 名索引，带 mutates/destructive/summary/args），我们内部用列表。
- * 下游**没有** `primitives` 列表、也**没有** capabilitySet 标识 —— 这是已知缺口
- * （见 notes/DOWNSTREAM-REQUEST-readback.md §1 记的第二条候选），所以这里如实给 null / 合成一个 id。
+ * 下游 0.1.8 起发布 `primitives` 与 `capabilitySet`（见 notes/DOWNSTREAM-REQUEST-readback.md §1），
+ * 这里**原样透传**；字段缺席时仍给 null，让 primitiveAvailable 退回"无法判定"而不是假装判定过。
  */
 function capabilitiesFromCatalog(catalog) {
   return {
     target: 'agh-blender@live',
-    capabilitySet: `catalog-v${catalog.version ?? '?'}`,
-    primitives: null,
+    // 优先用下游自报的 capabilitySet；缺席才退回按 catalog.version 合成，避免编造一个看起来
+    // 像下游版本号的标识。
+    capabilitySet:
+      typeof catalog.capabilitySet === 'string' ? catalog.capabilitySet : `catalog-v${catalog.version ?? '?'}`,
+    primitives: Array.isArray(catalog.primitives) ? catalog.primitives : null,
     limits: catalog.limits,
     ops: Object.entries(catalog.ops).map(([name, spec]) => ({
       name,
@@ -621,11 +624,11 @@ function buildBox(item, name, blockers) {
 // （见 LOWERING 表里的 `kind` 与 `errorNote`）。
 // ---------------------------------------------------------------------------
 
-/** 目标有没有这种基元。三态：可用 / 不可用 / **无法判定**（活实例的 catalog 不发布 primitives）。 */
+/** 目标有没有这种基元。三态：可用 / 不可用 / **无法判定**（下游 catalog 未发布 primitives）。 */
 function primitiveAvailable(caps, kind) {
   const list = Array.isArray(caps?.primitives) ? caps.primitives : null
   if (!list) {
-    return { ok: true, gated: false, why: 'the live catalog publishes no primitives list, so this could not be gated' }
+    return { ok: true, gated: false, why: 'the catalog publishes no primitives list, so this could not be gated' }
   }
   if (list.includes(kind)) return { ok: true, gated: true, why: null }
   return { ok: false, gated: true, why: `the target declares primitives ${list.join('/')} and has no "${kind}"` }
@@ -848,8 +851,8 @@ function emitOps(params, caps) {
     }
 
     // 能力闸门：目标没这种基元就不硬发，而是报成 unlowered（这样"下游做不到"与"我还没做"
-    // 仍然分得开）。注意**活的 catalog 不发布 primitives 列表** ⇒ 那时 gated=false（无法判定），
-    // 我们仍然发出，并在能力来源里如实标注，而不是假装判定过。
+    // 仍然分得开）。下游 0.1.8 起发布 primitives ⇒ 有实例时也能真判定；只有目录（快照或旧下游）
+    // 不发布 primitives 时才 gated=false（无法判定），我们仍然发出并在能力来源里如实标注。
     if (rule.kind) {
       const gate = primitiveAvailable(caps, rule.kind)
       if (!gate.ok) {
@@ -940,9 +943,11 @@ function emitOps(params, caps) {
     // 真·approx 的误差（对象名已带 `_approx` 后缀）。必须一路传到用户面前：CONTRACT §10 说
     // "降级误差可能最大、且最隐蔽"，所以它不能只活在 lowering 表里。
     approx,
-    // 能力闸门到底有没有生效？活的 catalog **不发布** primitives 列表 ⇒ 闸门没生效。
+    // 能力闸门到底有没有生效？目录不发布 primitives 列表 ⇒ 闸门没生效。
     // 必须写出来，否则读者会以为"发出去的每个基元都被确认过存在"。
-    primitive_gate: Array.isArray(caps?.primitives) ? 'applied' : 'not_applied: the target publishes no primitives list',
+    primitive_gate: Array.isArray(caps?.primitives)
+      ? 'applied'
+      : 'not_applied: the catalog publishes no primitives list',
     // —— 输入侧的坦白，原样带出 ——
     assumptions: Array.isArray(params.assumptions) ? params.assumptions : [],
     unresolved: Array.isArray(params.unresolved) ? params.unresolved : [],

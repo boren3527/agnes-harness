@@ -440,9 +440,12 @@ const vNoScene = JSON.parse(fs5.files.get(relKey(savedNoScene.artifacts.find((a)
 check('save: an absent instance is recorded as "the readback did NOT happen"', savedNoScene.ok === false && vNoScene.scene.available === false && /did NOT happen/.test(vNoScene.scene.note), JSON.stringify(vNoScene.scene))
 
 // --- 8b. 能力协商第 1 级（跨插件 invoke）与它的四级降级 ---
-// 下游 catalog 的真实形状（读自 agh_ops.py 的 catalog()）：ops 是**字典**，没有 primitives 列表。
+// 下游 catalog 的真实形状（读自 agh_ops.py 的 catalog()）：ops 是**字典**，且自 0.1.8 起
+// 发布 primitives 与 capabilitySet。fixture 必须跟着下游走，否则这些用例只是在测旧的形状。
 const LIVE_CATALOG = {
   version: 1,
+  capabilitySet: 'primitives-6',
+  primitives: ['cube', 'uv_sphere', 'cylinder', 'cone', 'torus', 'plane'],
   limits: { maxOpsPerBatch: 8, maxObjects: 3, nameCharset: 'A-Za-z0-9_-.', nameMaxLength: 12 },
   ops: {
     'mesh.primitive_add': { mutates: false, destructive: false, summary: 'add a primitive' },
@@ -451,8 +454,17 @@ const LIVE_CATALOG = {
   errorCodes: { E_ARG_RANGE: 'argument out of range' },
   notes: ['read the scene before and after a build'],
 }
+// 旧下游（0.1.8 之前）的真实形状：没有这两个字段。降级路径必须仍然成立。
+const OLD_CATALOG = {
+  version: 1,
+  limits: { maxOpsPerBatch: 8, maxObjects: 3, nameCharset: 'A-Za-z0-9_-.', nameMaxLength: 12 },
+  ops: { 'mesh.primitive_add': { mutates: false, destructive: false, summary: 'add a primitive' } },
+  errorCodes: {},
+  notes: [],
+}
 const catalogTool = byName['agh_ortho_catalog']
 const withLive = { tools: { invoke: async () => ({ structured: { ok: true, blockers: [], catalog: LIVE_CATALOG } }) } }
+const withOld = { tools: { invoke: async () => ({ structured: { ok: true, blockers: [], catalog: OLD_CATALOG } }) } }
 
 const live = (await catalogTool.execute({}, withLive)).structured
 check('live: acquisition names the tool it came from', live.negotiated.acquisition === 'tool:agh_blender_ops_catalog', live.negotiated.acquisition)
@@ -462,7 +474,14 @@ check('live: sources.tool.inUse follows the acquisition, not a hardcoded flag', 
 check('live: not stale - it saw the real downstream', live.negotiated.stale === false)
 check('live: limits come from the catalog', live.negotiated.limits.maxOpsPerBatch === 8 && live.negotiated.limits.nameMaxLength === 12)
 check('live: the ops dictionary is converted to our list, flags included', live.negotiated.ops.length === 2 && live.negotiated.ops.every((o) => o.mutates === false) && live.negotiated.ops.some((o) => o.name === 'mesh.prism_add'))
-check('live: the missing primitives list stays null instead of being faked', live.negotiated.primitives === null)
+// 这一条以前断言的是"下游不发布 primitives ⇒ 我们如实给 null"。下游改了，断言也得跟着改：
+// 现在要断言的是**我们真的把它读进来了**，否则闸门会永远停在 not_applied。
+check('live: the primitives the downstream publishes are carried through, not dropped', Array.isArray(live.negotiated.primitives) && live.negotiated.primitives.length === 6 && live.negotiated.primitives.includes('uv_sphere'), JSON.stringify(live.negotiated.primitives))
+check('live: the downstream capabilitySet wins over the synthesised catalog-vN', live.negotiated.capabilitySet === 'primitives-6', live.negotiated.capabilitySet)
+// 旧下游仍须退回"无法判定"，而不是猜。
+const oldLive = (await catalogTool.execute({}, withOld)).structured
+check('old downstream: no primitives list still reads as null, not guessed', oldLive.negotiated.primitives === null)
+check('old downstream: capabilitySet falls back to the synthesised catalog-vN', oldLive.negotiated.capabilitySet === 'catalog-v1', oldLive.negotiated.capabilitySet)
 
 // 降级 1：下游没有受管理实例 —— 这是**正常分支**，不是异常
 const noInstance = (await catalogTool.execute({}, { tools: { invoke: async () => ({ structured: { ok: false, blockers: ['no managed Blender instance in this workspace; call agh_blender_start first'] } }) } })).structured
@@ -486,9 +505,34 @@ check('a payload without limits/ops degrades', junk.negotiated.acquisition === '
 const tooMany = { ...SAMPLE, assembly: Array.from({ length: 4 }, (_, i) => ({ id: `b${i}`, feature: 'box', w: { v: 1 }, d: { v: 1 }, h: { v: 1 } })) }
 const emitLive = (await byName['agh_ortho_emit_ops'].execute(tooMany, withLive)).structured
 check('live limits actually constrain the emitter (4 objects against a limit of 3)', emitLive.ok === false && emitLive.blockers.some((b) => b.code === 'E_LIMIT_OBJECTS'), JSON.stringify(emitLive.blockers.map((b) => b.code)))
-check('and the capability set is reported as the live one', emitLive.target_capability_set === 'agh-blender@live:catalog-v1', emitLive.target_capability_set)
+check('and the capability set is the downstream one, not the synthesised catalog-vN', emitLive.target_capability_set === 'agh-blender@live:primitives-6', emitLive.target_capability_set)
 const emitFile = (await byName['agh_ortho_emit_ops'].execute(tooMany, {})).structured
 check('the same 4 objects pass against the shipped snapshot limit of 512', emitFile.ok === true, JSON.stringify(emitFile.blockers.map((b) => b.code)))
+
+// 这是本次修复的**核心断言**：上游有实例（实时目录）时，能力闸门必须真的生效。
+// 修复前：capabilitiesFromCatalog 把 primitives 写死为 null ⇒ primitive_gate 永远是 not_applied，
+// 而 primitive_gate 只在**没有实例**（回落快照）时才 applied —— 恰好反了。
+const emitGateLive = (await byName['agh_ortho_emit_ops'].execute(SAMPLE, withLive)).structured
+check('gate: on a live catalog that publishes primitives, the gate is APPLIED (the inverted case)', emitGateLive.primitive_gate === 'applied', emitGateLive.primitive_gate)
+const emitGateOld = (await byName['agh_ortho_emit_ops'].execute(SAMPLE, withOld)).structured
+check('gate: an older catalog without the list still reads not_applied, not a fake pass', /^not_applied/.test(emitGateOld.primitive_gate), emitGateOld.primitive_gate)
+// 闸门"生效"必须能被**反驳**，否则 applied 只是句话：发布一个不含 cone 的能力面，cone 就必须被拒。
+const NO_CONE = {
+  ...LIVE_CATALOG,
+  capabilitySet: 'primitives-nocone',
+  primitives: ['cube', 'uv_sphere', 'cylinder', 'torus', 'plane'],
+}
+const coneParams = {
+  ...SAMPLE,
+  assembly: [{ id: 'roof', feature: 'spire', dia: { v: 2 }, h: { v: 3 } }],
+}
+const emitNoCone = (await byName['agh_ortho_emit_ops'].execute(coneParams, { tools: { invoke: async () => ({ structured: { ok: true, blockers: [], catalog: NO_CONE } }) } })).structured
+check(
+  'gate: a kind the target does NOT declare is refused as downstream_cannot, not emitted anyway',
+  emitNoCone.primitive_gate === 'applied' &&
+    emitNoCone.unlowered.some((u) => u.reason_code === 'no_downstream_primitive' && /cone/.test(u.reason ?? '')),
+  JSON.stringify({ gate: emitNoCone.primitive_gate, unlowered: emitNoCone.unlowered }),
+)
 
 // --- 8c. scene_readback 半档（引入外部事实的那一档）---
 const verifyTool = byName['agh_ortho_verify']
