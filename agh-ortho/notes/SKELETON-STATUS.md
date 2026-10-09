@@ -19,9 +19,9 @@ agh-ortho/
     LICENSE                           Apache-2.0 全文（从 agh-blender 逐字复制）
     NOTICE                            本包是整包单一许可，无 bridge/GPL 部分
     README.md
-    extensions/main/index.mjs         tb() + 五个工具
+    extensions/main/index.mjs         tb() + 六个工具
     extensions/main/geometry.mjs      意图 → 几何规则
-    extensions/main/views.mjs         正交投影 / 六视图 / SVG / numeric 残差
+    extensions/main/views.mjs         正交投影 / 六视图 / SVG / numeric 残差 / 一张整图纸（renderSheet）
     extensions/main/run.mjs           描述符层：run 目录 / marker / report / 幂等 / 保留
     extensions/main/agh.capability.json   能力表快照
 ```
@@ -703,6 +703,94 @@ report 记录 e78794a2bc…377b  /  磁盘 5374f77d81…4fa9
 
 ---
 
+## 9.12 M3 前置四件事：①④ → ② → ③（2026-10-09）
+
+顺序是刻意的：**先把"能对齐的坐标"建起来，再往里放东西**。四件的共同理由是"生成网格不可复算、
+参数可复算"，所以两条路必须在**部件级**和**图上**能对齐，而不是靠人记。
+
+### ① `part`：共享部件词汇表（已完成）
+
+`PART_TAXONOMY = body · clothing · hair · prop · structure · furniture · ground`（借 StdGEN 的语义分解），
+`partCensus()` 报 `undeclared` / `unknown_values`，**只 warning 不挡路**。文档：LOOP-PROCEDURE §3.9①。
+
+### ④ 规范摆放（已完成）
+
+`placementReport()`：底面贴 z=0、水平居中；容差 = 包络最大维度的 1%（**相对**，不是绝对值），
+**只报只挡时不挡** —— 这是"便于比较"的约定，不是几何正确性。文档：LOOP-PROCEDURE §3.9④。
+
+### ② 生成网格的来源与"哪一档验不了它"（已完成）
+
+- 新增 `MESH_SOURCE` 模式（`kind` 必填，`model`/`weights`/`seed`/`input_image_sha256`/`note`）
+  与 `generatedReport()`：**生成物不可复算**（要 模型 + 权重 + seed），参数化物可复算（同参数 → 逐字节相同）
+- `LOWERING.mesh` = `unsupported / no_downstream_op`：**它是一个"我知道做不到"的特征**，
+  不是"未知特征" —— 两者在报告里必须分开（未知会 blocking，已知不会）
+- **形状验不了这件事必须写在明处**：`numeric` 不适用、`photo_check` 不适用、读回只管
+  存在/位置/尺寸。报告里给 `note` + 每项一条 warning
+
+**修掉的一个缺陷（自己引入的）**：第一版对**每一个**声明了 `source` 的部件都发
+"its SHAPE cannot be verified" —— 连 `source.kind = 'parametric'` 也发。
+那等于把一个**不成立**的警告盖在一个**成立**的部件上：参数化来源的形状恰恰**是** `numeric` 覆盖的。
+§"把会变的事实写成常量"这一族又添一例。现在只有 `reproducible === false` 才发，
+并且载荷 `note` 也按实际声明分岔（只有参数化来源时不许说"形状验不了"）。
+（回归断言：`mesh: a parametric source is reproducible and gets no generated warning` + 载荷 note 那条。）
+
+### ③ 六视图 → **一张图纸**：复核的唯一对象，且必须在贵的那一步之前（已完成）
+
+`renderSheet()`（views.mjs）：六视图按 `sheetPlacement` 排到**一张 SVG** 上、**全图一个比例尺**，
+标题栏给出 convention / projection / `shared_scale`，每格给出 `col/row` 与 `extent u/v`。
+
+- 它让 `sheetPlacement` **从"算出来只打印文本"变成真正被使用** —— 之前那段是"正确但没人用"，
+  而正确但没人用的东西迟早和现实脱钩（§9.11.4 同族）
+- **为什么必须是"一张"**：六张分图放在一起，人看到的是六个数；排到一张图上之后，
+  "第三角法的左视图在左、俯视图在上"才是**图上可见的**，排错会被一眼看出
+- 落在哪：`save` 的第一号产物 `sheet.svg`（`report.json.artifacts[0]`，交付包从 9 → **10 个描述符**）；
+  `agh_ortho_views` 的 `sheet_svg`（文本）；`fit` 的 `sheet` 是**指针**（`shared_scale` / `cells` /
+  `review_before_apply_ops`），**正文有意不重复发** —— 20 个对象的图纸约 30 KB，同一份几何发两遍就是翻倍上下文
+- **顺序硬规矩**（LOOP-PROCEDURE §1 / §3.10 / §6①）：`fit` 给 `verdict=fit` 之后，先 `save` 一次**候选**
+  （`run_id` 带 `-candidate`，不需要 Blender）→ 人打开 `sheet.svg` 复核 → **通过后才 `apply_ops`**
+
+**真实数据探针**（拿 `photo-round-2` 交付的 `ops.json` 渲染，两种角法各一遍）：20 个对象 →
+**120 个对象矩形**（6 视图 × 20）、**0 个越出画布**、978×602、全图比例尺 114.229、
+两种角法**比例尺相同**（镜像不改比例尺）、格位确实整体镜像
+（第一角法 `top@0/1 left@1/0 back@2/0` ↔ 第三角法 `top@0/-1 left@-1/0 back@-2/0`）。
+20 个对象的图纸约 **30 KB** —— 这正是"正文不进 `fit` 载荷"的量化理由。
+
+**顺带堵掉 ③ 自己引入的坑**：`save` 按 `run_id` 幂等 ⇒ 候选轮若用了交付的 id，
+交付轮的 `against_scene` 只会拿回旧描述符、**读回永远不会被记录**。现在重放分支会明说
+`readback_recorded` / `readback_not_recorded`（不是失败 —— 重放本身是对的，但这件事必须被看见）。
+
+### 自检与 integrity
+
+自检从 168 → **183 条断言全部通过**（新增：8h 的 6 条 mesh 断言 + 8i 的 6 条图纸断言 +
+2 条重放读回断言 + 1 条载荷 note 断言）。`notes/` 里改字不动 integrity；动了 `package/` 就要重装。
+
+**真实安装（2026-10-09 15:34，本机实测）**：源码与已装记录同为
+`sha256-f2c7943a7f90dd1b3bfc67826620b1b4bd9ad387eac138d2c606bc208a24a4cf`，
+`capabilityHash e3de4e5f…`（**与上一版相同** —— 图纸只改了载荷与产物，没动声明的能力面），
+`package status` = `desired=enabled actual=running trusted=true`，audit 里 12 秒后
+`extension.loaded` + **6 个 `extension.registered`**（`agh_ortho_catalog/emit_ops/views/verify/fit/save`）。
+
+## 9.13 重装脚本的三层缺陷：**前一个把后一个挡住了**（2026-10-09）
+
+三次失败逐层剥开，每一次都只能看见"当前这一层"（另见 §9.9.3：守卫上一次也真的拦下过一次静默失败）：
+
+| # | 症状 | 根因 | 为什么之前看不见 |
+|---|---|---|---|
+| 1 | `Start-Process : 无法将"System.Object[]"转换为参数"-FilePath"所需的类型"System.String"` | `$nodeExe = @(…Select-Object -First 1 -ExpandProperty Source)` —— `@()` 让它成为 `Object[]`。**实测**：`& $nodeExe`（调用运算符）吃数组，`Start-Process -FilePath` 不吃 | install 那步在 PowerShell 里就死了，提示符根本没机会出现 |
+| 2 | 提示符没出现、什么都没装（静默） | 子进程的 stdout 不是 TTY ⇒ `confirmPackageInstall` 直接返回 false **且不打印任何东西** | 需要 1 先修好才轮得到它暴露 |
+| 3 | `Cannot find module 'D:\agnes-harness\install'` | `Invoke-CliInteractive` **漏了 `$cli`**：node 收到的第一个参数是 `install`，被当成脚本路径 | 需要 1、2 先修好才轮得到它暴露；`agh-blender` 那份有同一个漏写 |
+
+**三条留下的规矩**：
+
+1. `Start-Process -FilePath` 只接受字符串 —— 解析可执行文件路径时**不要用 `@()` 包**（`&` 和 `Start-Process` 的容忍度不同）
+2. **一条 install 记录 ≠ 磁盘上有一份副本**：`remove` 之后旧记录仍在 ⇒ 新的"跳过安装"条件收紧为
+   **记录一致 ∧ `package status` 里真的列出该 id ∧ 未传 `-ForceReinstall`**
+3. 守卫失败时**打印可以手敲的兜底命令行**（`& node <cli> install <source> --profile <p>`）——
+   这次就是靠手敲那条路过的；工具链自己出问题时，别让用户只剩下"再试一次"
+
+**这一层层的教训归到一句**：`@()` 包一层、少写一个 `$cli`，都是"看起来等价"的写法。
+它们不是靠读代码发现的，是靠**跑**发现的 —— 与 §9.11.4 同一族（六处改动边界的伤也是"看"没发现、"跑"才发现）。
+
 ## 10. 未决项
 
 
@@ -718,11 +806,18 @@ report 记录 e78794a2bc…377b  /  磁盘 5374f77d81…4fa9
 4. **工作区热改覆盖层**：`<workspace>/.agnes/agh-ortho/capability.json`。`agh.capability.json`
    在包内 ⇒ 改它要重装 ⇒ §6 承诺的"只更新一张表"被打折。
 5. **保留策略执行不了**（§9.5）：工具面没有 `rm`。要么在插件外删，要么给 seam 加一个 rm。
-6. **`against_blender` 档**：需要下游给 `describe_scene()` 加 `dimensions`，
-   见 `notes/DOWNSTREAM-REQUEST-readback.md`。在那之前只做诚实的 `scene_readback` 半档。
+6. ~~`against_blender` 档~~ —— 下游 0.1.8 已给 `describe_scene()` 加 `dimensions`，读回现在**断言尺寸**
+   （§9.11.1：20 行 `dimensions_delta` 全 0）。但**真正的 `against_blender`（图像级）仍然没有**：
+   下游没有相机 op，而且模型看不见工具产出的图像素 —— 所以这一档的名字只能是 `scene_readback`（半档）。
 7. ~~`capabilityHash` 的取法~~ —— 已解决，见 §7。
 8. 逐条核对六视图的 u/v 轴向与 GB/T 17451 / ANSI Y14.3（§8.3 的第三条盲区）。
-9. M2 的 lowering：`column` / `sheet` / `ring` / `dome` / `spire`；
-   M3/M4 才轮到 `roof.gable` / `prism` / `extrude` / `opening`（要扩下游）。
+9. ~~M2 的 lowering~~ —— **已完成**（§9.11）：`column` / `sheet` / `ring` / `dome` / `spire` 五件
+   都能 lower，`approx` 与 `unsupported` 分开记；M3/M4 才轮到 `roof.gable` / `prism` / `extrude` /
+   `opening`（要扩下游）。
+10. **图纸这一环还没在真实会话里走过**：本机只有单元断言 + 一次真实 ops 的探针
+    （20 个对象 → 978×602、29944 字符、全图比例尺 114.229）。"先 save 候选 → 人看 `sheet.svg` →
+    才 `apply_ops`"这条**顺序**还没被跑过一遍，也就没验证过"人真的会在这时候看、并且看得懂"。
+11. **截图能不能进 AGH 会话**（仍未验，5 分钟实验）：用户**粘贴**=可以；按路径读=未知；
+    `computer_use` 截图=未知。它同时卡着参数路与网格路的复核工作流设计（§9.12 ③ 与 StdGEN/CharacterGen 那条路）。
 
 
