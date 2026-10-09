@@ -986,6 +986,130 @@ dimensions）"——**下游 0.1.8 早就发布了**，读回也确实在断言�
 装之前，运行中的实例仍加载旧快照 `.runtime-snapshots\sha256-97cee327…`，所以实时目录**还不会**返回
 `primitives`、`empty: true` **还不会**清场 —— 这与"源码已改且被测试证明"不矛盾，两者都要说清楚。
 
+## 9.20 第一个"干净"交付件（`kuson-clean`）+ `capture` 的取景问题（2026-10-09）
+
+`empty: true` 在**运行时不**生效了（不是源码级）：`clearedAtStartup = {removed:[Camera,Cube,Light], removedCount:3, objectCount:0, isDirtyAfterClear:false}`，
+握手里 `objectCount: 0`，bridge stderr 也写了 `startup scene cleared: removed 3 object(s), 0 left`。
+
+**独立核过**（11 描述符 sha256/bytes 全符；第 11 个 = `scene`，`600662 B`，sha 与磁盘相符）：
+
+| 项 | 值 | 对比之前 |
+|---|---|---|
+| `objects_in_scene` / `expected` | **8 / 8** | was 11 / 8 |
+| `extra_objects` | **`[]`** | was `["Camera","Cube","Light"]` |
+| `primitive_gate` | **`applied`** | was `not_applied: ...` |
+| `target_capability_set` | **`agh-blender@live:primitives-6`** | was `agh-blender@live:catalog-v1` |
+| 读回 | 8/8 match、8 行 delta 全 0、`size_asserted: true` | 同 |
+| numeric | `5.55e-17 ≤ 1e-9` | 同 |
+| `report.checks` | 7 个键**全填上**（`photo_check.inside=true`、`overlaps=[]`、`parts` 2 类、placement ok） | was 无此段 |
+| `.blend` | `600662 B`（**只有那 8 个对象**） | was 645556（含出厂 3 件） |
+
+**`ops.json` 的 sha 变了（`d174e4d0…` vs `004aae74…`），但 `ops` 数组逐字节相同** ——
+差的是同层两个字段：`target_capability_set` 与 `primitive_gate`。这正是"能力来源变了"该有的样子：
+**数组是可复现的，描述数组来源的那两行如实跟着变**。
+
+### 一个真问题：`capture` 那张图没法用（有图有真相）
+
+空场景之后**没有相机**了，`capture` 渲的是**视口当前视图**，而那张 1600×1200 的 PNG 显示的是
+**原点附近的极近景**：一个很粗的圆柱、两个盒子、以及带橙色选中框、位于地面/原点处的那一块
+（很可能是 `feet`），**整个人形被裁在画面之外**。它不是"模型效果图"，而是"视口当前状态"。
+
+- **不是**"没灯就发黑"：着色与地面网格正常 —— 这一条排除了我上一轮的担心（视口渲染确实不依赖场景灯光）。
+- 文件从 320358 → 123791 B 也与"少了方块和远景构图"一致，但**别把字节数当判据**。
+- **今天就能看整个人形**：用 Blender GUI 打开 `outputs/kuson-clean.blend`，按 **`Home`**（Frame All）。
+  这是眼下最省事的路径，不需要改任何代码。
+- **要自动化出"能看的图"**，得让 `capture` 先取景到场景包围盒（下游加一个 `frame: "all"` 之类的入参，
+  渲前 `view_all` 一次）—— 已记进请求清单 §6。这也顺带解决了"复核轮的图必须有统一取景"这件事：
+  没有统一取景，两张图之间**没有可比性**，而"可比"才是复核要的东西。
+
+### 追记：我自己解了 PNG 量了一遍（2026-10-09）
+
+下游也量了（自写 zlib 解码），我**独立复现**（`.agnes/work/png-measure.mjs` + `png-hist.mjs`，zlib + 反 filter）：
+
+| 图 | 背景占比 | 模型本体 | 内容（含网格线） | 说明 |
+|---|---|---|---|---|
+| `kuson-clean`（`empty:true`） | 88.75%（`rgb(63,63,63)`） | **6.5%**（亮度 105–145） | **8.1%** | 与下游报的 8.2% 一致 |
+| `kuson`（带出厂 3 件） | 83.5% | 1.6% | 4.7% | 另有一个 **12.9% 的暗色大块**（亮度 64–95，应是那个 2×2×2 方块） |
+
+**而且是两个不同的结论，不是同一个**（我裁了顶部一条 `x600–1020, y0–200` 直接看）：
+
+- 可见部分 **占约 8%** —— 下游的数（对）；
+- **上端被画幅裁掉**（那段裁剪里圆柱的竖棱一直顶到 y=0，顶部**没有椭圆口**）—— 我那句"整个人形在画面外"（也对）。
+
+所以"这张图能不能用"**判据要两条一起**：**① 贴边 = 被裁**（`touchesEdges` 必须全 false）、
+**② 占比足够**（否则等于没取景）。**只看占比会把"裁掉一半的图"判成合格**。
+
+**一处要修的诊断**：下游写"默认距离约 12 m，对 1 m 级的模型就是极近景" —— 12 m 看 1 m 是**远景**
+（所以它才只占 8%），不是极近景；上端被裁说明**视口中心/俯仰不在模型身上**，与距离无关。
+它的修法（显式取景）不依赖这个诊断，所以修法仍对，只是记录要准。
+
+**提议（写进请求 §6 的追补）**：让 `capture` 在返回里带上**可测量的取景判据** ——
+`bounds` / `touchesEdges` / `coveredFraction`，于是"这张图能用于复核"不再靠眼睛，也才能说
+"两次 capture 的取景相同"（同视角 + 同余量 ⇒ 可比）。
+
+## 9.21 网格路第一步：`mesh` 从"硬编码 unsupported"翻成**能力驱动**（2026-10-09）
+
+MESH-PLAN 任务 1.1。自检 203 → **208 全过**；新 integrity `sha256-8ed3741e…`。
+
+**改法（四处判定必须同源，这是关键）**：
+
+1. **op 闸门 ≠ 基元闸门**：新增 `opAvailable(caps, name)`（管"目标 op 表里有没有这张操作"），
+   与 `primitiveAvailable`（管 `mesh.primitive_add` 的 kind）分开。保守方向一致：
+   **目录里没有 op 表时返回 ok（无法判定，不假装拒绝）**；有表而不含 ⇒ `unlowered / no_downstream_op`。
+2. **参数侧与 op 侧用同一个判定**：`kindAvailableFor` 现在对**带点的名字**走 `opAvailable`，
+   而 `PARAM_KIND.mesh = 'mesh.import'` ⇒ 闸门拒绝时两边一起少一个，**不会再出现 M2 那种
+   "参数侧多一个、op 侧少一个"的假内部不一致**。
+3. **纯层只管"声明齐不齐"，有盘的那层管"声明真不真"**：`emit` 阶段不读盘 ⇒ `buildMesh` 只认参数里的
+   `path` / `source.up_axis` / `source.unit` / `source.declared_height`，`scale = h / declared_height`；
+   缺任何一项都是 **blocker**（`E_ARG_MISSING` / `E_ARG_RANGE`），**绝不静默猜轴向或单位** ——
+   猜错会出一个"看起来对、量起来错"的模型，那是静默错误。真伪由 `save` 读盘量（任务 1.2）。
+4. **两条几何路径算同一组数**：`mesh.import` 的 args 里带**声明过的意图尺寸** `size`（米），
+   `boxesFromOps` 与 `PARAM_SIDE_GEOMETRY.mesh = boxLike` 因此一致 ⇒ numeric 仍对齐（实测残差 0）。
+5. **不声称能力**：`three_state.emitter_ready_features` **不再**包含 `mesh`；改为单独一项
+   `emitter_ready_when_target_declares: [{feature:'mesh', requires_op:'mesh.import'}]` ——
+   "本版已经能 lower"与"目标真的能做"是两件事，混在一张清单里就是谎话。
+
+**这一轮我自己的两个错（都是"靠打印才抓到"）**：改了测试后连撞两次 `Identifier already declared`
+（`meshFit`/`fs4` 那类），以及把 fit 载荷的字段写成 `within_tolerance` 而真名是
+`residual_within_tolerance` —— **又一次"猜字段名"**（另一个会话刚犯过同一类错：把 `emit_ops` 的
+`unlowered` 写成 `three_state.downstream_cannot`）。规矩再确认一次：**断言里不许猜字段名，
+先让载荷把真名打出来。**
+
+**对既有行为零影响**：随包快照与实时目录**都没有** `mesh.import`，所以今天任何网格项仍然如实
+报 `unsupported / no_downstream_op` —— 这一版只是把"能不能"从硬编码改成**跟着目标目录走**。
+
+## 9.22 网格路收口（`mesh-round-5`，2026-10-09）
+
+**结论：网格路端到端通了**，而且是**磁盘自证**（不是工具返回的转述）：11 个描述符末条是 `kind: "mesh"`
+（外部 `.glb`，只登记不复制，1808 B），`report.json` 自己写着 `ok: true` / `blockers: []`，
+`mesh_measured` 三条差全 0，两档校验都在（numeric 残差 0 + scene_readback **1/1**），
+`ops` = `mesh.import { path, name, upAxis, scale, size }` + `object.transform { name, location }`。
+
+**这一轮由下游会话的独立复现/反例抓出的六个缺陷（全是我的）**：
+
+| # | 缺陷 | 后果 | 修法 |
+|---|---|---|---|
+| 1 | `Uint8Array.toString('utf8')` 不存在（继承 `Object.prototype`） | sidecar 永远读不到 ⇒ **第三道闸门从未生效**，且网格路 `save` 必失败 | `Buffer.from(raw).toString('utf8')`；**夹具改成按 seam 的形状存字节**（假 PASS 的根因是夹具不忠实于 seam） |
+| 2 | 闸门键在**可选的** `mesh_file` 入参上 | 不传就**静默通过**：声明被读、被记、无人比较 | 键在**项自己的 `path`** 上；`mesh_file` 只决定要不要登记描述符 |
+| 3 | `ok` 不含 `blockers` | 带 blocker 的包报 `ok: true` | `ok = blockers.length === 0 && …` |
+| 4 | `ok`/`blockers` 不写进 `report.json` | 磁盘副本不完整 ⇒ "产物齐全"会被读成"通过了" | 两者写进报告（报告是权威副本，工具结果可能被替换） |
+| 5 | `expectedObjectsFromOps` 只认 `mesh.primitive_add` | 网格对象**进不了期望集** ⇒ 读回 0/0、什么都没证实 | 认 `mesh.import`，并把 `object.transform` 的摆放折进去 |
+| 6 | `mesh.import` 里发了 `location` | 导入那刻还没摆放 ⇒ 自检**必然报 false**（噪音不是发现） | 不发 `location`，落点交给 `object.transform`；`boxesFromOps` 也改成从 transform 取摆放 |
+
+**两条流程教训**（都花了真实时间）：
+
+- **安装后必须用 `package status` 核到 `actual=running`**：`reinstall.ps1` 的 `enable` 步被中断时，包停在
+  `desired=installed-disabled`，而**新对话里整包工具直接不存在**（症状：工具清单里没有 `agh_ortho_*`）。
+- **`edit` 的锚点是子串匹配**：把 `function assembleArtifacts(...)` 当锚点，它其实匹配在 `async function …`
+  的尾部 ⇒ 那个 `async` 被留在注释块前变成孤立表达式。`node --check` **不报**（语法合法），运行才炸。
+
+**证据保留**：`photo-round-1b`（被就地改坏、由描述符层抓到 sha256 不符的那一份）**不参与任何清理** ——
+它是"产物层能抓到篡改"的唯一实证。保留策略的 `would_prune` 会点名它，**照名单清之前先排除它**。
+
+**销账**：`describe_scene().dimensions` 的语义变化（0.2.0 起 = 世界 AABB）**不需要改期望值算法** ——
+`compareScene` 对**带旋转**的对象本来就不做尺寸断言，而无旋转时"世界 AABB"与"局部包围盒 × scale"是同一个数。
+欠账关闭，理由在此。
+
 ## 10. 未决项
 
 

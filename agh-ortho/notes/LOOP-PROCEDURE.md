@@ -264,6 +264,21 @@ StdGEN 那类项目的核心贡献不是网格，是**语义分解**（身体/�
 
 ---
 
+### 3.12 网格路（外部生成的网格）
+
+- **进场**：`.agnes/agh-ortho/meshes/<名字>/{mesh.glb, source.json}`；`source.json` 声明 `unit / upAxis / declaredHeight`。
+- **mesh 项的 `w/d/h` 不是自由的**：必须是**文件自己的比例** —— `mesh.import.scale` 是**标量**（只能等比缩放），
+  它只能对上高度、对不上截面。声明与实测不符即 **blocking**。
+- **四条闸门**（都在 `save` 里，**键在项自己的 `path` 上**，不依赖 `mesh_file` 入参）：
+  `E_MESH_SOURCE_UNREADABLE`（缺 sidecar）/ `E_MESH_SOURCE_MISMATCH`（sidecar vs 参数）/
+  `E_MESH_SIZE_MISMATCH`（参数 vs 实测）/ `E_MESH_DECLARED_HEIGHT_MISMATCH`（**文件自己的声明 vs 实测**）。
+  另：`E_MESH_MEASUREMENT_LIMITED` —— 节点带**旋转**时拒绝给尺寸判定（宁可说"量不了"）。
+- **两条 op**：`mesh.import`（只发 `path/name/upAxis/scale/size`；`size` 是**期望值**，下游会比对回报，
+  **不施加**）+ `object.transform`（真正摆放）。
+- **形状没有任何一档能验**：只有存在 / 类型 / 位置 / 尺寸被断言，形状必须人眼看 `sheet.svg`。
+- **安装后必须核**：`package status` 到 `actual=running` 再开新对话 —— 否则新会话里整包工具不存在
+  （实测症状：工具清单里没有 `agh_ortho_*`）。
+
 ## 4. 归因纪律：⑤ 失败时**默认不要改参数**
 
 失败有三种方向，应对完全不同：
