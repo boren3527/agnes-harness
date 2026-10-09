@@ -13,7 +13,7 @@
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { boxesFromOps, compareScene, expectedObjectsFromOps, extentsFromBoxes, extentsFromParams, placementOf } from './geometry.mjs'
+import { SCENE_ABSOLUTE_FLOOR, SCENE_RELATIVE_TOLERANCE, boxesFromOps, compareScene, expectedObjectsFromOps, extentsFromBoxes, extentsFromParams, placementOf } from './geometry.mjs'
 import {
   ARTIFACT_ROOT_SEGMENTS,
   CONTRACT_VERSION,
@@ -57,14 +57,21 @@ const VERIFY_CAVEATS = [
  * `size_asserted` 由下游是否发布 `dimensions` 决定，所以这一项必须是参数，不能写死。
  */
 function sceneAsserts(sizeAsserted) {
+  // 容差是**每行各自算出来的**（相对 SCENE_RELATIVE_TOLERANCE，绝对值下限 SCENE_ABSOLUTE_FLOOR），
+  // 所以这里**不能写死一个 1e-6**。实测被抓到过：载荷里写着 "within 1e-6"，同一份载荷的
+  // rows[].tolerance 却最大到 9.6e-6 —— 断言清单与它旁边的数字互相矛盾，读者只能拒绝背书。
+  // 这正是"把会变的事实写成常量"那一族，所以三个数都从常量拼出来。
+  const relative = SCENE_RELATIVE_TOLERANCE.toExponential()
+  const floor = SCENE_ABSOLUTE_FLOOR.toExponential()
+  const within = `within the tolerance printed on that row (relative ${relative} of the largest coordinate, floor ${floor} m) — NOT a fixed 1e-6`
   const base = [
     'every intended object exists under its exact name (Blender renames collisions to name.001, so a missing exact name is caught)',
     'type is MESH',
-    'location equals the location we asked for, within 1e-6',
-    'scale equals the scale we asked for, within 1e-6',
+    `location equals the location we asked for, ${within}`,
+    `scale equals the scale we asked for, ${within}`,
   ]
   if (sizeAsserted) {
-    base.push('the final size in metres equals scale x size, within 1e-6 — dimensions ARE published by this downstream')
+    base.push(`the final size in metres equals scale x size, ${within} — dimensions ARE published by this downstream`)
   }
   return base
 }
@@ -242,6 +249,9 @@ const ASSEMBLY_ITEM = {
   required: ['id', 'feature'],
   additionalProperties: false,
 }
+
+/** assembly 项的**规范键序** = 声明顺序（id → feature → 尺寸 → 位置 → 分类 → 来源）。 */
+const ASSEMBLY_ITEM_ORDER = Object.keys(ASSEMBLY_ITEM.properties)
 
 const DECLARED_UNSUPPORTED = {
   type: 'object',
@@ -1017,9 +1027,9 @@ async function assembleArtifacts(args, createdAt, tctx) {
     name: 'parameters.json',
     // 落盘的必须是**意图层参数模型**，不能夹带 run_id / against_scene 这类工具控制字段 ——
     // 否则这份交付物喂不回 emit_ops / fit（additionalProperties:false 会拒）。
-    text: `${JSON.stringify(intentParamsOf(args), null, 2)}\n`,
-    preview: `参数模型（意图层）：${(args.assembly ?? []).length} 个 assembly 项、${(args.unsupported ?? []).length} 个声明 unsupported、${(args.unresolved ?? []).length} 个 unresolved；单位 ${args.unit}；投影 ${args.projection}；只含意图层字段，可直接作为 emit_ops / fit 的输入复现`,
-    meta: { unit: args.unit, projection: args.projection, intent_only: true },
+    text: `${JSON.stringify(canonicalParams(args), null, 2)}\n`,
+    preview: `参数模型（意图层）：${(args.assembly ?? []).length} 个 assembly 项、${(args.unsupported ?? []).length} 个声明 unsupported、${(args.unresolved ?? []).length} 个 unresolved；单位 ${args.unit}；投影 ${args.projection}；只含意图层字段、键序已规范化，可直接作为 emit_ops / fit 的输入复现`,
+    meta: { unit: args.unit, projection: args.projection, intent_only: true, key_order: 'canonical' },
   })
   files.push({
     name: 'ops.json',
@@ -1195,6 +1205,40 @@ const INTENT_KEYS = Object.keys(EMIT_OPS_INPUT.properties)
 /** 从工具参数里剥出纯意图层参数。 */
 function intentParamsOf(args) {
   return Object.fromEntries(INTENT_KEYS.filter((k) => args[k] !== undefined).map((k) => [k, args[k]]))
+}
+
+/**
+ * 参数文件的**规范键序**（canonical）。
+ *
+ * 为什么必须有这一步：`parameters.json` 的值来自**调用方写的参数对象**，而嵌套对象的键序
+ * 跟着调用方走。实测（2026-10-09，同一组参数、两次 save）：
+ *   photo-round-3-candidate  →  assembly 项 `id, feature, w, d, h, at`、`frame` = `up, front, handed`
+ *   photo-round-3            →  同值，但 `at, d, feature, h, id, w`、`frame` = `front, handed, up`
+ * **取值逐项相同，字节不同**。于是两件事同时失效：交付物"同参数 ⇒ 逐字节相同"这条不成立，
+ * 以及 ④ 规范摆放所服务的那件事（"两轮 diff 只看数值"）—— diff 里每一行都在动。
+ *
+ * JSON 的键序**没有语义**，所以规范化不丢任何信息，只是把**不该属于判据的那个自由度**收掉：
+ * 顶层按 `INTENT_KEYS`（= `intentParamsOf` 已保证），assembly 项按声明顺序，其余对象按键名排序，
+ * 数组顺序不动。
+ */
+function canonicalParams(args) {
+  const order = (value, preferred) => {
+    if (Array.isArray(value)) return value.map((item) => order(item, null))
+    if (!value || typeof value !== 'object') return value
+    const keys = Object.keys(value)
+    const known = (preferred ?? []).filter((k) => keys.includes(k))
+    const rest = keys.filter((k) => !known.includes(k)).sort()
+    return Object.fromEntries([...known, ...rest].map((k) => [k, order(value[k], null)]))
+  }
+  const params = intentParamsOf(args)
+  return Object.fromEntries(
+    Object.entries(params).map(([key, value]) => [
+      key,
+      Array.isArray(value)
+        ? value.map((item) => order(item, key === 'assembly' ? ASSEMBLY_ITEM_ORDER : null))
+        : order(value, null),
+    ]),
+  )
 }
 
 // fit 的输入 = emit_ops 的输入 + 一个可选的"是否引入外部事实"开关。

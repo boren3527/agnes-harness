@@ -169,7 +169,7 @@ export function expectedObjectsFromOps(ops) {
  * 每行都会把实际用的 `tolerance` 报出来，压线与否看得见。
  */
 export const SCENE_RELATIVE_TOLERANCE = 1e-5
-const SCENE_ABSOLUTE_FLOOR = 1e-9
+export const SCENE_ABSOLUTE_FLOOR = 1e-9
 /** 旋转是弧度、无量纲，不能用长度推出的容差；M1 的 ops 从不设旋转，这里取一个极小绝对值。 */
 const SCENE_ROTATION_EPSILON = 1e-9
 

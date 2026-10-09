@@ -293,6 +293,38 @@ check(
 )
 check('and a replay that did not ask for a readback does not cry wolf', replay.readback_not_recorded === false)
 
+// 交付的参数文件必须**同值即同字节**（"同参数 ⇒ 逐字节相同"与"两轮 diff 只看数值"都靠它）。
+// 实测被抓到过：同一组参数两次 save，键序跟着调用方走 ⇒ 取值逐项相同、字节不同。
+// 这里故意把整个键序倒过来再存一次：两份 parameters.json 必须逐字节相同。
+const reversed = (value) => {
+  if (Array.isArray(value)) return value.map(reversed)
+  if (!value || typeof value !== 'object') return value
+  return Object.fromEntries(Object.entries(value).reverse().map(([k, v]) => [k, reversed(v)]))
+}
+const shuffledSample = reversed(JSON.parse(JSON.stringify(SAMPLE)))
+check('the reordering fixture really reorders (otherwise the next two checks prove nothing)', JSON.stringify(shuffledSample) !== JSON.stringify(SAMPLE))
+const fs3 = memoryFs()
+const savedOrderA = (await save.execute({ ...SAMPLE, run_id: 'order-a' }, { fs: fs3, session: { workspaceRoot: ws } })).structured
+const savedOrderB = (await save.execute({ ...shuffledSample, run_id: 'order-b' }, { fs: fs3, session: { workspaceRoot: ws } })).structured
+check('both key orders saved', savedOrderA.ok === true && savedOrderB.ok === true, JSON.stringify([savedOrderA.blockers, savedOrderB.blockers]))
+const paramText = (result) => fs3.files.get(relKey(result.artifacts.find((a) => a.path.endsWith('parameters.json')).path))
+const paramsA = paramText(savedOrderA)
+const paramsB = paramText(savedOrderB)
+check('parameters.json is canonical: same values in a different key order give identical bytes', paramsA === paramsB, `${paramsA?.length} vs ${paramsB?.length} bytes`)
+check(
+  'and the canonical order is the declared one (id then feature), not alphabetical, with the values untouched',
+  (() => {
+    const p = JSON.parse(paramsA)
+    return (
+      Object.keys(p.assembly[0]).slice(0, 2).join() === 'id,feature' &&
+      Object.keys(p.frame).join() === 'front,handed,up' &&
+      p.assembly[1].w.v === 12.4 &&
+      p.assembly[1].at.v.join() === '0,0,4.65' &&
+      p.unresolved[0] === '屋面厚度'
+    )
+  })(),
+)
+
 // §6 E_RUN_NOT_OWNED：别人的 run 目录必须拒绝，并回报 marker 的实际内容。
 const fs2 = memoryFs()
 await fs2.write('.agnes/agh-ortho/runs/foreign/marker.json', JSON.stringify({ contract: 1, producer: 'someone-else@1.0.0', runId: 'foreign', createdAt: new Date().toISOString() }))
@@ -437,6 +469,18 @@ const sceneDims = (await verifyTool.execute({ ...SAMPLE, against_scene: true }, 
 check('dimensions: the size assertion turns on by itself', sceneDims.scene.size_asserted === true && sceneDims.scene.dimensions_published === true && sceneDims.ok === true, JSON.stringify(sceneDims.scene.rows.map((r) => r.dimensions_delta)))
 check('dimensions: and the size gap leaves cannot_assert', !sceneDims.scene.cannot_assert.some((t) => /publishes no dimensions/.test(t)), JSON.stringify(sceneDims.scene.cannot_assert))
 check('dimensions: the camera gap still stays', sceneDims.scene.cannot_assert.some((t) => /camera op/.test(t)))
+
+// 载荷里的断言清单**不能写死容差**：容差是每行按相对规则算出来的（实测 rows 到 9.6e-6，
+// 而清单当时写着 "within 1e-6" —— 自相矛盾）。期望值从 geometry 的常量推出来，不是抄的字面量。
+const relText = geometry.SCENE_RELATIVE_TOLERANCE.toExponential()
+const floorText = geometry.SCENE_ABSOLUTE_FLOOR.toExponential()
+check(
+  'scene: the asserts list derives its tolerance from the constants instead of claiming a fixed 1e-6',
+  sceneDims.scene.asserts.every((t) => !/within 1e-6/.test(t)) &&
+    sceneDims.scene.asserts.filter((t) => /equals/.test(t)).length >= 3 &&
+    sceneDims.scene.asserts.filter((t) => /equals/.test(t)).every((t) => t.includes(relText) && t.includes(floorText)),
+  JSON.stringify(sceneDims.scene.asserts),
+)
 // 尺寸不符必须被抓到 —— 这正是 size=1 语义错误的现场
 const BAD_DIM_SCENE = { ...DIM_SCENE, objects: DIM_SCENE.objects.map((o) => (o.name === 'body' ? { ...o, dimensions: [12.4, 8.6, 9.299] } : o)) }
 const sceneBadDim = (await verifyTool.execute({ ...SAMPLE, against_scene: true }, withScene(BAD_DIM_SCENE))).structured
