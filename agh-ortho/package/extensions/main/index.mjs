@@ -83,11 +83,15 @@ function sceneAsserts(sizeAsserted) {
 function sceneCannotAssert(sizeAsserted) {
   const out = []
   if (!sizeAsserted) {
-    out.push('the primitive KIND: the downstream catalog publishes no per-kind vertex/face counts, and agreement with the original photograph would need a camera op it deliberately does not provide')
+    out.push('the primitive KIND: the downstream catalog publishes no per-kind vertex/face counts; agreement with the original photograph is NOT connected yet (see the entry below)')
   }
   out.push('the primitive kind beyond type=MESH: the downstream catalog publishes no per-kind vertex/face counts, so vertices/polygons are reported as evidence and not asserted')
-  // 即使下游补上 dimensions，这一条也永远补不上 —— 所以它必须一直在这里，不能靠"以后再说"。
-  out.push('agreement with the original photograph: that needs an orthographic render of the real scene, and the downstream has no camera op — so this tier can never become an image-level against_blender comparison')
+  // 这一条**不是"永远不可能"，而是"还没接上"**。我此前写成"下游没有相机 op / 这一档永远升不上去"，
+  // 是**错的**（下游 op 表里 camera.add / object.look_at / light.add 都在，实测核对过）。真实缺口是两件：
+  //   ① 下游：camera.add 只有透视（没有 ORTHO/ortho_scale），且没有"用**场景相机**渲到文件"的 op
+  //      （capture 渲的是**视口**）；
+  //   ② 我们这侧：渲出来的像素**进不了模型** ⇒ 还要把剪影转成**数值**（比例数列）才能机器比对。
+  out.push('agreement with the original photograph: NOT connected yet. The downstream does expose camera.add / object.look_at / light.add, but camera.add is perspective only (no orthographic option) and nothing renders the scene camera to a file — capture renders the viewport. On our side a rendered picture would still have to be turned into numbers, because pixels never reach a model.')
   return out
 }
 
@@ -2459,7 +2463,7 @@ export const runtime = {
             asserts: sceneAsserts(comparison.size_asserted),
             cannot_assert: sceneCannotAssert(comparison.size_asserted),
             upgrade_path: comparison.size_asserted
-              ? 'the size assertion is now active because this downstream publishes dimensions; the only remaining gap toward an image-level comparison is the downstream camera op (see cannot_assert)'
+              ? 'the size assertion is now active because this downstream publishes dimensions. Toward an image-level comparison the remaining pieces are: an orthographic option plus a scene-camera render downstream, and a silhouette-to-numbers step upstream (see cannot_assert)'
               : 'when agh-blender publishes per-object dimensions from scene.describe, this same comparison gains the size assertion — see notes/DOWNSTREAM-REQUEST-readback.md',
           },
         })

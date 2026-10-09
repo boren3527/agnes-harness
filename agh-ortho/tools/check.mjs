@@ -650,9 +650,9 @@ const sceneGood = (await verifyTool.execute({ ...SAMPLE, against_scene: true }, 
 check('scene: the tier is named honestly, not against_blender', sceneGood.tier === 'scene_readback' && sceneGood.needs_blender === true, sceneGood.tier)
 check('scene: objects match by exact name with location and scale', sceneGood.ok === true && sceneGood.scene.matched === 2 && sceneGood.scene.missing.length === 0 && sceneGood.scene.mismatched.length === 0, JSON.stringify(sceneGood.scene.rows.map((r) => r.verdict)))
 check('scene: factory objects are reported as extra, not treated as failure', sceneGood.scene.extra_objects.includes('Cube'))
-check('scene: the gaps are stated, not hidden (the primitive KIND and the permanent camera gap)', sceneGood.scene.cannot_assert.some((t) => /kind/i.test(t)) && sceneGood.scene.cannot_assert.some((t) => /camera op/.test(t)), JSON.stringify(sceneGood.scene.cannot_assert))
+check('scene: the gaps are stated, not hidden (the primitive KIND and the photo gap)', sceneGood.scene.cannot_assert.some((t) => /kind/i.test(t)) && sceneGood.scene.cannot_assert.some((t) => /NOT connected yet/.test(t)), JSON.stringify(sceneGood.scene.cannot_assert))
 check('scene: size is NOT asserted while the downstream publishes no dimensions', sceneGood.scene.size_asserted === false && sceneGood.scene.dimensions_published === false)
-check('scene: the camera gap is permanent and always stated', sceneGood.scene.cannot_assert.some((t) => /camera op/.test(t)))
+check('scene: the photo gap is stated as "not connected yet", names the camera ops that DO exist, and is never called impossible', sceneGood.scene.cannot_assert.some((t) => /NOT connected yet/.test(t)) && sceneGood.scene.cannot_assert.some((t) => /camera\.add/.test(t)) && !sceneGood.scene.cannot_assert.some((t) => /has no camera op|can never/.test(t)), JSON.stringify(sceneGood.scene.cannot_assert))
 
 // 下游一旦发布 dimensions，同一份比对必须**自动**获得尺寸断言（这正是那份请求的接收端）
 const DIM_SCENE = {
@@ -666,7 +666,7 @@ const DIM_SCENE = {
 const sceneDims = (await verifyTool.execute({ ...SAMPLE, against_scene: true }, withScene(DIM_SCENE))).structured
 check('dimensions: the size assertion turns on by itself', sceneDims.scene.size_asserted === true && sceneDims.scene.dimensions_published === true && sceneDims.ok === true, JSON.stringify(sceneDims.scene.rows.map((r) => r.dimensions_delta)))
 check('dimensions: and the size gap leaves cannot_assert', !sceneDims.scene.cannot_assert.some((t) => /publishes no dimensions/.test(t)), JSON.stringify(sceneDims.scene.cannot_assert))
-check('dimensions: the camera gap still stays', sceneDims.scene.cannot_assert.some((t) => /camera op/.test(t)))
+check('dimensions: the photo gap still stays stated once dimensions are published — as "not connected yet", not as impossible', sceneDims.scene.cannot_assert.some((t) => /NOT connected yet/.test(t)) && !sceneDims.scene.cannot_assert.some((t) => /has no camera op/.test(t)), JSON.stringify(sceneDims.scene.cannot_assert))
 
 // 载荷里的断言清单**不能写死容差**：容差是每行按相对规则算出来的（实测 rows 到 9.6e-6，
 // 而清单当时写着 "within 1e-6" —— 自相矛盾）。期望值从 geometry 的常量推出来，不是抄的字面量。
