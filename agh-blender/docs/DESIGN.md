@@ -608,6 +608,7 @@
 
 | 时间 | 变更 |
 |---|---|
+| 2026-10-09 21:15 | **0.3.0**：opcode 由 11 增至 **15**（新增 `modifier.add`/`light.add`/`camera.add`/`object.look_at`，含各自拒绝码）；面板做实（`blender.status` 顺带读回 `/scene` 的紧凑摘要，且**区分**"进程死了"与"桥没应答"）。**规矩**：op 的权威清单是 `catalog()`，**加 op 不改文档**（否则必漂移）。证据见 `P0-EVIDENCE.md` §V（P0-F199~F205） |
 | 2026-10-09 21:05 | **0.2.0**：新增 §3.14（只读读回与导入导出七条约束）。`mesh.import` 落地并发布到 catalog；`dimensions` 改为世界 AABB（原实现忽略旋转）；**取景原来是空操作**（两种模式出图字节相同）→ 改为自建矩阵；capture 新增 `bounds`/`coveredFraction`/`touchesEdges` + 像素交叉验证；`start` 裁剪旧实例目录（保留 20）。死代码 `fit_view_to_bounds()` 已删除并留注释说明原因。证据见 `P0-EVIDENCE.md` §U（P0-F185~F198） |
 | 2026-10-06 09:12 | **v0.1.5 五项修补全部实测**：① `sys.dont_write_bytecode` 移到兄弟 import 之前（**修正 0.1.4 的无效修复**：实测 Blender 嵌入式 CPython **忽略** `PYTHONDONTWRITEBYTECODE`）② `/shutdown` 脏则 **409 `E_DIRTY`** 拒绝（用户选 A；实测完整链：拒绝 → checkpoint 存住含 `cube_a` → `force` 关闭）③ 两条停止路径都写 `stop-report.json` ④ 成功分支带 `identity.observed/expected` ⑤ 压掉 CLIXML 噪声。§3.13 重写；台账新增 §R（P0-F163~F171） |
 | 2026-10-06 00:45 | **孤儿停止首次真实运行**（`P0-EVIDENCE.md` §Q.11）。① **抦到一个破坏性缺陷（P0-F160）**：Blender 一跑就往 **runtime snapshot** 里写 `__pycache__/*.pyc` ⇒ 内容寻址快照被污染 ⇒ **任何包操作都报 `E_PACKAGE_INTEGRITY`**（本轮实测卡死，手删后 `disable` 立即恢复）；修法：spawn 时加 `PYTHONDONTWRITEBYTECODE=1` + `bootstrap.py` 里 `sys.dont_write_bytecode=True`（**未实施**）。② **机制已验证**：直接对真实 Blender 49456 跑已安装包里的 `ps_close.ps1` → `EXITED`，进程确实退出（非强杀）⇒ 方案可行。③ **工具路径失败**：`agh_blender_stop` 跑 19 秒后结果被 **`TOOL_OUTCOME_UNKNOWN` 吞掉**，窗口未关 —— **我的代码违反了 P0-F58**（副作用型工具没先落盘报告），失败原因永久丢失；最可能是 **confine 下执行工作区外 `.ps1`** 被阻/挂住。下轮三件必修事见 §Q.11.4 |

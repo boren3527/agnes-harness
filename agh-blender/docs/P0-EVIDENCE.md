@@ -1565,3 +1565,42 @@ if (event.origin !== 'tool:computer_use' || event.trust !== 'untrusted' || data.
 | P0-F197 | **测试夹具要选不会被别人清空的落点**：我预置的 25 个目录被预检自己的 `rmSync` 先删掉了，导致第一次裁剪验证得出"只剩 1 个"的**假结论**。换独立台架后才拿到真结果 |
 | P0-F198 | **期望值写错会伪装成产品缺陷**：本轮两次 `FAIL` 全是我把期望值抄错（`[6.4,6.4,4.0]`、`[0,0,4]`），产品本身是对的。**FAIL 先怀疑断言，再怀疑实现** |
 
+## V. 0.3.0：opcode 扩到 15 个 + 面板做实（2026-10-09）
+
+### V.1 新增 4 个 op（P0-F199 ~ P0-F204）
+
+| op | 语义 | 拒绝码 |
+|---|---|---|
+| `modifier.add` | `{name, kind, amount?, segments?, axis?}`；kind = `subdivision`(量=levels 1-6) / `bevel`(量=宽度, segments 1-16) / `mirror`(axis X/Y/Z) / `solidify`(量=厚度)。**刻意不 apply**：留成可编辑的修改器栈，烘焙是调用方没要求的破坏性动作 | `E_NO_SUCH_OBJECT` `E_NOT_A_MESH` `E_ARG_ENUM` `E_ARG_RANGE` `E_LIMIT` |
+| `light.add` | `{kind: point/sun/area/spot, name?, energy?, color?, size?, location?, rotation_euler?, replace?}`。**能量按种类给不同默认**（太阳是 W/m²，量级个位数；其余是 W，量级几十到几百）——混用会得到离谱的亮度 | `E_NAME_TAKEN` `E_ARG_ENUM` `E_ARG_RANGE` `E_ARG_TYPE` |
+| `camera.add` | `{name?, lens? 1..500mm, location?, rotation_euler?, active?(默认 true → 设为 scene.camera), replace?}` | `E_NAME_TAKEN` `E_ARG_RANGE` `E_ARG_TYPE` |
+| `object.look_at` | `{name, target}`，target 可以是**对象名**或世界坐标点。相机与灯都朝各自 −Z、+Y 为上 ⇒ 同一套瞄准对两者都成立 | `E_NO_SUCH_OBJECT` `E_ARG_RANGE`（目标与自身重合）`E_ARG_TYPE` |
+
+| 编号 | 实测 |
+|---|---|
+| P0-F199 | 4 种修改器全部落到栈上且**未被 apply**（`applied: false`），参数被真正采纳（`levels=3`、`bevel.width≈0.02 & segments=3`、`mirror.use_axis=[True,False,False]`） |
+| P0-F200 | 4 种灯全部创建成功，默认能量按种类不同（point/area/spot=100，sun=3），显式 `energy=4.5` 与 `color` 生效 |
+| P0-F201 | `camera.add` 设了 `lens=35` 并成为 `scene.camera`；`look_at` 指向对象后旋转**确实变化**（`[1.007, 0, 0.322]`）；指向点时退化为"正下方看原点"= 单位旋转（正确） |
+| P0-F202 | 6 条拒绝按码生效：非网格加修改器 `E_NOT_A_MESH`、未知 kind `E_ARG_ENUM`、重名 `E_NAME_TAKEN`、`lens=5000` `E_ARG_RANGE`、目标与自身重合 `E_ARG_RANGE`、subdivision levels=99 `E_ARG_RANGE` |
+| P0-F203 | `catalog()` 现发布 **15 个 op**，4 个新 op 的参数与拒绝码全部在契约里（27 项断言全 PASS） |
+| P0-F204 | **文档不再枚举 op**：op 的权威清单是 `catalog()`（运行时读取）。写进 DESIGN §3.9 的规矩是"**加 op 不必改文档**"，否则文档与实现必然漂移 |
+
+### V.2 面板做实（P0-F205）
+
+原来的面板只显示"进程在不在"。现在它报**两件独立的事**，并且**分别说明是哪一件坏了**：
+
+```
+Blender · pid 1234 · port 5678 · running · Blender 5.2.2 LTS
+scene "Scene" · 4 objects · 1 meshes · 2 materials · 15 ops
+checked 21:12:03                              [refresh]
+```
+
+- `blender.status`（query）在实例存活时**顺带读一次 `/scene`**，只回**紧凑摘要**（对象数/网格数/材质数/op 数）——完整场景载荷在大文件上会撑爆服务的 32 KiB 结果预算，而面板只要形状
+- 服务上下文**没有 net seam**（那是工具的），所以这里用普通 `fetch` + `AbortSignal.timeout(1500)`
+- **关键区分**：bridge 读不到时显示 `scene unreadable: <原因>`，而**进程**那一行照旧 —— "Blender 死了"与"桥没应答"是两件事，不能塌成一句
+
+| 编号 | 实测（service → bridge → scene 全链路） |
+|---|---|
+| P0-F205 | 无实例 → `scene=null`；start 后 → `alive=true`、`{objectCount:3, meshCount:1, materialCount:2, knownOps:15}`；跑 3 个 op（删 Cube、加球、加太阳）后 → `objectCount:4`、`meshCount:1`；stop 后 → `scene=null` |
+
+

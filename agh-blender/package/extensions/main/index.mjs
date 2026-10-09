@@ -150,29 +150,60 @@ export const runtime = {
       kind: 'query',
       inputSchema: EMPTY_INPUT,
       outputSchema: ENVELOPE_OUTPUT,
-      timeoutMs: 1000,
+      // Room for one bridge round trip: the handler reads the scene when the instance is alive, so
+      // the panel shows what Blender actually holds instead of only "a process exists".
+      timeoutMs: 2500,
       maxResultBytes: 32768,
       async handler(_input, sctx) {
         const key = normalizeCwd(sctx?.cwd)
         const record = instances.get(key) ?? null
         const alive = record === null ? false : pidAlive(record.pid)
-        return {
-          ok: true,
-          data: {
-            moduleId: MODULE_ID,
-            workspaceKey: key,
-            cwd: sctx?.cwd ?? null,
-            instance: record
-              ? {
-                  pid: record.pid,
-                  port: record.port,
-                  instanceId: record.instanceId,
-                  blenderVersion: record.blenderVersion,
-                  alive,
-                }
-              : null,
-          },
+        const data = {
+          moduleId: MODULE_ID,
+          workspaceKey: key,
+          cwd: sctx?.cwd ?? null,
+          instance: record
+            ? {
+                pid: record.pid,
+                port: record.port,
+                instanceId: record.instanceId,
+                blenderVersion: record.blenderVersion,
+                alive,
+              }
+            : null,
+          scene: null,
+          sceneError: null,
         }
+        if (record && alive) {
+          // A service context has no net seam (that belongs to tools), so this is a plain fetch.
+          // Kept to a compact summary: the full scene payload would blow the result budget on a
+          // large file, and the panel only needs the shape of it.
+          try {
+            const response = await fetch(`http://127.0.0.1:${record.port}/scene`, {
+              method: 'POST',
+              headers: { 'X-AGH-Token': record.token, 'Content-Type': 'application/json' },
+              body: '{}',
+              signal: AbortSignal.timeout(1500),
+            })
+            const body = await response.json().catch(() => null)
+            const scene = body?.scene ?? null
+            if (scene) {
+              const objects = Array.isArray(scene.objects) ? scene.objects : []
+              data.scene = {
+                scene: scene.scene,
+                objectCount: scene.objectCount ?? objects.length,
+                meshCount: objects.filter((item) => item?.type === 'MESH').length,
+                materialCount: Array.isArray(scene.materials) ? scene.materials.length : 0,
+                knownOps: Array.isArray(scene.knownOps) ? scene.knownOps.length : 0,
+              }
+            } else {
+              data.sceneError = body?.detail ?? body?.error ?? `HTTP ${response.status}`
+            }
+          } catch (error) {
+            data.sceneError = String(error?.message ?? error)
+          }
+        }
+        return { ok: true, data }
       },
     })
 

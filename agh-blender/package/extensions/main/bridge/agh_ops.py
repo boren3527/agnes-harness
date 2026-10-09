@@ -520,6 +520,170 @@ def _op_mesh_import(args):
     return result
 
 
+# --------------------------------------------------------------------------- modifiers, lights, cameras
+
+
+MODIFIER_KINDS = {
+    'subdivision': 'SUBSURF',
+    'bevel': 'BEVEL',
+    'mirror': 'MIRROR',
+    'solidify': 'SOLIDIFY',
+}
+
+LIGHT_KINDS = {
+    'point': 'POINT',
+    'sun': 'SUN',
+    'area': 'AREA',
+    'spot': 'SPOT',
+}
+
+# Energy is per-kind because the units differ: a sun is irradiance in W/m^2 (single digits),
+# the others are radiant power in W (tens to hundreds).
+LIGHT_DEFAULT_ENERGY = {'sun': 3.0, 'point': 100.0, 'area': 100.0, 'spot': 100.0}
+
+
+def _fresh_name(requested, replace):
+    """Validate a requested name and refuse a collision unless replace is set."""
+    if requested is None:
+        return None
+    label = _name(requested, 'name')
+    if bpy.data.objects.get(label) is not None and not replace:
+        raise OpError('E_NAME_TAKEN', 'an object named %s already exists (pass replace=true to replace it)' % label)
+    return label
+
+
+def _op_modifier_add(args):
+    """Add a modifier to a mesh object and leave it unapplied.
+
+    Unapplied on purpose: the modifier stays visible and editable in Blender's stack, and baking it
+    would be a destructive change the caller did not ask for. Anything that reads the scene sees the
+    modifier list, and an export keeps it.
+    """
+    target = _object(_name(args.get('name'), 'name'))
+    if target.type != 'MESH':
+        raise OpError('E_NOT_A_MESH', '%s is a %s, modifiers here are for meshes' % (target.name, target.type))
+    kind = _enum(args.get('kind'), 'kind', tuple(sorted(MODIFIER_KINDS)))
+    if len(target.modifiers) >= 64:
+        raise OpError('E_LIMIT', 'too many modifiers on %s' % target.name)
+    modifier = target.modifiers.new(name=MODIFIER_KINDS[kind], type=MODIFIER_KINDS[kind])
+    if kind == 'subdivision':
+        levels = int(_num(args.get('amount', 2), 'amount'))
+        if levels < 1 or levels > 6:
+            raise OpError('E_ARG_RANGE', 'subdivision amount (levels) must be 1..6')
+        modifier.levels = levels
+        modifier.render_levels = levels
+    elif kind == 'bevel':
+        modifier.width = _num(args.get('amount', 0.05), 'amount')
+        segments = int(_num(args.get('segments', 2), 'segments'))
+        if segments < 1 or segments > 16:
+            raise OpError('E_ARG_RANGE', 'bevel segments must be 1..16')
+        modifier.segments = segments
+    elif kind == 'mirror':
+        axis = _enum(str(args.get('axis', 'X')).upper(), 'axis', ('X', 'Y', 'Z'))
+        modifier.use_axis = [axis == 'X', axis == 'Y', axis == 'Z']
+    elif kind == 'solidify':
+        modifier.thickness = _num(args.get('amount', 0.02), 'amount')
+    bpy.context.view_layer.update()
+    return {
+        'name': target.name,
+        'kind': kind,
+        'modifier': modifier.name,
+        'modifierCount': len(target.modifiers),
+        'applied': False,
+    }
+
+
+def _op_light_add(args):
+    kind = _enum(args.get('kind', 'point'), 'kind', tuple(sorted(LIGHT_KINDS)))
+    replace = _flag(args['replace'], 'replace') if 'replace' in args else False
+    label = _fresh_name(args.get('name'), replace)
+    location = _vec(args.get('location', (0.0, 0.0, 4.0)), 'location', 3)
+    if replace and label is not None:
+        existing = bpy.data.objects.get(label)
+        if existing is not None:
+            bpy.data.objects.remove(existing, do_unlink=True)
+    bpy.ops.object.light_add(type=LIGHT_KINDS[kind], location=location)
+    item = bpy.context.active_object
+    if label is not None:
+        item.name = label
+    if 'rotation_euler' in args:
+        item.rotation_euler = _vec(args['rotation_euler'], 'rotation_euler', 3)
+    energy = _num(args['energy'], 'energy') if 'energy' in args else LIGHT_DEFAULT_ENERGY[kind]
+    if energy < 0.0:
+        raise OpError('E_ARG_RANGE', 'energy must not be negative')
+    item.data.energy = energy
+    if 'color' in args:
+        item.data.color = _color(args['color'], 'color')
+    if 'size' in args and kind == 'area':
+        size = _num(args['size'], 'size')
+        if size <= 0.0:
+            raise OpError('E_ARG_RANGE', 'area size must be greater than 0')
+        item.data.size = size
+    bpy.context.view_layer.update()
+    return {
+        'name': item.name,
+        'kind': kind,
+        'type': item.type,
+        'energy': round(float(item.data.energy), 6),
+        'location': [round(v, 6) for v in item.location],
+        'objectCount': _counts(),
+    }
+
+
+def _op_camera_add(args):
+    replace = _flag(args['replace'], 'replace') if 'replace' in args else False
+    label = _fresh_name(args.get('name'), replace)
+    location = _vec(args.get('location', (0.0, -6.0, 3.0)), 'location', 3)
+    if replace and label is not None:
+        existing = bpy.data.objects.get(label)
+        if existing is not None:
+            bpy.data.objects.remove(existing, do_unlink=True)
+    bpy.ops.object.camera_add(location=location)
+    item = bpy.context.active_object
+    if label is not None:
+        item.name = label
+    if 'rotation_euler' in args:
+        item.rotation_euler = _vec(args['rotation_euler'], 'rotation_euler', 3)
+    lens = _num(args['lens'], 'lens') if 'lens' in args else 50.0
+    if lens < 1.0 or lens > 500.0:
+        raise OpError('E_ARG_RANGE', 'lens must be 1..500 mm')
+    item.data.lens = lens
+    make_active = _flag(args['active'], 'active') if 'active' in args else True
+    if make_active:
+        bpy.context.scene.camera = item
+    bpy.context.view_layer.update()
+    return {
+        'name': item.name,
+        'lens': round(float(item.data.lens), 6),
+        'location': [round(v, 6) for v in item.location],
+        'active': bool(make_active),
+        'sceneCamera': bpy.context.scene.camera.name if bpy.context.scene.camera else None,
+    }
+
+
+def _op_object_look_at(args):
+    """Aim an object at a point, or at another object.
+
+    Cameras and lights both look down their own -Z with +Y as up, so the same aim works for both.
+    """
+    item = _object(_name(args.get('name'), 'name'))
+    target = args.get('target')
+    if isinstance(target, str):
+        point = _object(target).matrix_world.translation.copy()
+    else:
+        point = Vector(_vec(target, 'target', 3))
+    direction = point - item.matrix_world.translation
+    if direction.length < 1e-6:
+        raise OpError('E_ARG_RANGE', 'the target is where the object already is; nothing to aim at')
+    item.rotation_euler = direction.to_track_quat('-Z', 'Y').to_euler()
+    bpy.context.view_layer.update()
+    return {
+        'name': item.name,
+        'target': [round(v, 6) for v in point],
+        'rotationEuler': [round(v, 6) for v in item.rotation_euler],
+    }
+
+
 OPS = {
     'mesh.primitive_add': _op_primitive_add,
     'object.transform': _op_transform,
@@ -532,6 +696,10 @@ OPS = {
     'file.checkpoint': _op_file_checkpoint,
     'file.stage_export': _op_file_stage_export,
     'mesh.import': _op_mesh_import,
+    'modifier.add': _op_modifier_add,
+    'light.add': _op_light_add,
+    'camera.add': _op_camera_add,
+    'object.look_at': _op_object_look_at,
 }
 
 # Declared so a caller can ask what exists without guessing. This table is the single
@@ -625,6 +793,65 @@ OP_MANIFEST = {
 }
 
 OP_MANIFEST.update({
+    'modifier.add': {
+        'mutates': True,
+        'destructive': False,
+        'summary': 'add an unapplied modifier to a mesh object',
+        'args': {
+            'name': {'type': 'string', 'required': True, 'note': 'the mesh object'},
+            'kind': {'type': 'enum', 'values': ['subdivision', 'bevel', 'mirror', 'solidify'], 'required': True},
+            'amount': {'type': 'number', 'optional': True, 'note': 'subdivision levels (1-6, integer), bevel width, or solidify thickness'},
+            'segments': {'type': 'integer', 'optional': True, 'range': '1..16', 'note': 'bevel only'},
+            'axis': {'type': 'enum', 'values': ['X', 'Y', 'Z'], 'optional': True, 'note': 'mirror only'},
+        },
+        'refuses': ['E_NO_SUCH_OBJECT', 'E_NOT_A_MESH', 'E_ARG_ENUM', 'E_ARG_RANGE', 'E_LIMIT'],
+        'note': 'left unapplied so it stays editable in the modifier stack; nothing is baked',
+        'example': {'op': 'modifier.add', 'args': {'name': 'body', 'kind': 'bevel', 'amount': 0.02, 'segments': 3}},
+    },
+    'light.add': {
+        'mutates': True,
+        'destructive': False,
+        'summary': 'add a light',
+        'args': {
+            'kind': {'type': 'enum', 'values': ['point', 'sun', 'area', 'spot'], 'default': 'point'},
+            'name': {'type': 'string', 'optional': True},
+            'energy': {'type': 'number', 'optional': True, 'note': 'W/m^2 for sun, W otherwise; defaults are per kind'},
+            'color': {'type': 'vec3', 'optional': True, 'range': '0..1 per channel'},
+            'size': {'type': 'number', 'optional': True, 'note': 'area lights only'},
+            'location': {'type': 'vec3', 'optional': True, 'default': [0, 0, 4]},
+            'rotation_euler': {'type': 'vec3', 'optional': True, 'unit': 'radians'},
+            'replace': {'type': 'boolean', 'default': False},
+        },
+        'refuses': ['E_NAME_TAKEN', 'E_ARG_ENUM', 'E_ARG_RANGE', 'E_ARG_TYPE'],
+        'example': {'op': 'light.add', 'args': {'kind': 'sun', 'name': 'KeyLight', 'energy': 4.0, 'location': [4, -4, 8]}},
+    },
+    'camera.add': {
+        'mutates': True,
+        'destructive': False,
+        'summary': 'add a camera and optionally make it the scene camera',
+        'args': {
+            'name': {'type': 'string', 'optional': True},
+            'lens': {'type': 'number', 'optional': True, 'range': '1..500 mm', 'default': 50},
+            'location': {'type': 'vec3', 'optional': True, 'default': [0, -6, 3]},
+            'rotation_euler': {'type': 'vec3', 'optional': True, 'unit': 'radians'},
+            'active': {'type': 'boolean', 'default': True, 'note': 'assign it as scene.camera'},
+            'replace': {'type': 'boolean', 'default': False},
+        },
+        'refuses': ['E_NAME_TAKEN', 'E_ARG_RANGE', 'E_ARG_TYPE'],
+        'example': {'op': 'camera.add', 'args': {'name': 'Shot', 'location': [6, -6, 4], 'lens': 35}},
+    },
+    'object.look_at': {
+        'mutates': True,
+        'destructive': False,
+        'summary': 'aim an object (camera or light) at a point or at another object',
+        'args': {
+            'name': {'type': 'string', 'required': True},
+            'target': {'type': 'string or vec3', 'required': True, 'note': 'an object name, or a world point'},
+        },
+        'refuses': ['E_NO_SUCH_OBJECT', 'E_ARG_RANGE', 'E_ARG_TYPE'],
+        'note': 'both lights and cameras look down their own -Z with +Y up, so one aim serves both',
+        'example': {'op': 'object.look_at', 'args': {'name': 'Shot', 'target': 'body'}},
+    },
     'mesh.import': {
         'mutates': True,
         'destructive': False,
