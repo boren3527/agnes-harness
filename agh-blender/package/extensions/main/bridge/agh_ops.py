@@ -14,6 +14,7 @@ import math
 import os
 
 import bpy
+from mathutils import Matrix, Vector
 
 # --------------------------------------------------------------------------- schema
 
@@ -400,6 +401,125 @@ def _op_file_stage_export(args):
     }
 
 
+# --------------------------------------------------------------------------- mesh.import
+
+
+_IMPORT_FORMATS = {'.glb': 'gltf', '.gltf': 'gltf', '.obj': 'obj'}
+
+
+def _op_mesh_import(args):
+    """Import an external mesh into the managed scene.
+
+    The caller declares the file's up axis; this op never guesses it. Measured on Blender 5.2.2:
+    the glTF importer exposes no axis parameter at all -- it always applies the glTF standard
+    (Y up) -- so a file that declares another up axis arrives tipped and is corrected here. The
+    OBJ importer does take axis parameters and gets the declared one directly, with a fixed
+    forward axis (-Y), which is the pair that round-trips against our own OBJ export.
+    """
+    raw_path = args.get('path')
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise OpError('E_ARG_MISSING', 'path is required')
+    path = os.path.abspath(os.path.expanduser(raw_path.strip()))
+    extension = os.path.splitext(path)[1].lower()
+    if extension not in _IMPORT_FORMATS:
+        raise OpError('E_UNSUPPORTED_FORMAT', 'only .glb, .gltf and .obj can be imported, got %s' % (extension or '(no extension)'))
+    if not os.path.isfile(path):
+        raise OpError('E_NO_SUCH_FILE', 'no such file: %s' % path)
+
+    actual_bytes = os.path.getsize(path)
+    declared_bytes = args.get('bytes')
+    if isinstance(declared_bytes, (int, float)) and int(declared_bytes) != actual_bytes:
+        raise OpError('E_BYTE_MISMATCH', 'the caller declared %s bytes but the file is %s bytes' % (int(declared_bytes), actual_bytes))
+    declared_sha = args.get('sha256')
+    if isinstance(declared_sha, str) and declared_sha.strip():
+        actual_sha = _sha256_file(path)
+        if actual_sha.lower() != declared_sha.strip().lower():
+            raise OpError('E_BYTE_MISMATCH', 'the caller declared sha256 %s... but the file is %s...' % (declared_sha.strip()[:16], actual_sha[:16]))
+
+    up_axis = _enum(str(args.get('upAxis', 'Y')).upper(), 'upAxis', ('X', 'Y', 'Z'))
+    scale = 1.0 if 'scale' not in args else _num(args['scale'], 'scale')
+    if scale <= 0.0:
+        raise OpError('E_ARG_RANGE', 'scale must be greater than 0')
+
+    before = set(bpy.data.objects.keys())
+    if _IMPORT_FORMATS[extension] == 'gltf':
+        bpy.ops.import_scene.gltf(filepath=path)
+    else:
+        bpy.ops.wm.obj_import(filepath=path, forward_axis='NEGATIVE_Y', up_axis=up_axis)
+    created = [bpy.data.objects[name] for name in list(bpy.data.objects.keys()) if name not in before]
+    meshes = [item for item in created if item.type == 'MESH']
+    if not meshes:
+        # Leaving the non-mesh leftovers behind would silently pollute the scene on a refusal.
+        for item in created:
+            try:
+                bpy.data.objects.remove(item, do_unlink=True)
+            except Exception:
+                pass
+        raise OpError('E_NO_MESH_IMPORTED', 'the file produced no mesh object (%d object(s) were created and removed)' % len(created))
+
+    if _IMPORT_FORMATS[extension] == 'gltf' and up_axis != 'Y':
+        degrees, axis = (-90.0, 'X') if up_axis == 'Z' else (90.0, 'Y')
+        rotation = Matrix.Rotation(math.radians(degrees), 4, axis)
+        for item in meshes:
+            item.matrix_world = rotation @ item.matrix_world
+    if scale != 1.0:
+        resize = Matrix.Scale(scale, 4)
+        for item in meshes:
+            item.matrix_world = resize @ item.matrix_world
+
+    requested_name = args.get('name')
+    if isinstance(requested_name, str) and requested_name.strip():
+        primary = max(meshes, key=lambda item: item.dimensions[0] * item.dimensions[1] * item.dimensions[2])
+        primary.name = _name(requested_name, 'name')
+
+    bpy.context.view_layer.update()
+    lows = []
+    highs = []
+    for item in meshes:
+        low, high = _world_bounds(item)
+        lows.append(low)
+        highs.append(high)
+    low = [min(entry[i] for entry in lows) for i in range(3)]
+    high = [max(entry[i] for entry in highs) for i in range(3)]
+    dimensions = [round(high[i] - low[i], 6) for i in range(3)]
+    center = [round((high[i] + low[i]) / 2.0, 6) for i in range(3)]
+
+    result = {
+        'path': path,
+        'format': _IMPORT_FORMATS[extension],
+        'upAxis': up_axis,
+        'scale': scale,
+        'bytes': actual_bytes,
+        'sha256': _sha256_file(path),
+        'imported': sorted(item.name for item in meshes),
+        'meshCount': len(meshes),
+        'dimensions': dimensions,
+        'bounds': {'min': [round(v, 6) for v in low], 'max': [round(v, 6) for v in high], 'center': center},
+        'objectCount': _counts(),
+    }
+
+    # size/location are the caller's expectation, not a transform: compared and reported, never
+    # applied, so a mismatch cannot quietly reshape geometry the caller asked to import as-is.
+    checks = {}
+    if args.get('size') is not None:
+        want = _vec(args['size'], 'size', 3)
+        checks['size'] = {
+            'requested': [round(v, 6) for v in want],
+            'achieved': dimensions,
+            'ok': all(abs(dimensions[i] - want[i]) <= max(1e-4, abs(want[i]) * 1e-4) for i in range(3)),
+        }
+    if args.get('location') is not None:
+        want = _vec(args['location'], 'location', 3)
+        checks['location'] = {
+            'requested': [round(v, 6) for v in want],
+            'achieved': center,
+            'ok': all(abs(center[i] - want[i]) <= max(1e-4, abs(want[i]) * 1e-4) for i in range(3)),
+        }
+    if checks:
+        result['selfCheck'] = checks
+    return result
+
+
 OPS = {
     'mesh.primitive_add': _op_primitive_add,
     'object.transform': _op_transform,
@@ -411,6 +531,7 @@ OPS = {
     'data.purge_unused': _op_data_purge_unused,
     'file.checkpoint': _op_file_checkpoint,
     'file.stage_export': _op_file_stage_export,
+    'mesh.import': _op_mesh_import,
 }
 
 # Declared so a caller can ask what exists without guessing. This table is the single
@@ -504,6 +625,24 @@ OP_MANIFEST = {
 }
 
 OP_MANIFEST.update({
+    'mesh.import': {
+        'mutates': True,
+        'destructive': False,
+        'summary': 'import an external mesh (.glb/.gltf/.obj) into the managed scene',
+        'args': {
+            'path': {'type': 'string', 'required': True, 'note': 'absolute, or relative to the working directory; the file must exist'},
+            'name': {'type': 'string', 'optional': True, 'note': 'rename the largest imported mesh'},
+            'upAxis': {'type': 'enum', 'values': ['X', 'Y', 'Z'], 'default': 'Y', 'note': 'the up axis the FILE uses, declared by the caller; this op never guesses it'},
+            'scale': {'type': 'number', 'default': 1.0, 'range': '(0, 1000]', 'note': 'file space -> metres'},
+            'size': {'type': 'vec3', 'optional': True, 'note': 'expected final size; compared and reported, never applied'},
+            'location': {'type': 'vec3', 'optional': True, 'note': 'expected final centre; compared and reported, never applied'},
+            'bytes': {'type': 'integer', 'optional': True, 'note': 'declared file size; a mismatch refuses with E_BYTE_MISMATCH'},
+            'sha256': {'type': 'string', 'optional': True, 'note': 'declared digest; a mismatch refuses with E_BYTE_MISMATCH'},
+        },
+        'refuses': ['E_NO_SUCH_FILE', 'E_UNSUPPORTED_FORMAT', 'E_BYTE_MISMATCH', 'E_NO_MESH_IMPORTED'],
+        'note': 'A refusal leaves the scene untouched (non-mesh leftovers are removed). The glTF importer has no axis parameter, so a declared up axis other than Y is corrected by rotating the imported objects; OBJ passes the declared axis straight to its importer with a fixed -Y forward axis.',
+        'example': {'op': 'mesh.import', 'args': {'path': 'D:/work/out/model.glb', 'upAxis': 'Y', 'scale': 1.0}},
+    },
     'data.purge_unused': {
         'mutates': True,
         'destructive': True,
@@ -558,6 +697,10 @@ ERROR_CODES = {
     'E_NOT_A_MESH': 'the object has no mesh data to take a material',
     'E_LIMIT': 'a budget was exceeded (ops per batch, objects, materials)',
     'E_BAD_BATCH': 'the batch is empty or malformed',
+    'E_NO_SUCH_FILE': 'the file to import does not exist',
+    'E_UNSUPPORTED_FORMAT': 'only .glb, .gltf and .obj can be imported',
+    'E_BYTE_MISMATCH': 'the file does not match the size or digest the caller declared',
+    'E_NO_MESH_IMPORTED': 'the import produced no mesh object (nothing was left behind)',
 }
 
 
@@ -642,6 +785,33 @@ def _rounded3(value):
         return None
 
 
+def _world_bounds(item):
+    """Axis-aligned (min, max) corners of an object's own bounding box, in world space."""
+    corners = [item.matrix_world @ Vector(corner) for corner in item.bound_box]
+    low = [min(c[i] for c in corners) for i in range(3)]
+    high = [max(c[i] for c in corners) for i in range(3)]
+    return low, high
+
+
+def _world_dimensions(item):
+    """Final world-space size of the object, or None when it has no geometry to measure.
+
+    Measured on Blender 5.2.2: `Object.dimensions` is the LOCAL bounding box times the object
+    scale and it ignores rotation -- an imported object that carries the importer's own 90 degree
+    axis conversion reports its pre-rotation size, which is exactly the number a caller comparing
+    "is this the size I asked for" must not be given. The world AABB is the honest answer, and it
+    is deterministic here: bound_box comes from the mesh data, not from a depsgraph evaluation
+    that a background run can leave stale.
+    """
+    if item.type not in _GEOMETRY_TYPES:
+        return None
+    try:
+        low, high = _world_bounds(item)
+        return [round(high[i] - low[i], 6) for i in range(3)]
+    except Exception:
+        return None
+
+
 def describe_scene():
     scene = bpy.context.scene
     objects = []
@@ -653,7 +823,7 @@ def describe_scene():
             'scale': [round(v, 6) for v in item.scale],
             # Final world-space size (scale is already baked in). None for cameras, lights and
             # empties, which have no geometry to measure.
-            'dimensions': _rounded3(getattr(item, 'dimensions', None)) if item.type in _GEOMETRY_TYPES else None,
+            'dimensions': _world_dimensions(item),
             'rotation_euler': _rounded3(getattr(item, 'rotation_euler', None)),
         }
         if item.type == 'MESH' and item.data is not None:

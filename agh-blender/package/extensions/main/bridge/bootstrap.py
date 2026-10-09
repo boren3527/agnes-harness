@@ -369,6 +369,10 @@ class Handler(BaseHTTPRequestHandler):
             width = body.get('width')
             height = body.get('height')
             color_management = bool(body.get('colorManagement', True))
+            # 'all' (default) frames the scene bounds before reading the matrices; 'none' keeps
+            # the previous behaviour. Unknown values fall back to 'all' rather than failing the
+            # capture: an unframed image is the defect, not a preference.
+            frame = body.get('frame') if body.get('frame') in ('all', 'none') else 'all'
 
             def job():
                 return agh_capture.capture_viewport(
@@ -376,6 +380,7 @@ class Handler(BaseHTTPRequestHandler):
                     width=width,
                     height=height,
                     color_management=color_management,
+                    frame=frame,
                 )
 
             try:

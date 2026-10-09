@@ -26,6 +26,8 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs'
 import { createServer } from 'node:net'
@@ -385,6 +387,50 @@ export const runtime = {
       return { status: response.status, ok: response.ok === true, json, text: text.slice(0, 400) }
     }
 
+    // Run directories accumulate one per start, and nothing ever removed them (measured: 11 stale
+    // directories, all with dead pids, in one workspace). Pruning happens before the new directory
+    // is created, so a workspace cannot grow without bound. Two things are never removed: the
+    // directory about to be used, and any directory whose pid is still alive -- deleting a live
+    // instance's records would strand it the same way a plugin reload does.
+    function pruneInstances(root, keepId, keepCount) {
+      const removed = []
+      let names = []
+      try {
+        names = readdirSync(root)
+      } catch {
+        return { kept: 0, removed, available: 0 }
+      }
+      const entries = []
+      for (const name of names) {
+        if (name === keepId) continue
+        const full = join(root, name)
+        const record = readJsonFile(join(full, 'instance.json'))
+        let stamp = 0
+        try {
+          stamp = statSync(full).mtimeMs
+        } catch {
+          stamp = 0
+        }
+        entries.push({ name, full, record, stamp })
+      }
+      entries.sort((a, b) => b.stamp - a.stamp)
+      const survivors = []
+      for (const entry of entries) {
+        const alive = entry.record ? pidAlive(Number(entry.record.pid)) : false
+        if (alive || survivors.length < keepCount) {
+          survivors.push(entry)
+          continue
+        }
+        try {
+          rmSync(entry.full, { recursive: true, force: true })
+          removed.push(entry.name)
+        } catch {
+          survivors.push(entry)
+        }
+      }
+      return { kept: survivors.length, removed, available: entries.length }
+    }
+
     async function runStart(tctx, args = {}) {
       const workspaceRoot = resolve(tctx?.cwd ?? process.cwd())
       const dir = join(workspaceRoot, MANAGED_DIR_NAME)
@@ -449,6 +495,10 @@ export const runtime = {
 
       const instanceId = randomUUID()
       const instanceDir = join(dir, 'instances', instanceId)
+      const pruned = pruneInstances(join(dir, 'instances'), instanceId, 20)
+      if (pruned.removed.length > 0) {
+        report.steps.push({ step: 'prune', kept: pruned.kept, removed: pruned.removed })
+      }
       mkdirSync(instanceDir, { recursive: true })
       const markerPath = join(dir, 'marker.json')
       if (!existsSync(markerPath)) {
@@ -943,17 +993,70 @@ export const runtime = {
           record.instanceDir,
         )
       } catch (error) {
+        // The bridge could not be reached. That usually means the process has ALREADY exited
+        // (measured twice: a tiny elapsedMs is the tell), and reporting ok:false then is wrong --
+        // the instance is, in fact, no longer running. So fall back to process identity, not just
+        // PID liveness: "pid 1234 is alive" may be an unrelated process that reused the number.
+        const transportElapsedMs = Date.now() - startedAt
+        let fallback = null
+        try {
+          const alive = pidAlive(record.pid)
+          if (!alive) {
+            fallback = { concluded: 'process already gone', alive: false }
+          } else {
+            const identity = await queryProcess(tctx, record.pid)
+            const expected = record.processIdentity ?? null
+            if (identity?.ok && identity?.gone === true) {
+              fallback = { concluded: 'process already gone', alive: true, gone: true }
+            } else if (
+              identity?.ok &&
+              expected?.ticksRaw != null &&
+              String(identity.ticksRaw) === String(expected.ticksRaw) &&
+              identity.imageName === expected.imageName
+            ) {
+              // Same process, still running, bridge unreachable: NOT a success, and do not
+              // escalate to a kill. Say what is true.
+              fallback = {
+                concluded: 'process is still running but the bridge is unreachable',
+                alive: true,
+                identity: { observed: identity.imageName, ticks: identity.ticksRaw },
+              }
+            } else {
+              fallback = {
+                concluded: 'pid no longer belongs to the recorded instance',
+                alive: true,
+                identity: identity?.ok
+                  ? { observed: `${identity.imageName}|${identity.ticksRaw}`, expected: expected ? `${expected.imageName}|${expected.ticksRaw}` : null }
+                  : null,
+                probeError: identity?.error ?? null,
+              }
+            }
+          }
+        } catch (probeError) {
+          fallback = { concluded: 'fallback probe failed', error: String(probeError?.message ?? probeError) }
+        }
+        const gone = fallback?.concluded === 'process already gone'
+        if (gone) instances.delete(key)
         return finishStop(
           {
             tool: 'agh_blender_stop',
             at: new Date().toISOString(),
             mode: 'token',
             pid: record.pid,
+            instanceId: record.instanceId ?? null,
             stage: 'close',
-            ok: false,
-            blockers: [`transport: ${error?.message ?? error}`],
+            // Confirmed by identity, not by the bridge: the bridge is what went missing.
+            ok: gone,
+            requested: true,
+            confirmed: gone,
+            bridge: { status: null, error: `transport: ${error?.message ?? error}` },
+            transportFailed: true,
+            pidFallback: fallback,
+            note: gone
+              ? 'the bridge was unreachable, but the recorded process is confirmed gone (pid + creation time); nothing left running'
+              : 'the bridge was unreachable and the process could NOT be confirmed gone; the instance was kept so a later call can retry',
             forceKilled: false,
-            elapsedMs: Date.now() - startedAt,
+            elapsedMs: transportElapsedMs,
           },
           record.instanceDir,
         )
@@ -973,12 +1076,15 @@ export const runtime = {
       const width = Number.isInteger(args?.width) ? args.width : null
       const height = Number.isInteger(args?.height) ? args.height : null
       const colorManagement = args?.colorManagement === undefined ? true : Boolean(args.colorManagement)
+      // Default 'all': framing on the scene bounds is what makes one capture comparable with
+      // another. 'none' keeps the old behaviour (whatever the region was already looking at).
+      const frame = args?.frame === 'none' ? 'none' : 'all'
       let response = null
       try {
         response = await fetchJson(tctx, `http://127.0.0.1:${record.port}/capture`, {
           method: 'POST',
           headers: { 'X-AGH-Token': record.token, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ width, height, colorManagement }),
+          body: JSON.stringify({ width, height, colorManagement, frame }),
         })
       } catch (error) {
         report.blockers.push(`bridge capture request failed: ${error?.message ?? error}`)
@@ -1016,6 +1122,7 @@ export const runtime = {
         rowOrder: shot.rowOrder,
         origin: shot.origin,
         stats: shot.stats,
+        framing: shot.framing ?? null,
         diskBytes: bytes.length,
         shaMatchesDisk: diskSha === shot.sha256,
         sessionKey: tctx?.session?.key ?? null,
@@ -1141,6 +1248,12 @@ export const runtime = {
           width: { type: 'integer', minimum: 16, maximum: 4096 },
           height: { type: 'integer', minimum: 16, maximum: 4096 },
           colorManagement: { type: 'boolean' },
+          frame: {
+            type: 'string',
+            enum: ['all', 'none'],
+            description:
+              '默认 all：渲染前先取景到场景包围盒（固定视角、按包围球算出距离），使两张 capture 之间有可比性；none 保持旧行为（region 看向哪里就渲哪里）。',
+          },
         },
         required: [],
         additionalProperties: false,
