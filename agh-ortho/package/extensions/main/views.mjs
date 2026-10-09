@@ -208,6 +208,137 @@ export function residual(paramExtents, views, boxes) {
 }
 
 // ---------------------------------------------------------------------------
+// 一张图纸（③ 便宜的中间表示）
+//
+// 为什么要有"整张"而不只是六张分图：复核必须发生在**贵的那一步之前**，而复核的对象
+// 应该是**一份**东西 —— 一张图纸。六张分图放在一起时，人（和模型）看到的是六个数。
+// 按 `sheetPlacement` 排到一张图上之后，"第三角法的左视图在左、俯视图在上"这件事就
+// **在图上是可见的**：排错了会被一眼看出来，而分图永远看不出来。
+//
+// 同时它把 `sheetPlacement` 从"算出来只打印 col/row 文本"变成真正被使用 —— 之前那段
+// 是"正确但没人用"的代码，而正确但没人用的东西迟早会和现实脱钩。
+// ---------------------------------------------------------------------------
+const SHEET = { cellWidth: 224, cellHeight: 156, margin: 20, gap: 10, pad: 26, header: 60, footer: 28 }
+
+export const SHEET_NOTE =
+  'one sheet, six views, ONE shared scale (scale is printed on it). Layout follows sheetPlacement: first angle puts the top view below and the left view to the right; third angle mirrors both. Read the sheet as the thing to review before spending the expensive step — it is a review object, not a measurement.'
+
+/**
+ * 便宜的中间表示要"复核什么"。写在这里而不是散在提示词里：这四条是**图纸本身能回答**的问题，
+ * 图纸答不了的问题（照片里那件衣服到底是不是连帽）不该混进来，否则复核清单会变成许愿清单。
+ */
+export const SHEET_REVIEW_ITEMS = [
+  'the six views must agree with each other: numeric proves they agree arithmetically (residual within tolerance), and a wrong sheet layout (first vs third angle) is visible on the sheet even when numeric passes',
+  'all six views share ONE scale — printed in the header. A view drawn at its own scale is a drawing error, not a design choice',
+  'compare the front view outline against your reading of the photograph; photo_check is where that reading becomes a number instead of an opinion',
+  'the sheet cannot answer "is this the right shape" — mass count, proportion and the first view are what a human can judge here, and that judgement must happen BEFORE apply_ops / the readback',
+]
+
+/**
+ * 六视图排成一张图纸。比例尺**全图唯一**（逐视图自适应缩放在工程图上是错的）。
+ * 返回 { svg, scale, width, height, layout } —— scale/width/height 一并给出，因为
+ * "这一张图用了什么比例尺"本身就是必须能被读者自己解释的数字。
+ */
+export function renderSheet(views, placement, options = {}) {
+  const list = Array.isArray(views) ? views : []
+  const cell = {
+    width: options.cellWidth ?? SHEET.cellWidth,
+    height: options.cellHeight ?? SHEET.cellHeight,
+    margin: SHEET.margin,
+    gap: options.gap ?? SHEET.gap,
+  }
+  const cells = list.map((view) => ({
+    view,
+    col: placement?.[view.id]?.col ?? 0,
+    row: placement?.[view.id]?.row ?? 0,
+  }))
+  const minCol = Math.min(0, ...cells.map((c) => c.col))
+  const maxCol = Math.max(0, ...cells.map((c) => c.col))
+  const minRow = Math.min(0, ...cells.map((c) => c.row))
+  const maxRow = Math.max(0, ...cells.map((c) => c.row))
+  const nCols = maxCol - minCol + 1
+  const nRows = maxRow - minRow + 1
+  const width = SHEET.pad * 2 + nCols * cell.width + (nCols - 1) * cell.gap
+  const height = SHEET.header + SHEET.pad + nRows * cell.height + (nRows - 1) * cell.gap + SHEET.footer
+
+  const innerW = cell.width - 2 * cell.margin
+  const innerH = cell.height - 2 * cell.margin
+  const spans = list
+    .filter((view) => view.bbox)
+    .map((view) => ({ u: view.bbox.u[1] - view.bbox.u[0] || 1, v: view.bbox.v[1] - view.bbox.v[0] || 1 }))
+  const maxU = spans.length ? Math.max(...spans.map((s) => s.u)) : 1
+  const maxV = spans.length ? Math.max(...spans.map((s) => s.v)) : 1
+  const scale = options.scale ?? Math.min(innerW / maxU, innerH / maxV)
+
+  const convention = placement?.convention ?? 'first_angle'
+  const parts = [
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
+    `<rect width="${width}" height="${height}" fill="#ffffff"/>`,
+    `<g font-family="monospace" font-size="11" fill="#444">`,
+    `<text x="${SHEET.pad}" y="20">${esc(options.title ?? 'orthographic six-view sheet')} · ${esc(convention)} · projection ${esc(options.projection ?? 'first_angle')}</text>`,
+    `<text x="${SHEET.pad}" y="34">one scale for the whole sheet: ${scale.toFixed(4)} (px per metre) · unit m · ${list.length} views</text>`,
+    `<text x="${SHEET.pad}" y="48">${esc(SHEET_NOTE.length > 150 ? SHEET_NOTE.slice(0, 150) + '…' : SHEET_NOTE)}</text>`,
+    `</g>`,
+  ]
+
+  for (const { view, col, row } of cells) {
+    const x0 = SHEET.pad + (col - minCol) * (cell.width + cell.gap)
+    const y0 = SHEET.header + SHEET.pad + (row - minRow) * (cell.height + cell.gap)
+    const isFront = view.id === 'front'
+    parts.push(
+      `<rect x="${x0}" y="${y0}" width="${cell.width}" height="${cell.height}" fill="none" stroke="${isFront ? '#285aa0' : '#bbbbbb'}" stroke-width="${isFront ? 1.6 : 0.8}"/>`,
+      `<text x="${x0 + 6}" y="${y0 + 14}" font-family="monospace" font-size="11" fill="#285aa0">${esc(view.label)}</text>`,
+      `<text x="${x0 + 6}" y="${y0 + 26}" font-family="monospace" font-size="9" fill="#888">col ${col} row ${row} · look (${view.look.join(',')}) · u (${view.u.join(',')}) · v (${view.v.join(',')})</text>`,
+    )
+    const box = view.bbox
+    if (!box) {
+      parts.push(`<text x="${x0 + 6}" y="${y0 + cell.height - 8}" font-family="monospace" font-size="10" fill="#b03030">no observable extent</text>`)
+      continue
+    }
+    const spanU = box.u[1] - box.u[0] || 1
+    const spanV = box.v[1] - box.v[0] || 1
+    const offX = x0 + cell.margin + (innerW - spanU * scale) / 2
+    const offY = y0 + 30 + (innerH - 30 - spanV * scale) / 2
+    const toX = (u) => offX + (u - box.u[0]) * scale
+    const toY = (v) => offY + (box.v[1] - v) * scale
+    for (const [index, rect] of view.rects.entries()) {
+      const w = Math.max(1, (rect.u[1] - rect.u[0]) * scale)
+      const h = Math.max(1, (rect.v[1] - rect.v[0]) * scale)
+      parts.push(
+        `<rect x="${toX(rect.u[0]).toFixed(2)}" y="${toY(rect.v[1]).toFixed(2)}" width="${w.toFixed(2)}" height="${h.toFixed(2)}" fill="rgba(40,90,160,0.10)" stroke="#285aa0" stroke-width="1"/>`,
+        `<text x="${toX(rect.u[0]).toFixed(2)}" y="${(toY(rect.v[1]) - 2).toFixed(2)}" font-family="monospace" font-size="8" fill="#285aa0">${esc(view.names[index])}</text>`,
+      )
+    }
+    parts.push(
+      `<rect x="${toX(box.u[0]).toFixed(2)}" y="${toY(box.v[1]).toFixed(2)}" width="${(spanU * scale).toFixed(2)}" height="${(spanV * scale).toFixed(2)}" fill="none" stroke="#b03030" stroke-width="0.7" stroke-dasharray="3 2"/>`,
+      `<text x="${x0 + 6}" y="${y0 + cell.height - 8}" font-family="monospace" font-size="9" fill="#b03030">extent u ${(box.u[1] - box.u[0]).toFixed(3)} · v ${(box.v[1] - box.v[0]).toFixed(3)} m</text>`,
+    )
+  }
+
+  parts.push(
+    `<text x="${SHEET.pad}" y="${height - 10}" font-family="monospace" font-size="10" fill="#b03030">shape/proportion agreement with the photograph is NOT checked here — that has to be judged by eye (or by photo_check), before any expensive step.</text>`,
+    '</svg>',
+  )
+  return {
+    svg: parts.join('\n'),
+    scale,
+    width,
+    height,
+    cells: cells.map(({ view, col, row }) => ({ view: view.id, label: view.label, col, row })),
+    layout: {
+      convention,
+      col_min: minCol,
+      col_max: maxCol,
+      row_min: minRow,
+      row_max: maxRow,
+      cell_width: cell.width,
+      cell_height: cell.height,
+      gap: cell.gap,
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
 // SVG
 // ---------------------------------------------------------------------------
 const SVG_W = 520

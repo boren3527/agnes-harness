@@ -25,7 +25,18 @@ import {
   planRetention,
   writeRun,
 } from './run.mjs'
-import { VIEW_CONVENTION, commonScale, numericOutline, residual, sheetPlacement, sixViewRects, svgFor } from './views.mjs'
+import {
+  SHEET_NOTE,
+  SHEET_REVIEW_ITEMS,
+  VIEW_CONVENTION,
+  commonScale,
+  numericOutline,
+  renderSheet,
+  residual,
+  sheetPlacement,
+  sixViewRects,
+  svgFor,
+} from './views.mjs'
 
 const EMITTER_VERSION = '0.1.0'
 
@@ -171,6 +182,37 @@ const REPEAT_LEAF = {
   additionalProperties: false,
 }
 
+/**
+ * 生成网格的**来源**（`source`）—— 网格不可复算，所以这几项必须记全。
+ *
+ * **必须声明在 ASSEMBLY_ITEM 之前** —— 后者在模块求值时就要引用它（const 有 TDZ，
+ * 放后面会 ReferenceError）。这条已经咬过两次（另一次是 PHOTO_CHECK）。
+ *
+ * 为什么这条和参数化模型完全不同：参数化模型**可以复算** —— 实测同样的参数产出的 ops 与六视图
+ * **逐字节相同**。而一个生成的网格，只有**同一个模型、同一份权重、同一个 seed** 才可能重现。
+ * **不记这几项，产物就是一个永远导不回来的孤儿。**
+ *
+ * 两个轴必须分清（历史上混过一次 acquisition/provenance，教训在 notes §9.9）：
+ *   part   —— 这东西**是什么**（body / clothing / hair / …）
+ *   source —— 它**怎么来的**（parametric / generated_mesh / …）   ← 本表
+ *
+ * `kind` 必填；`model` / `seed` 不是必填，但**声明成 generated_mesh 却缺它们会被 fit 报出来**
+ * —— 与"声明了 photo_check 就要对得上"同一条纪律：**你声明了什么，就要能自证什么。**
+ */
+const MESH_SOURCE = {
+  type: 'object',
+  properties: {
+    kind: { type: 'string' },
+    model: { type: 'string' },
+    weights: { type: 'string' },
+    seed: { type: 'integer' },
+    input_image_sha256: { type: 'string' },
+    note: { type: 'string' },
+  },
+  required: ['kind'],
+  additionalProperties: false,
+}
+
 const ASSEMBLY_ITEM = {
   type: 'object',
   properties: {
@@ -184,6 +226,18 @@ const ASSEMBLY_ITEM = {
     pitch: VALUE_LEAF,
     at: VALUE_LEAF,
     repeat: REPEAT_LEAF,
+    // 部件分类 —— **这是"这东西是什么"，不是"它怎么做的"**（后者是 provenance，见描述符）。
+    // 单独一张共享词汇表的理由：网格生成器（StdGEN 那种）按 body/clothes/hair **语义分解**，
+    // 而我们的 assembly 本来就是**带名字的部件** —— 两边撞到了同一个答案，但名字不同。
+    // 有了共同分类，两条路的产物才能在**部件级**互相比对与记账；否则只比得了总数，比不了"哪一个"。
+    // **可选**（缺了只给 warning）：已有模型不带它，不该因此失效。
+    part: { type: 'string' },
+    // 这东西**怎么来的**（与 `part` 是两个轴）：这轮只有 `mesh` 这一种生成物用得上。
+    // 声明成 generated_mesh 的部件**不能进受管理场景**（下游没有导入 op），所以它会走
+    // `mesh` 这条 feature 落到 unsupported —— 但**来源信息必须先被记下来**，否则将来无从追溯。
+    source: MESH_SOURCE,
+    // 生成物在磁盘上的位置（可选）。落进描述符时同样带 sha256。
+    path: { type: 'string' },
   },
   required: ['id', 'feature'],
   additionalProperties: false,
@@ -673,6 +727,16 @@ const LOWERING = {
       'a dome is a hemisphere, but the downstream has only a full uv_sphere: the sphere is centred on the base plane, so its lower half is buried and its upper half gives the dome. The object itself therefore measures (dia, dia, dia), not the dome height.',
   },
   spire: { status: 'exact', kind: 'cone', build: buildSpire },
+  // 外部生成的网格（StdGEN / CharacterGen 那类）。**下游白名单里没有导入 op** ——
+  // 所以它今天进不了受管理场景，但**声明出来**而不是丢掉，有两个理由：
+  //   ① 它的来源（模型/权重/seed）必须随产物走 —— 网格**不可复算**，不记就永远导不回来；
+  //   ② 报告要如实说"这一类部件的**形状三档都验不了**"（numeric / photo_check 不适用，
+  //      读回只验得到存在 / 位置 / 尺寸）。
+  mesh: {
+    status: 'unsupported',
+    reasonCode: 'no_downstream_op',
+    reason: 'no mesh import op downstream (mesh.import{path} is on DOWNSTREAM-REQUEST); a generated mesh can only be declared and recorded today',
+  },
   'roof.gable': {
     status: 'unsupported',
     reasonCode: 'no_downstream_op',
@@ -923,6 +987,20 @@ async function assembleArtifacts(args, createdAt, tctx) {
   }
 
   const files = []
+  // ③ 图纸先落：这是复核者该打开的那个文件。六张分图仍在，但"一张图纸"才是 review 对象。
+  const sheet = renderSheet(views, placement, { projection: args.projection })
+  files.push({
+    name: 'sheet.svg',
+    text: sheet.svg,
+    preview: `六视图图纸（${sheet.layout.convention}）：${views.length} 张视图排在一张图纸上、全图共用比例尺 ${sheet.scale.toFixed(4)} px/m；格位 ${sheet.cells.map((c) => `${c.view}@col${c.col}/row${c.row}`).join(' ')}；这是"贵的那一步之前"的单一复核对象`,
+    meta: {
+      artifact: 'six_view_sheet',
+      convention: sheet.layout.convention,
+      shared_scale: sheet.scale,
+      cells: sheet.cells,
+      projection: args.projection,
+    },
+  })
   for (const view of views) {
     const sheet = placement[view.id] ?? { col: 0, row: 0 }
     const uSpan = view.bbox ? view.bbox.u[1] - view.bbox.u[0] : 0
@@ -1005,6 +1083,25 @@ async function assembleArtifacts(args, createdAt, tctx) {
       object_count: fromParams.length,
       unit: args.unit,
       projection: args.projection,
+      // ③ 交付物里必须有"图纸"这一项：复核对象是它，不是六张分图。
+      sheet: {
+        artifact: 'sheet.svg',
+        convention: sheet.layout.convention,
+        shared_scale: sheet.scale,
+        width: sheet.width,
+        height: sheet.height,
+        cells: sheet.cells,
+      },
+      // ③ 复核对象：整张图纸（含全图比例尺与格位），消费者不必自己拼六张分图。
+      sheet: {
+        artifact: 'sheet.svg',
+        convention: sheet.layout.convention,
+        shared_scale: sheet.scale,
+        width: sheet.width,
+        height: sheet.height,
+        cells: sheet.cells,
+        review_before_apply_ops: SHEET_REVIEW_ITEMS,
+      },
       capability_source: emission.capability_source,
       target_capability_set: emission.target_capability_set,
       assumptions: Array.isArray(args.assumptions) ? args.assumptions : [],
@@ -1285,7 +1382,144 @@ function photoCheckFindings(params, outline) {
 }
 
 /**
- * 包围盒重叠：抓"两个物体几乎占同一空间"这类建模手滑。是 warning 不是 blocking ——
+ * 共享部件词汇表 —— 跨"参数化"与"生成网格"两条路对齐用的。
+ *
+ * 为什么需要它：StdGEN 那类项目的核心贡献是**语义分解**（身体/衣服/头发分开），而我们的
+ * `assembly` 本来就是**带名字的部件**。两边在"命名部件"上撞到了同一个答案，但**名字不同** ——
+ * 没有共同分类，就只能比"总数"，比不了"哪一个"。
+ *
+ * 两个轴必须分清（历史上混过一次 acquisition/provenance，教训在 notes §9.9）：
+ *   part   —— 这东西**是什么**（body / clothing / hair / …）   ← 本表
+ *   source —— 它**怎么来的**（参数化 / 生成的网格）             ← 描述符的 provenance
+ */
+const PART_TAXONOMY = {
+  body: '人物/生物的本体部件：头、躯干、四肢、五官',
+  clothing: '穿在身上的：衣、裤、鞋、帽',
+  hair: '毛发',
+  prop: '手持或随场景的小物：棒、球、器具',
+  structure: '建筑构件：墙、柱、板、屋面、楼板',
+  furniture: '家具',
+  ground: '地面/基座/场地',
+}
+
+/**
+ * 部件清点：哪些部件存在、各自几个对象、以及**缺分类的**。
+ *
+ * 缺 `part` 只给 **warning** 不给 blocking —— 已有模型（photo-round-1b/2）都不带这个字段，
+ * 不该因此失效。但报告必须把它列出来，否则这张表永远不会被用上。
+ */
+function partCensus(params) {
+  const items = Array.isArray(params.assembly) ? params.assembly : []
+  const byPart = {}
+  const undeclared = []
+  const unknown = new Set()
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue
+    const id = typeof item.id === 'string' ? item.id : null
+    const part = typeof item.part === 'string' ? item.part : null
+    if (part === null) {
+      if (id) undeclared.push(id)
+      continue
+    }
+    if (!Object.hasOwn(PART_TAXONOMY, part)) unknown.add(part)
+    const bucket = byPart[part] ?? (byPart[part] = { count: 0, ids: [] })
+    bucket.count += 1
+    if (id) bucket.ids.push(id)
+  }
+  return {
+    taxonomy: Object.keys(PART_TAXONOMY),
+    declared_parts: Object.keys(byPart),
+    by_part: byPart,
+    undeclared,
+    unknown_values: [...unknown],
+    note: 'part says what a thing IS; how it was made (parametric vs generated mesh) is a separate axis, recorded as provenance.',
+  }
+}
+
+/**
+ * 规范摆放 —— **让同一模型的两次迭代可以直接 diff**。
+ *
+ * 借的是 CharacterGen "规范化"的思路，但用在另一半上：它统一的是**姿势**，我们缺的是**摆放**。
+ * 我们已经有 `frame`（轴对了），可整体可能偏在一边 —— 实测 `photo-round-2` 的水平包络是
+ * x[-0.33, 0.38]，并没有居中。不居中的话，两次改动里的整体位移会混进**每个对象**的坐标，
+ * 看 diff 全是噪音。
+ *
+ * 约定：**底面贴 z=0、水平居中**。容差按模型自身尺寸取**相对值**（"判据精度不能超过输入精度"
+ * 那条同样适用）。**只报不挡** —— 这是"便于比较"的约定，不是几何正确性。
+ */
+function placementReport(boxes) {
+  if (!Array.isArray(boxes) || boxes.length === 0) {
+    return { available: false, convention: 'envelope bottom on z=0, centred on x and y', note: 'no objects to measure' }
+  }
+  const min = [0, 1, 2].map((k) => Math.min(...boxes.map((b) => b.min[k])))
+  const max = [0, 1, 2].map((k) => Math.max(...boxes.map((b) => b.max[k])))
+  const size = [0, 1, 2].map((k) => max[k] - min[k])
+  const tol = Math.max(1e-9, 0.01 * Math.max(...size))
+  const centre = [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2]
+  return {
+    available: true,
+    convention: 'envelope bottom on z=0, centred on x and y, so two versions of the same model diff cleanly',
+    envelope_min: min.map(round6),
+    envelope_max: max.map(round6),
+    envelope_size: size.map(round6),
+    base_z: round6(min[2]),
+    horizontal_centre: centre.map(round6),
+    tolerance: round6(tol),
+    on_ground: Math.abs(min[2]) <= tol,
+    centred: Math.abs(centre[0]) <= tol && Math.abs(centre[1]) <= tol,
+  }
+}
+
+/**
+ * 生成物（`source.kind` 存在）的清单与来源。
+ *
+ * 这一段存在的唯一理由是**诚实**：这一类部件的**形状，我们三档校验一个都验不了** ——
+ * `numeric` 不适用（没有参数）、`photo_check` 不适用、读回只管存在/位置/尺寸。
+ * 所以报告必须把"验不了什么"写在明处，**而不是让一个绿勾暗示它被验过了**。
+ *
+ * 顺带把"能不能复算"标出来：参数化产物可以（实测同参数 → ops 与六视图逐字节相同），
+ * 生成物不可以（要 模型 + 权重 + seed）。
+ */
+function generatedReport(params) {
+  const items = Array.isArray(params.assembly) ? params.assembly : []
+  const declared = []
+  for (const item of items) {
+    if (!item || typeof item !== 'object' || !item.source) continue
+    const kind = typeof item.source.kind === 'string' ? item.source.kind : null
+    const missing = []
+    if (kind === 'generated_mesh') {
+      if (typeof item.source.model !== 'string') missing.push('model')
+      if (typeof item.source.seed !== 'number') missing.push('seed')
+      if (typeof item.source.input_image_sha256 !== 'string') missing.push('input_image_sha256')
+    }
+    declared.push({
+      id: item.id ?? null,
+      part: item.part ?? null,
+      source_kind: kind,
+      reproducible: kind === null || kind === 'parametric',
+      provenance: {
+        model: item.source.model ?? null,
+        weights: item.source.weights ?? null,
+        seed: item.source.seed ?? null,
+        input_image_sha256: item.source.input_image_sha256 ?? null,
+      },
+      missing_for_reproducibility: missing,
+      path: item.path ?? null,
+    })
+  }
+  const nonReproducible = declared.filter((item) => !item.reproducible)
+  return {
+    declared,
+    // 这句话必须**描述实际声明了什么**，不能一律套生成物的口径：
+    // 只有参数化来源时，说"形状验不了"是假的（numeric 就验它）。
+    note:
+      nonReproducible.length === 0
+        ? 'every declared source is parametric: such a part is reproducible from these parameters and its shape IS covered by numeric.'
+        : 'a non-parametric source is NOT reproducible from these parameters: re-deriving it needs the same model, weights and seed. And its SHAPE cannot be verified by any tier here — numeric and photo_check do not apply, and the readback covers only existence, placement and dimensions.',
+  }
+}
+
+/**
  * 墙嵌进楼板是合理的。
  *
  * **两个阈值，且都必须写进载荷**：>0.5 才列出来，>0.9 才标 almost_hidden。
@@ -1352,7 +1586,7 @@ function overlapFindings(boxes) {
  * 特别地：内部不一致类的 hint 会明确写"**不要靠调参数去凑**"。那说明是代码的 bug；
  * 调参数只会为了迎合一个出错的现场，把本来正确的模型改歪。
  */
-function reviseHints(params, emission, caps, { checked, aligned, fromParams, outline, overlaps }) {
+function reviseHints(params, emission, caps, { checked, aligned, fromParams, outline, overlaps, boxes }) {
   const hints = []
   const add = (severity, where, problem, suggestion, evidence) => {
     const hint = { severity, where, problem, suggestion }
@@ -1475,6 +1709,61 @@ function reviseHints(params, emission, caps, { checked, aligned, fromParams, out
     )
   }
 
+  // ① 共享部件词汇表：缺分类只 warning，但必须被列出来 —— 否则这张表永远不会被用上。
+  const census = partCensus(params)
+  if (census.undeclared.length > 0) {
+    add(
+      'warning',
+      'assembly',
+      `${census.undeclared.length} item(s) declare no part`,
+      `adding part: <one of ${census.taxonomy.join(' / ')}> to each item lets this model be compared at the part level against a generated mesh's decomposition (StdGEN-style body/clothes/hair)`,
+      census.undeclared.join(','),
+    )
+  }
+  for (const value of census.unknown_values) {
+    add(
+      'warning',
+      'assembly',
+      `part value "${value}" is not in the shared vocabulary`,
+      `use one of ${census.taxonomy.join(' / ')}, or add "${value}" to the vocabulary deliberately — an unshared name cannot be aligned across the two paths`,
+    )
+  }
+
+  // ④ 规范摆放：不居中/不落地会让"两次迭代的 diff"混进整体位移，全是噪音。只报不挡。
+  const place = placementReport(boxes)
+  if (place.available && (!place.on_ground || !place.centred)) {
+    add(
+      'warning',
+      'placement',
+      `${place.on_ground ? '' : `the model does not sit on z=0 (base at ${place.base_z}) `}${place.centred ? '' : `and is not centred (horizontal centre at ${place.horizontal_centre.join(', ')}, tolerance ${place.tolerance})`}`.trim(),
+      'this is a comparability convention, not a correctness one: centring and grounding the model makes two versions of it diff cleanly instead of smearing the offset across every object',
+    )
+  }
+
+  // ② 生成物：来源要记全（不可复算），而且**要明说形状验不了**
+  //
+  // 只有**不可复算**的来源才吃这条警告。`source.kind === 'parametric'` 是这套参数自己
+  // 算出来的，两个可复算性都成立（同参数 → ops 与六视图逐字节相同，且形状由 numeric 覆盖），
+  // 早期的实现无差别地对每个声明项都发"形状验不了"，等于把一个**不成立的**警告
+  // 盖在一个**成立**的部件上 —— 又一次"把会变的事实写成常量"。仍然会出现在 `generated` 载荷里。
+  const generated = generatedReport(params)
+  for (const g of generated.declared) {
+    if (g.reproducible) continue
+    const missingNote = g.missing_for_reproducibility.length > 0 ? ` — and it records no ${g.missing_for_reproducibility.join(' / ')}` : ''
+    const kindNote =
+      g.source_kind === 'generated_mesh'
+        ? 'a generated mesh is not reproducible from these parameters'
+        : `a ${g.source_kind} source is not reproducible from these parameters`
+    add(
+      'warning',
+      String(g.id),
+      `"${g.id}" is declared as ${g.source_kind}: it will not enter the scene (no import op downstream), its SHAPE cannot be verified by any tier here, and ${kindNote}${missingNote}`,
+      g.missing_for_reproducibility.length > 0
+        ? 'record model / seed / input_image_sha256 in source, or the artifact is a one-off you can never regenerate'
+        : 'keep the source block with the artifact; shape has to be judged visually, not by these tiers',
+    )
+  }
+
   const blocking = hints.filter((h) => h.severity === 'blocking').length
   return { hints, blocking, warning: hints.length - blocking }
 }
@@ -1573,7 +1862,7 @@ export const runtime = {
     registerTool({
       name: 'agh_ortho_views',
       description:
-        '只读、纯函数、**不落盘**。把参数 JSON 渲染成正交六视图的 SVG（主视图/俯视图/左视图/右视图/仰视图/后视图），并给出第一角法或第三角法的图面排布。下游没有相机 op，严格正交六视图下游给不了，所以这里自己算正交投影 —— 零依赖。SVG 是文本，因此**模型可以直接读视图几何**：工具产出的图片像素进不了模型，文本可以。M1 只返回文本；"落盘 + 描述符（run-uuid / report.json / 幂等 / 清理）"归 agh_ortho_save。',
+        '只读、纯函数、**不落盘**。把参数 JSON 渲染成正交六视图的 SVG（主视图/俯视图/左视图/右视图/仰视图/后视图），并给出第一角法或第三角法的图面排布。**另外给出整张图纸（sheet_svg）**：六个视图按图面排布放到一张图上、全图共用同一个比例尺 —— 这是"贵的那一步之前"的单一复核对象。下游没有相机 op，严格正交六视图下游给不了，所以这里自己算正交投影 —— 零依赖。SVG 是文本，因此**模型可以直接读视图几何**：工具产出的图片像素进不了模型，文本可以。M1 只返回文本；"落盘 + 描述符（run-uuid / report.json / 幂等 / 清理）"归 agh_ortho_save。',
       parameters: EMIT_OPS_INPUT,
       meta: READ_ONLY_META,
       async execute(args, tctx) {
@@ -1602,6 +1891,7 @@ export const runtime = {
           convention: VIEW_CONVENTION,
           projection: args.projection,
           sheet: placement,
+          sheet_svg: renderSheet(views, placement, { projection: args.projection }),
           target_capability_set: emission.target_capability_set,
           capability_source: emission.capability_source,
           object_count: boxes.length,
@@ -1621,12 +1911,19 @@ export const runtime = {
                   blockers: payload.blockers,
                   projection: payload.projection,
                   sheet: payload.sheet,
+                  sheet_svg: {
+                    convention: payload.sheet_svg.layout.convention,
+                    shared_scale: payload.sheet_svg.scale,
+                    width: payload.sheet_svg.width,
+                    height: payload.sheet_svg.height,
+                    cells: payload.sheet_svg.cells,
+                  },
                   target_capability_set: payload.target_capability_set,
                   object_count: payload.object_count,
                   views: svgs.map((s) => ({ view: s.view, sheet: s.sheet, bytes: s.bytes, sha256: s.sha256 })),
                   unlowered: payload.unlowered,
                   unresolved: payload.unresolved,
-                  note: 'six SVG documents are in the structured payload, one per view',
+                  note: 'six SVG documents are in the structured payload, one per view, PLUS sheet_svg (the whole six-view drawing on one sheet at one shared scale) — the sheet is the thing to review before the expensive step',
                 },
                 null,
                 2,
@@ -1740,7 +2037,7 @@ export const runtime = {
       // 闭环里"便宜的那一半"的入口。它把一份候选参数变成**可审计的结论 + 该改哪里**，
       // 一次调用给全，让一轮迭代只付一次嵌套协商的代价。只读、不落盘 —— 落盘归 save。
       description:
-        '只读、纯函数、**不落盘**。把一份候选参数 JSON 变成一份**可审计的结论**，并明确告诉你**该改哪里**。一次调用给出：逐条 validation（每条都带 ok）、三态清单（区分"下游做不到"与"我还没做"）、numeric 自洽（残差必须为 0）、六视图的**数值轮廓**（outline，供你拿照片做粗核对 —— 你看见用户上传的照片，看不见工具产出的图像素）、六张 SVG、conf 的如实标注、scale_anchor 的换算与脆弱性、以及逐项逐轴的 revise_hints。verdict 为 fit 时才进下一步：apply_ops 建模，再用 against_scene:true 跑一次做读回比对。**边界说清楚**：numeric 与读回只证明"我自洽、下游照做了"，**都不证明与照片一致** —— 那一段只能靠你拿 outline 和照片比，加上人的眼睛。',
+        '只读、纯函数、**不落盘**。把一份候选参数 JSON 变成一份**可审计的结论**，并明确告诉你**该改哪里**。一次调用给出：逐条 validation（每条都带 ok）、三态清单（区分"下游做不到"与"我还没做"）、numeric 自洽（残差必须为 0）、六视图的**数值轮廓**（outline，供你拿照片做粗核对 —— 你看见用户上传的照片，看不见工具产出的图像素）、六张 SVG，**外加一张整图纸的指针（sheet）**：六视图按第一角法/第三角法排在一张图上、全图一个比例尺 —— 复核就看这一张，而且必须在进 apply_ops 之前看（正文不进这个载荷，见 sheet.inline_from；20 个对象约 30 KB，同一份几何不值得发两遍）、conf 的如实标注、scale_anchor 的换算与脆弱性、以及逐项逐轴的 revise_hints。verdict 为 fit 时才进下一步：apply_ops 建模，再用 against_scene:true 跑一次做读回比对。**边界说清楚**：numeric 与读回只证明"我自洽、下游照做了"，**都不证明与照片一致** —— 那一段只能靠你拿 outline 和照片比，加上人的眼睛。',
       parameters: FIT_INPUT,
       meta: READ_ONLY_META,
       async execute(args, tctx) {
@@ -1759,9 +2056,11 @@ export const runtime = {
         const numericOk = emission.ok && aligned && checked.within_tolerance
         const outline = numericOutline(views)
         const overlaps = overlapFindings(boxes)
-        const revise = reviseHints(args, emission, caps, { checked, aligned, fromParams, outline, overlaps })
+        const revise = reviseHints(args, emission, caps, { checked, aligned, fromParams, outline, overlaps, boxes })
         const validation = validationReport(args, emission, caps)
         const verdict = numericOk && validation.ok && revise.blocking === 0 ? 'fit' : 'revise'
+        // ③ 便宜的那一步的**单一复核对象**：六视图排在一张图纸上，全图一个比例尺。
+        const sheet = renderSheet(views, placement, { projection: args.projection })
 
         const payload = {
           ok: verdict === 'fit',
@@ -1782,12 +2081,34 @@ export const runtime = {
             caveats: VERIFY_CAVEATS,
           },
           outline: outline.map((o) => ({ ...o, sheet: placement[o.view] ?? null })),
+          // ③ 一张图纸（review 对象）。它和 outline 是同一件事的两种精度：outline 是数字，
+          // sheet 是图形；**复核发生在贵的那一步之前**，所以指针必须在这里就有，而不是等 save。
+          //
+          // **有意不把 SVG 正文抄进来**：同一张图已经以 views[] 的分图形式在载荷里了，
+          // 20 个对象的整图纸约 30 KB —— 把同一份几何再发一遍，纯粹是翻倍上下文。要正文就
+          // 调 agh_ortho_views（sheet_svg），要文件就 save（sheet.svg）。
+          sheet: {
+            artifact: 'sheet.svg',
+            inline_from: 'agh_ortho_views (returns the same drawing as sheet_svg.svg)',
+            projection: args.projection,
+            convention: sheet.layout.convention,
+            shared_scale: sheet.scale,
+            width: sheet.width,
+            height: sheet.height,
+            cells: sheet.cells,
+            note: SHEET_NOTE,
+            review_before_apply_ops: SHEET_REVIEW_ITEMS,
+          },
           // ③ 那一关的可核部分：模型写下的照片读数 vs 我们算出来的轮廓。
           photo_check: photoCheckFindings(args, outline),
           // 建模手滑（warning 级）
           overlaps,
           declared_relative_confidence: declaredConfidence(args),
           anchor: anchorReport(args),
+          // ①④ 两条**跨路对齐**的段（都只报不挡）
+          parts: partCensus(args),
+          placement: placementReport(boxes),
+          generated: generatedReport(args),
           target_capability_set: emission.target_capability_set,
           capability_source: emission.capability_source,
           // 必须带上 ops：否则调用方为了拿到它还得再调一次 emit_ops，就多付一次嵌套协商，
@@ -1868,7 +2189,7 @@ export const runtime = {
       // 先把 report.json 落到磁盘再返回 —— 变更型工具的结果一旦被判非法会被替换成
       // TOOL_OUTCOME_UNKNOWN，结果与失败原因会**一起永久丢失**；返回值只是"方便读的副本"。
       description:
-        '这是本插件唯一会写盘的工具，因此 requiresApproval=always。把一个 run 的全部产物落到工作区的 .agnes/agh-ortho/runs/<run-id>/：六个视图 SVG、参数 JSON、ops 批次、numeric 校验结果，外加 marker.json 与 report.json（描述符数组，依据 agh-blender/docs/UPSTREAM-ARTIFACT-CONTRACT.md）。**先落盘报告再返回**：消费者应以磁盘上的 report.json 为准，不以返回值或转述为准。传同一个 run_id 再调一次是幂等的 —— 直接返回已落盘的描述符，不重新生成。每个描述符都带一句实质 preview，因为模型看不到图片像素，preview 是它唯一必然能读到的内容。',
+        '这是本插件唯一会写盘的工具，因此 requiresApproval=always。把一个 run 的全部产物落到工作区的 .agnes/agh-ortho/runs/<run-id>/：**一张六视图图纸 sheet.svg**、六个分视图 SVG、参数 JSON、ops 批次、numeric 校验结果，外加 marker.json 与 report.json（描述符数组，依据 agh-blender/docs/UPSTREAM-ARTIFACT-CONTRACT.md）。**先落盘报告再返回**：消费者应以磁盘上的 report.json 为准，不以返回值或转述为准。传同一个 run_id 再调一次是幂等的 —— 直接返回已落盘的描述符，不重新生成。每个描述符都带一句实质 preview，因为模型看不到图片像素，preview 是它唯一必然能读到的内容。',
       parameters: SAVE_INPUT,
       meta: {
         isReadOnly: false,
@@ -1920,6 +2241,13 @@ export const runtime = {
         }
         if (existing.owned && existing.report) {
           // §5.3 幂等：同一 id 必须对应同一内容，不重新生成。
+          //
+          // 幂等**会吃掉你想补的那一档**：候选那轮如果已经用同一个 run_id 落过盘，
+          // 交付那轮的 `against_scene:true` 就只会拿回旧描述符，读回**永远不会被记录**。
+          // 所以这里必须把"你要的读回没有发生"明确说出来 —— 这不是失败（重放本身是对的），
+          // 但它是**必须被看见**的一件事。
+          const hadReadback = existing.report.scene_readback?.available === true
+          const wantsReadback = args.against_scene === true
           return respond({
             ok: true,
             idempotent_replay: true,
@@ -1927,6 +2255,14 @@ export const runtime = {
             report_path: absolute('report.json'),
             report_contract: existing.report.contract ?? null,
             artifacts: existing.report.artifacts ?? [],
+            readback_recorded: hadReadback,
+            readback_not_recorded: wantsReadback && !hadReadback,
+            readback:
+              hadReadback
+                ? 'this run already records a scene_readback'
+                : wantsReadback
+                  ? 'you asked for against_scene but THIS RUN was written without a readback: a replay returns the old descriptors and your readback is NOT recorded. Use a fresh run_id.'
+                  : 'no readback was requested for this run, and none is recorded',
             retention: await retentionPlan(fs, runId),
             note: 'this run already exists on disk; descriptors returned unchanged and nothing was regenerated',
           })

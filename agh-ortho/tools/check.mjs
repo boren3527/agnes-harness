@@ -239,7 +239,7 @@ const fs1 = memoryFs()
 const saved = (await save.execute(SAMPLE, { fs: fs1, session: { workspaceRoot: ws } })).structured
 
 check('save writes a run and reports ok', saved.ok === true && saved.idempotent_replay === false, JSON.stringify(saved.blockers))
-check('save returns 9 artifacts (6 views + 3 json)', saved.artifacts.length === 9, saved.artifacts.map((a) => a.path.split('\\').pop()).join(','))
+check('save returns 10 artifacts (the sheet + 6 views + 3 json)', saved.artifacts.length === 10 && saved.artifacts.some((a) => a.path.endsWith('sheet.svg')), saved.artifacts.map((a) => a.path.split('\\').pop()).join(','))
 check('marker.json and report.json are on disk', fs1.files.has(`.agnes/agh-ortho/runs/${saved.run_id}/marker.json`) && fs1.files.has(`.agnes/agh-ortho/runs/${saved.run_id}/report.json`))
 check('write created the parent directories itself', fs1.dirs.has(`.agnes/agh-ortho/runs/${saved.run_id}`))
 
@@ -280,6 +280,19 @@ check('same run_id replays instead of regenerating', replay.ok === true && repla
 check('replay returns the same descriptor ids', replay.artifacts.map((a) => a.id).join() === saved.artifacts.map((a) => a.id).join())
 check('replay wrote nothing new', fs1.files.size === before)
 
+// 幂等会吃掉"想补的那一档"：候选轮先落盘，交付轮的 against_scene 就只会拿回旧描述符。
+// 这件事故必须**被看见**（不是失败 —— 重放本身是对的，但读回没被记录）。
+const replayWantingReadback = (await save.execute({ ...SAMPLE, run_id: saved.run_id, against_scene: true }, { fs: fs1, session: { workspaceRoot: ws } })).structured
+check(
+  'replay says out loud that the readback you asked for was NOT recorded',
+  replayWantingReadback.idempotent_replay === true &&
+    replayWantingReadback.readback_recorded === false &&
+    replayWantingReadback.readback_not_recorded === true &&
+    /fresh run_id/.test(replayWantingReadback.readback),
+  replayWantingReadback.readback,
+)
+check('and a replay that did not ask for a readback does not cry wolf', replay.readback_not_recorded === false)
+
 // §6 E_RUN_NOT_OWNED：别人的 run 目录必须拒绝，并回报 marker 的实际内容。
 const fs2 = memoryFs()
 await fs2.write('.agnes/agh-ortho/runs/foreign/marker.json', JSON.stringify({ contract: 1, producer: 'someone-else@1.0.0', runId: 'foreign', createdAt: new Date().toISOString() }))
@@ -291,7 +304,7 @@ check('the refusal reports the actual marker content', foreign.blockers[0].marke
 check('retention policy is stated', saved.retention.policy.maxRuns === 20 && saved.retention.policy.maxAgeDays === 30, JSON.stringify(saved.retention.policy))
 check('retention honestly says this plugin cannot delete', saved.retention.cannot_delete_here.includes('no rm'))
 check('report.json on disk is the authority (contract + artifact count)',
-  (() => { const r = JSON.parse(fs1.files.get(`.agnes/agh-ortho/runs/${saved.run_id}/report.json`)); return r.contract === 1 && r.artifacts.length === 9 && r.unlowered.length >= 1 && r.unresolved[0] === '屋面厚度' })())
+  (() => { const r = JSON.parse(fs1.files.get(`.agnes/agh-ortho/runs/${saved.run_id}/report.json`)); return r.contract === 1 && r.artifacts.length === 10 && r.unlowered.length >= 1 && r.unresolved[0] === '屋面厚度' })())
 
 // 产物里的 preview 必须把降级误差带到用户面前，而不是只留在内部字段。
 const opsPreview = saved.artifacts.find((a) => a.path.endsWith('ops.json')).preview
@@ -651,6 +664,119 @@ const exactHalf = (await fitTool.execute({ ...FIT_OK, assembly: [
 check('overlap: a fraction that PRINTS as 0.5 must not be listed (decision uses the reported value)', exactHalf.overlaps.significant.length === 0, JSON.stringify(exactHalf.overlaps.significant))
 check('overlap: BOTH thresholds are published so a reader can interpret a row itself', touching.overlaps.listing_threshold === 0.5 && touching.overlaps.almost_hidden_threshold === 0.9 && /almost_hidden is a second/.test(touching.overlaps.note), touching.overlaps.note)
 
+// --- 8g. 跨路对齐：共享部件词汇表（①）+ 规范摆放（④）---
+// ① 的动机来自 StdGEN 那种"语义分解"，而 ④ 借的是 CharacterGen 的"规范化" —— 两条都不需要
+// 真去跑那些项目，是设计层的东西。
+const partsModel = {
+  ...FIT_OK,
+  assembly: [
+    { id: 'h1', feature: 'box', part: 'body', w: { v: 0.4 }, d: { v: 0.2 }, h: { v: 0.4 }, at: { v: [0, 0, 0.8] } },
+    { id: 'c1', feature: 'box', part: 'clothing', w: { v: 0.5 }, d: { v: 0.3 }, h: { v: 0.4 }, at: { v: [0, 0, 0.4] } },
+    { id: 's1', feature: 'box', part: 'shoe', w: { v: 0.3 }, d: { v: 0.2 }, h: { v: 0.2 }, at: { v: [0, 0, 0.1] } },
+  ],
+}
+const partsFit = (await fitTool.execute(partsModel, {})).structured
+check('parts: the shared taxonomy is published', Array.isArray(partsFit.parts.taxonomy) && ['body', 'clothing', 'hair'].every((p) => partsFit.parts.taxonomy.includes(p)), JSON.stringify(partsFit.parts.taxonomy))
+check('parts: declared parts are bucketed with their ids', partsFit.parts.by_part.body?.count === 1 && partsFit.parts.by_part.clothing?.ids?.[0] === 'c1', JSON.stringify(partsFit.parts.by_part))
+check('parts: an unshared value is flagged, not silently accepted', partsFit.parts.unknown_values.includes('shoe') && partsFit.revise_hints.some((h) => /not in the shared vocabulary/.test(h.problem)), JSON.stringify(partsFit.parts.unknown_values))
+const noParts = (await fitTool.execute(FIT_OK, {})).structured
+check('parts: a missing part is a warning, never a blocker (existing models keep working)', noParts.parts.undeclared.length > 0 && !noParts.revise_hints.some((h) => h.severity === 'blocking' && /part/.test(h.problem)), JSON.stringify(noParts.parts.undeclared))
+check('parts: the note keeps the two axes apart (part = what it is, provenance = how it was made)', /provenance/.test(noParts.parts.note), noParts.parts.note)
+
+// ④ 规范摆放：底面贴 z=0、水平居中 —— 为的是两次迭代能干净地 diff
+const oneBox = (at) => ({ ...FIT_OK, assembly: [{ id: 'b', feature: 'box', w: { v: 2 }, d: { v: 2 }, h: { v: 2 }, at: { v: at } }] })
+const canonicalFit = (await fitTool.execute(oneBox([0, 0, 1]), {})).structured
+check('placement: a grounded, centred model passes both', canonicalFit.placement.on_ground === true && canonicalFit.placement.centred === true, JSON.stringify({ base: canonicalFit.placement.base_z, centre: canonicalFit.placement.horizontal_centre }))
+const offCentreFit = (await fitTool.execute(oneBox([5, 0, 1]), {})).structured
+check('placement: an off-centre model is reported so iterations stay diffable', offCentreFit.placement.centred === false && offCentreFit.revise_hints.some((h) => h.where === 'placement'), JSON.stringify(offCentreFit.placement.horizontal_centre))
+const airborneFit = (await fitTool.execute(oneBox([0, 0, 3]), {})).structured
+check('placement: a model floating above z=0 is reported', airborneFit.placement.on_ground === false && /does not sit on z=0/.test(airborneFit.revise_hints.find((h) => h.where === 'placement')?.problem ?? ''), String(airborneFit.placement.base_z))
+check('placement: the tolerance is relative, so it scales with the model', canonicalFit.placement.tolerance > 0 && canonicalFit.placement.tolerance < 0.05, String(canonicalFit.placement.tolerance))
+
+// --- 8h. ② 生成的网格：来源必须记全（不可复算），且**明说形状验不了** ---
+const meshFull = {
+  ...FIT_OK,
+  assembly: [
+    {
+      id: 'body_m',
+      feature: 'mesh',
+      part: 'body',
+      path: 'D:/x/body.obj',
+      source: { kind: 'generated_mesh', model: 'StdGEN', weights: 'v1', seed: 42, input_image_sha256: 'ab'.repeat(32) },
+    },
+    { id: 'h1', feature: 'box', part: 'clothing', w: { v: 0.4 }, d: { v: 0.2 }, h: { v: 0.4 }, at: { v: [0, 0, 0.8] } },
+  ],
+}
+const meshFit = (await fitTool.execute(meshFull, {})).structured
+check('mesh: it is a KNOWN unsupported feature (not an unknown one that blocks)', meshFit.three_state.downstream_cannot.some((u) => u.feature === 'mesh') && !meshFit.revise_hints.some((h) => /not in the intent vocabulary/.test(h.problem)), JSON.stringify(meshFit.three_state.downstream_cannot.map((u) => u.feature)))
+check('mesh: declared as a generated part, with its provenance carried', meshFit.generated.declared.length === 1 && meshFit.generated.declared[0].source_kind === 'generated_mesh' && meshFit.generated.declared[0].provenance.model === 'StdGEN' && meshFit.generated.declared[0].provenance.seed === 42, JSON.stringify(meshFit.generated.declared))
+check('mesh: complete provenance records nothing missing, and it is NOT reproducible', meshFit.generated.declared[0].missing_for_reproducibility.length === 0 && meshFit.generated.declared[0].reproducible === false)
+check('mesh: the report says its SHAPE cannot be verified by any tier here', /SHAPE cannot be verified/.test(meshFit.generated.note) && meshFit.revise_hints.some((h) => /SHAPE cannot be verified/.test(h.problem)), meshFit.generated.note.slice(0, 60))
+const meshBareFit = (await fitTool.execute({ ...FIT_OK, assembly: [{ id: 'm2', feature: 'mesh', source: { kind: 'generated_mesh' } }] }, {})).structured
+check('mesh: an incomplete provenance names exactly what is missing', JSON.stringify(meshBareFit.generated.declared[0].missing_for_reproducibility) === '["model","seed","input_image_sha256"]' && meshBareFit.revise_hints.some((h) => /records no model \/ seed \/ input_image_sha256/.test(h.problem)), JSON.stringify(meshBareFit.generated.declared[0].missing_for_reproducibility))
+const paramSourceFit = (await fitTool.execute({ ...FIT_OK, assembly: [{ id: 'p1', feature: 'box', source: { kind: 'parametric' }, w: { v: 1 }, d: { v: 1 }, h: { v: 1 }, at: { v: [0, 0, 0.5] } }] }, {})).structured
+check('mesh: a parametric source is reproducible and gets no generated warning', paramSourceFit.generated.declared[0].reproducible === true && !paramSourceFit.revise_hints.some((h) => /SHAPE cannot be verified/.test(h.problem)), JSON.stringify(paramSourceFit.generated.declared[0]))
+check('mesh: and the payload note describes what was actually declared, not the generated-mesh case', /parametric/.test(paramSourceFit.generated.note) && !/SHAPE cannot be verified/.test(paramSourceFit.generated.note), paramSourceFit.generated.note.slice(0, 60))
+
+// --- 8i. ③ 一张图纸：六视图排在一张图上、全图一个比例尺（复核必须发生在贵的那一步之前）---
+const sheetBoxes = [{ name: 'b1', min: [-1, -0.5, 0], max: [1, 0.5, 1] }]
+const sheetViews = viewsMod.sixViewRects(sheetBoxes)
+const firstAngle = viewsMod.renderSheet(sheetViews, viewsMod.sheetPlacement('first_angle'), {})
+const thirdAngle = viewsMod.renderSheet(sheetViews, viewsMod.sheetPlacement('third_angle'), {})
+const cellOf = (sheet, id) => sheet.cells.find((c) => c.view === id)
+check(
+  'sheet: all six views get a cell, and the first/third angle layouts are genuinely different (not one drawing renamed)',
+  firstAngle.cells.length === 6 &&
+    cellOf(firstAngle, 'left').col === 1 &&
+    cellOf(firstAngle, 'top').row === 1 &&
+    cellOf(firstAngle, 'back').col === 2 &&
+    cellOf(thirdAngle, 'left').col === -1 &&
+    cellOf(thirdAngle, 'top').row === -1 &&
+    cellOf(thirdAngle, 'back').col === -2,
+  JSON.stringify(thirdAngle.cells),
+)
+check(
+  'sheet: third angle mirrors BOTH axes (GB/T 17451 / ANSI Y14.3), and mirroring does not change the scale',
+  firstAngle.scale === thirdAngle.scale && firstAngle.scale > 0,
+  `scale ${firstAngle.scale}`,
+)
+// 全图一个比例尺必须是**画出来的**，不是只写在头上：一个 2×1×1 的方块，u 跨度 2 的视图里矩形宽 = 2×scale。
+const sheetWidths = [...firstAngle.svg.matchAll(/width="([0-9.]+)" height="[0-9.]+" fill="rgba\(40,90,160,0\.10\)"/g)].map((m) => m[1])
+check(
+  'sheet: one shared scale actually applied — every object rect is span × scale (184 = 2 m, 92 = 1 m)',
+  sheetWidths.length === 6 &&
+    sheetWidths.filter((w) => w === '184.00').length === 4 &&
+    sheetWidths.filter((w) => w === '92.00').length === 2 &&
+    Math.abs(firstAngle.scale - 92) < 1e-9,
+  JSON.stringify(sheetWidths),
+)
+check(
+  'sheet: it is text the model can read — a well-formed SVG naming every object and every view extent',
+  /^<svg[^>]*>/.test(firstAngle.svg) &&
+    firstAngle.svg.trimEnd().endsWith('</svg>') &&
+    firstAngle.svg.includes('b1') &&
+    firstAngle.svg.includes('extent u 2.000') &&
+    firstAngle.svg.includes(viewsMod.SHEET_NOTE.slice(0, 30)),
+  `${firstAngle.svg.length} chars`,
+)
+check(
+  'sheet: the payload states what this drawing can and cannot answer (it cannot judge shape)',
+  viewsMod.SHEET_REVIEW_ITEMS.length === 4 &&
+    viewsMod.SHEET_REVIEW_ITEMS.some((s) => /cannot answer/.test(s)) &&
+    viewsMod.SHEET_NOTE.includes('review object, not a measurement'),
+)
+// fit 是每轮都调的：图纸正文**不得**被抄进来（同一份几何发两遍就是翻倍上下文），但指针必须在。
+const fitSheet = (await fitTool.execute({ ...FIT_OK, assembly: [{ id: 'b1', feature: 'box', w: { v: 2 }, d: { v: 1 }, h: { v: 1 }, at: { v: [0, 0, 0.5] } }] }, {})).structured.sheet
+check(
+  'sheet: fit carries the pointer (scale + cells), never the drawing text',
+  fitSheet.artifact === 'sheet.svg' &&
+    typeof fitSheet.shared_scale === 'number' &&
+    fitSheet.cells.length === 6 &&
+    fitSheet.svg === undefined &&
+    /agh_ortho_views/.test(fitSheet.inline_from),
+  JSON.stringify({ artifact: fitSheet.artifact, scale: fitSheet.shared_scale, has_svg: fitSheet.svg !== undefined }),
+)
+
 // --- 9. 在真实文件系统上再走一遍（内存 fs 会把路径差异糊掉；Windows 的拼接只有真实 IO 才验得出来）---
 const realRoot = join(tmpdir(), `agh-ortho-check-${process.pid}`)
 const realFs = {
@@ -689,7 +815,7 @@ try {
   check('real fs: descriptor sha256 matches the real file content', realSaved.artifacts.every((a) => sha(readFileSync(a.path, 'utf8')) === a.sha256))
   check('real fs: the parent chain was created', existsSync(join(realRoot, '.agnes', 'agh-ortho', 'runs', 'check-real-fs')))
   const reportOnDisk = JSON.parse(readFileSync(join(realRoot, '.agnes', 'agh-ortho', 'runs', 'check-real-fs', 'report.json'), 'utf8'))
-  check('real fs: report.json is the authority and carries the descriptors', reportOnDisk.contract === 1 && reportOnDisk.artifacts.length === 9)
+  check('real fs: report.json is the authority and carries the descriptors', reportOnDisk.contract === 1 && reportOnDisk.artifacts.length === 10 && reportOnDisk.artifacts[0].path.endsWith('sheet.svg') && typeof reportOnDisk.sheet?.shared_scale === 'number')
   check('real fs: replay is idempotent on a real filesystem', (
     await save.execute({ ...SAMPLE, run_id: 'check-real-fs' }, { fs: realFs, session: { workspaceRoot: realRoot } })
   ).structured.idempotent_replay === true)

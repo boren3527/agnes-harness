@@ -36,7 +36,7 @@
         -DataDir      AGH data dir    (default: %USERPROFILE%\.agh\data)
         -ForceReinstall   install even when the source is unchanged
         -SkipVerify       skip the host audit summary
-        -ExpectTools      number of tools expected in the audit line (default: 5)
+        -ExpectTools      number of tools expected in the audit line (default: 6)
 
     ASCII only on purpose: Windows PowerShell 5.1 reads a BOM-less UTF-8 .ps1 as
     ANSI, which turns any non-ASCII text into mojibake. -ProfileName is spelled out
@@ -47,7 +47,7 @@ param(
     [string]$Source = 'file:./agh-ortho/package',
     [string]$ProfileName = 'local-dev',
     [string]$DataDir = (Join-Path $env:USERPROFILE '.agh\data'),
-    [int]$ExpectTools = 5,
+    [int]$ExpectTools = 6,
     [switch]$ForceReinstall,
     [switch]$SkipVerify
 )
@@ -76,9 +76,18 @@ if (-not (Test-Path $pkgJson)) {
     exit 1
 }
 
-$nodeExe = @(Get-Command -Name 'node.exe' -CommandType Application -ErrorAction SilentlyContinue |
+# Start-Process -FilePath does NOT accept an array: PowerShell 5.1 fails with
+#   "cannot convert System.Object[] to System.String for parameter FilePath"
+# Measured on this machine: @(...) with exactly one element works for the & call operator and
+# FAILS for Start-Process -FilePath. So resolve the first match to a plain string here, and let
+# a missing node.exe be loud instead of silently substituting a bare name.
+$nodeExe = (Get-Command -Name 'node.exe' -CommandType Application -ErrorAction SilentlyContinue |
     Select-Object -First 1 -ExpandProperty Source)
-if (-not $nodeExe) { $nodeExe = 'node.exe' }
+if (-not $nodeExe) {
+    Write-Bad 'node.exe was not found as an application on PATH'
+    Write-Host '       Install Node.js, or fix PATH, then re-run. The install step must reach the console through a real node.exe.'
+    exit 1
+}
 
 $opsFile = Join-Path $DataDir 'daemon\package-operations\operations.json'
 if (-not (Test-Path $opsFile)) {
@@ -124,7 +133,10 @@ function Invoke-Cli([string]$label, [string[]]$cliArgs) {
 # Both mean "not a console". Start-Process with -NoNewWindow and no -Redirect* is the way to
 # hand the child the console handles.
 function Invoke-CliInteractive([string]$label, [string[]]$cliArgs) {
-    $argList = @($cliArgs + @('--profile', $ProfileName)) |
+    # $cli MUST be the first argument: without it node is handed 'install' as a script path and
+    # dies with "Cannot find module 'D:\agnes-harness\install'" - measured on 2026-10-09, and the
+    # two failures before it (Object[] binding, then a silent no-prompt install) hid this one.
+    $argList = @(@($cli) + @($cliArgs) + @('--profile', $ProfileName)) |
         ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }
     $proc = Start-Process -FilePath $nodeExe -ArgumentList ($argList -join ' ') -NoNewWindow -Wait -PassThru
     $script:results += [pscustomobject]@{ Step = $label; ExitCode = $proc.ExitCode }
@@ -162,8 +174,13 @@ if ($null -eq $sourceIntegrity) {
     exit 1
 }
 $installedBefore = Get-InstalledRecord $packageId
+# A record is NOT proof that a copy is on disk: `remove` leaves the last install record in
+# operations.json, so after a removal the record still describes a copy that no longer exists.
+# The skip path therefore also requires the id to appear in `package status`.
+$statusOut = (& $nodeExe $cli package status --profile $ProfileName 2>&1 | Out-String)
+$statusListsPackage = $statusOut -match "(?m)^$([regex]::Escape($packageId))@"
 $unchanged = $false
-if ($installedBefore -and $installedBefore.integrity -eq $sourceIntegrity) { $unchanged = $true }
+if ($installedBefore -and $installedBefore.integrity -eq $sourceIntegrity -and $statusListsPackage) { $unchanged = $true }
 
 if ($unchanged -and -not $ForceReinstall) {
     Write-Ok 'the installed copy already matches this source - skipping disable/remove/install'
@@ -172,8 +189,9 @@ if ($unchanged -and -not $ForceReinstall) {
 }
 else {
     if ($installedBefore) {
-        Write-Note "installed now: v$($installedBefore.version) $($installedBefore.integrity.Substring(0,20))..."
-        Write-Note "source       : v$wanted $($sourceIntegrity.Substring(0,20))..."
+        Write-Note "last install record: v$($installedBefore.version) $($installedBefore.integrity.Substring(0,20))..."
+        if (-not $statusListsPackage) { Write-Note "but $packageId does not appear in package status - nothing is installed right now" }
+        Write-Note "source             : v$wanted $($sourceIntegrity.Substring(0,20))..."
     }
     else {
         Write-Note "nothing installed for $packageId yet"
@@ -200,12 +218,16 @@ else {
     # guard the script would trust and enable the stale copy and then report success - a silent
     # failure of exactly the kind this project keeps trying to avoid.
     if ($record.integrity -ne $sourceIntegrity) {
-        Write-Bad 'the install did not take effect - an older copy is still what is installed:'
-        Write-Bad "  installed now $($record.integrity)"
-        Write-Bad "  this source   $sourceIntegrity"
+        Write-Bad 'the install did not take effect - the last install record is still an older copy:'
+        Write-Bad "  last record $($record.integrity)"
+        Write-Bad "  this source $sourceIntegrity"
         Write-Host ''
-        Write-Host 'Most likely the install prompt never appeared, which means the child process did not' -ForegroundColor Red
-        Write-Host 'reach the console as a real TTY. Re-run from a plain console window.' -ForegroundColor Red
+        Write-Host 'Either the install prompt never appeared (the child did not reach the console as a' -ForegroundColor Red
+        Write-Host 'real TTY), or the install step above printed a PowerShell error and nothing was' -ForegroundColor Red
+        Write-Host 'installed at all. Re-run from a plain console window after reading that error.' -ForegroundColor Red
+        Write-Host ''
+        Write-Note 'manual fallback - run this line in a plain console window, then re-run this script:'
+        Write-Note "  & '$nodeExe' '$cli' install $Source --profile $ProfileName"
         exit 1
     }
 }
