@@ -129,10 +129,11 @@ PRIMITIVE_KINDS = ('cube', 'uv_sphere', 'cylinder', 'cone', 'torus', 'plane')
 
 # The capability face this module publishes, so a consumer can name what it actually observed
 # instead of inferring it from the package version (which drifts silently: 0.1.7 vs 0.1.8 was caught
-# exactly that way). Bump CAPABILITY_SET whenever the primitive kinds, the op table or the limits
-# change. `primitives` is emitted from PRIMITIVE_KINDS, the same tuple that validates `kind`, so the
-# published list and the enforced enum cannot disagree.
-CAPABILITY_SET = 'primitives-%d' % len(PRIMITIVE_KINDS)
+# exactly that way). `primitives` is emitted from PRIMITIVE_KINDS, the same tuple that validates
+# `kind`, so the published list and the enforced enum cannot disagree.
+#
+# CAPABILITY_SET itself is defined further down, next to catalog(), because it covers the op table
+# and the limits too -- and those tables do not exist yet at this point in the module.
 
 
 def _op_primitive_add(args):
@@ -630,10 +631,69 @@ def _op_light_add(args):
     }
 
 
+def _sensor_fit_axis(fit, width, height):
+    """Which image dimension the sensor window spans.
+
+    Blender's AUTO follows the LARGER image dimension, so the meaning of ortho_scale silently
+    flips when an aspect crosses 1:1 -- the same trap the capture framing hit (P0-F192). We pin
+    VERTICAL on every ortho camera we create, so ortho_scale always means "the world height of the
+    frame"; the helper still answers for AUTO so that a scene we did not build reads correctly.
+    """
+    if fit == 'HORIZONTAL':
+        return 'width'
+    if fit == 'VERTICAL':
+        return 'height'
+    if fit == 'AUTO':
+        return 'width' if width >= height else 'height'
+    return None
+
+
+def _metres_per_pixel(fit, ortho_scale, width, height):
+    """World metres spanned by one pixel along the sensor-fit axis; None when undefined.
+
+    Perspective cameras have no answer: their scale depends on distance, which this op does not
+    know. render.still pins pixel aspect to 1:1, so a pixel is square and a silhouette's pixel
+    ratio is its world ratio.
+    """
+    if ortho_scale is None or ortho_scale <= 0.0:
+        return None
+    axis = _sensor_fit_axis(fit, width, height)
+    pixels = None if axis is None else (width if axis == 'width' else height)
+    if not pixels or pixels <= 0:
+        return None
+    return ortho_scale / float(pixels)
+
+
+def _camera_readback(item):
+    """Ortho scale, sensor fit, resolution and the resulting metres-per-pixel."""
+    data = item.data
+    render = bpy.context.scene.render
+    width, height = int(render.resolution_x), int(render.resolution_y)
+    ortho = float(data.ortho_scale) if data.type == 'ORTHO' else None
+    return {
+        'ortho_scale': round(ortho, 6) if ortho is not None else None,
+        'sensor_fit': str(data.sensor_fit),
+        'resolution': [width, height],
+        'metresPerPixel': _metres_per_pixel(str(data.sensor_fit), ortho, width, height),
+    }
+
+
 def _op_camera_add(args):
     replace = _flag(args['replace'], 'replace') if 'replace' in args else False
     label = _fresh_name(args.get('name'), replace)
     location = _vec(args.get('location', (0.0, -6.0, 3.0)), 'location', 3)
+    camera_type = _enum(str(args.get('type', 'PERSP')).upper(), 'type', ('PERSP', 'ORTHO'))
+    ortho_scale = None
+    if camera_type == 'ORTHO':
+        if 'ortho_scale' not in args:
+            raise OpError('E_ARG_MISSING', 'ortho_scale is required when type is ORTHO')
+        ortho_scale = _num(args['ortho_scale'], 'ortho_scale')
+        if ortho_scale <= 0.0 or ortho_scale > 100000.0:
+            raise OpError('E_ARG_RANGE', 'ortho_scale must be in (0, 100000] metres')
+    elif 'ortho_scale' in args:
+        # Refused rather than ignored: a silently dropped ortho_scale would leave the caller
+        # believing it had an orthographic camera.
+        raise OpError('E_ARG_CONFLICT', 'ortho_scale only applies when type is ORTHO')
     if replace and label is not None:
         existing = bpy.data.objects.get(label)
         if existing is not None:
@@ -648,16 +708,30 @@ def _op_camera_add(args):
     if lens < 1.0 or lens > 500.0:
         raise OpError('E_ARG_RANGE', 'lens must be 1..500 mm')
     item.data.lens = lens
+    if camera_type == 'ORTHO':
+        item.data.type = 'ORTHO'
+        item.data.ortho_scale = ortho_scale
+        # Pinned, never AUTO: see _sensor_fit_axis. This is the one decision that fixes what
+        # ortho_scale means, so it is reported back rather than left implicit.
+        item.data.sensor_fit = 'VERTICAL'
     make_active = _flag(args['active'], 'active') if 'active' in args else True
     if make_active:
         bpy.context.scene.camera = item
     bpy.context.view_layer.update()
+    readback = _camera_readback(item)
     return {
         'name': item.name,
+        'type': str(item.data.type),
         'lens': round(float(item.data.lens), 6),
         'location': [round(v, 6) for v in item.location],
         'active': bool(make_active),
         'sceneCamera': bpy.context.scene.camera.name if bpy.context.scene.camera else None,
+        # Names as the upstream contract asks for them, including the camelCase here and the
+        # snake_case in render.still. Deliberate: those two spellings are what its assertions use.
+        'ortho_scale': readback['ortho_scale'],
+        'sensorFit': readback['sensor_fit'],
+        'resolution': readback['resolution'],
+        'metresPerPixel': readback['metresPerPixel'],
     }
 
 
@@ -684,6 +758,72 @@ def _op_object_look_at(args):
     }
 
 
+def _op_render_still(args):
+    """Render the SCENE camera to a PNG file and report its numbers -- never its pixels.
+
+    capture renders the viewport, i.e. whatever the user happens to be looking at. A measurement
+    has to be reproducible, so this one renders `scene.camera`. The return carries no image block:
+    an image block inside a tool result fails the turn with E_STEP_FAILED and poisons the session
+    permanently (measured 2026-10-06), so a path plus its digest is the whole payload.
+    """
+    raw_camera = args.get('camera')
+    if not isinstance(raw_camera, str) or not raw_camera.strip():
+        raise OpError('E_ARG_MISSING', 'camera is required')
+    item = _object(_name(raw_camera, 'camera'))
+    if item.type != 'CAMERA':
+        raise OpError('E_NOT_A_CAMERA', '%s is a %s, not a camera' % (item.name, item.type))
+    raw_path = args.get('path')
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        raise OpError('E_ARG_MISSING', 'path is required')
+    path = os.path.abspath(os.path.expanduser(raw_path.strip()))
+    extension = os.path.splitext(path)[1].lower()
+    if extension != '.png':
+        raise OpError('E_UNSUPPORTED_FORMAT', 'render.still writes .png only, got %s' % (extension or '(no extension)'))
+    width = int(_num(args.get('width', 0), 'width'))
+    height = int(_num(args.get('height', 0), 'height'))
+    if width < 1 or width > 16384 or height < 1 or height > 16384:
+        raise OpError('E_ARG_RANGE', 'width and height must be in 1..16384')
+    transparent = _flag(args.get('transparent', False), 'transparent')
+
+    scene = bpy.context.scene
+    render = scene.render
+    previous_camera = scene.camera.name if scene.camera else None
+    overwrote = os.path.isfile(path)
+    render.resolution_x = width
+    render.resolution_y = height
+    # Forced, not inherited: a percentage other than 100 would make the returned width/height a
+    # lie, and metresPerPixel is derived from them.
+    render.resolution_percentage = 100
+    # Square pixels, for the same reason: with a pixel aspect other than 1:1 a silhouette's pixel
+    # ratio stops being its world ratio, and every tolerance here is expressed in metres.
+    render.pixel_aspect_x = 1.0
+    render.pixel_aspect_y = 1.0
+    render.image_settings.file_format = 'PNG'
+    render.image_settings.color_mode = 'RGBA' if transparent else 'RGB'
+    render.film_transparent = transparent
+    render.filepath = path
+    scene.camera = item
+    bpy.context.view_layer.update()
+    outcome = bpy.ops.render.render(write_still=True)
+    if 'FINISHED' not in outcome or not os.path.isfile(path):
+        raise OpError('E_INTERNAL', 'the render produced no file at %s (operator reported %s)' % (path, sorted(outcome)))
+    readback = _camera_readback(item)
+    return {
+        'path': path,
+        'sha256': _sha256_file(path),
+        'bytes': os.path.getsize(path),
+        'width': width,
+        'height': height,
+        'camera': item.name,
+        'previousCamera': previous_camera,
+        'transparent': transparent,
+        'overwrote': overwrote,
+        'ortho_scale': readback['ortho_scale'],
+        'sensor_fit': readback['sensor_fit'],
+        'metresPerPixel': readback['metresPerPixel'],
+    }
+
+
 OPS = {
     'mesh.primitive_add': _op_primitive_add,
     'object.transform': _op_transform,
@@ -700,6 +840,7 @@ OPS = {
     'light.add': _op_light_add,
     'camera.add': _op_camera_add,
     'object.look_at': _op_object_look_at,
+    'render.still': _op_render_still,
 }
 
 # Declared so a caller can ask what exists without guessing. This table is the single
@@ -828,17 +969,37 @@ OP_MANIFEST.update({
     'camera.add': {
         'mutates': True,
         'destructive': False,
-        'summary': 'add a camera and optionally make it the scene camera',
+        'summary': 'add a camera (perspective by default, orthographic on request) and optionally make it the scene camera; the return carries type, ortho_scale, sensorFit, resolution and metresPerPixel',
         'args': {
             'name': {'type': 'string', 'optional': True},
-            'lens': {'type': 'number', 'optional': True, 'range': '1..500 mm', 'default': 50},
+            'type': {'type': 'enum', 'values': ['PERSP', 'ORTHO'], 'default': 'PERSP',
+                     'note': 'ORTHO pins sensor_fit to VERTICAL so ortho_scale always means the world height of the frame; AUTO would follow whichever image side is longer'},
+            'ortho_scale': {'type': 'number', 'optional': True, 'range': '(0, 100000] metres',
+                            'note': 'required when type is ORTHO, refused when type is PERSP'},
+            'lens': {'type': 'number', 'optional': True, 'range': '1..500 mm', 'default': 50,
+                     'note': 'kept on the data block, but has no effect while type is ORTHO'},
             'location': {'type': 'vec3', 'optional': True, 'default': [0, -6, 3]},
             'rotation_euler': {'type': 'vec3', 'optional': True, 'unit': 'radians'},
             'active': {'type': 'boolean', 'default': True, 'note': 'assign it as scene.camera'},
             'replace': {'type': 'boolean', 'default': False},
         },
-        'refuses': ['E_NAME_TAKEN', 'E_ARG_RANGE', 'E_ARG_TYPE'],
-        'example': {'op': 'camera.add', 'args': {'name': 'Shot', 'location': [6, -6, 4], 'lens': 35}},
+        'refuses': ['E_NAME_TAKEN', 'E_ARG_RANGE', 'E_ARG_TYPE', 'E_ARG_ENUM', 'E_ARG_MISSING', 'E_ARG_CONFLICT'],
+        'example': {'op': 'camera.add', 'args': {'name': 'Front', 'type': 'ORTHO', 'ortho_scale': 2.4, 'location': [0, -8, 1], 'rotation_euler': [1.5707963, 0, 0]}},
+    },
+    'render.still': {
+        'mutates': True,
+        'destructive': False,
+        'summary': 'render scene.camera to a .png on disk (capture renders the viewport instead); returns path, sha256, bytes, width, height, ortho_scale, sensor_fit and metresPerPixel -- never an image block',
+        'args': {
+            'camera': {'type': 'string', 'required': True, 'note': 'the camera to render with; it becomes scene.camera'},
+            'width': {'type': 'number', 'required': True, 'range': '1..16384 pixels'},
+            'height': {'type': 'number', 'required': True, 'range': '1..16384 pixels'},
+            'path': {'type': 'string', 'required': True, 'note': 'absolute .png path; an existing file is overwritten and the return says so'},
+            'transparent': {'type': 'boolean', 'default': False,
+                            'note': 'film_transparent: the silhouette is alpha>0, which needs no background-colour guess'},
+        },
+        'refuses': ['E_ARG_MISSING', 'E_NO_SUCH_OBJECT', 'E_NOT_A_CAMERA', 'E_UNSUPPORTED_FORMAT', 'E_ARG_RANGE', 'E_INTERNAL'],
+        'example': {'op': 'render.still', 'args': {'camera': 'Front', 'width': 512, 'height': 512, 'path': 'D:/work/renders/front-512.png', 'transparent': True}},
     },
     'object.look_at': {
         'mutates': True,
@@ -925,10 +1086,21 @@ ERROR_CODES = {
     'E_LIMIT': 'a budget was exceeded (ops per batch, objects, materials)',
     'E_BAD_BATCH': 'the batch is empty or malformed',
     'E_NO_SUCH_FILE': 'the file to import does not exist',
-    'E_UNSUPPORTED_FORMAT': 'only .glb, .gltf and .obj can be imported',
+    'E_UNSUPPORTED_FORMAT': 'the file format is not supported (imports take .glb/.gltf/.obj, render output takes .png)',
     'E_BYTE_MISMATCH': 'the file does not match the size or digest the caller declared',
     'E_NO_MESH_IMPORTED': 'the import produced no mesh object (nothing was left behind)',
+    'E_NOT_A_CAMERA': 'the named object is not a camera',
+    'E_ARG_CONFLICT': 'two arguments contradict each other',
+    'E_INTERNAL': 'an operator Blender was asked to run did not finish',
 }
+
+
+# The face as a single token. It covers all three things a consumer gates on -- the primitive kinds,
+# the op table and the limits -- so that a recorded value stops being meaningful the moment any of
+# them changes. Measured 2026-10-09: the op table went 10 -> 15 while this token stayed
+# 'primitives-6', so an artifact stamped with it could not tell those two faces apart.
+CAPABILITY_SET = 'primitives-%d.ops-%d.limits-%d-%d' % (
+    len(PRIMITIVE_KINDS), len(OPS), MAX_OPS_PER_BATCH, MAX_OBJECTS)
 
 
 def catalog():

@@ -1689,4 +1689,62 @@ HEALTH FAIL: 无法连接到远程服务器      # 连 port.json 都已经写出
 | P0-F209 | **`bpy` 的新鲜度是逐字段的**：同一对象上 `scale` 立刻可读，`matrix_world` / `Object.dimensions` 要等求值。**不能按"对象"判断新鲜度** |
 | **P0-F210** | **台架会污染被度量的东西**：我的验证脚本从源码树 `import agh_ops`，Blender 侧写出了 `agh_ops.cpython-313.pyc`，**已被装进 0.3.0 的运行时快照**（`snapshot/.../bridge/__pycache__/agh_ops.cpython-313.pyc`，60 606 B）。`.pyc` 里含**绝对路径与源文件 mtime** ⇒ 包树哈希变成**机器相关**。修法：脚本里 `sys.dont_write_bytecode = True` 必须在兄弟 import **之前**；源码树的 `__pycache__` 已删，快照要等 0.3.1 重装才干净。与 P0-F160 同类（那次污染的是快照侧） |
 
+## X. 0.4.0：正交相机 + `render.still`（2026-10-10，上游 SILHOUETTE-PLAN §2）
+
+上游要把"像不像照片"的**轮廓**那一档变成机器可判：渲出正交前视图 → 剪影的**米**长宽比同时对上
+`outline`（几何自洽）与 `photo_check`（像不像）。它要两条 op，本节记实测。
+
+### X.1 `camera.add` 支持正交（P0-F211 ~ P0-F213）
+
+新增 `type: PERSP|ORTHO`（默认 PERSP，**旧行为逐字不变**）与 `ortho_scale`（ORTHO 时**必填**，
+(0, 1e5] 米）。返回新增 `type` / `ortho_scale` / `sensorFit` / `resolution` / `metresPerPixel`。
+
+| 编号 | 实测 |
+|---|---|
+| P0-F211 | **`sensor_fit` 必须钉死，不能留给 AUTO**：AUTO 跟着**较长的那条边**走 ⇒ 画幅从横变竖时 `ortho_scale` 的含义**翻面**。与取景那次（P0-F192，写 `region_3d` 又读回缓存）是同一类坑：**默认值会在你没看着的时候改变一个量的含义**。本实现钉 **VERTICAL** 并在返回里报出来 |
+| P0-F212 | **`ortho_scale` 跨的是 sensor-fit 轴，另一轴跟画幅比例走**（**不是**传感器的 36×24）：正方形 512、VERTICAL、`ortho_scale=2.4` ⇒ 画框 **2.4×2.4 m**；0.4 m 的方块量到 86 px，折算 0.4031 m（±1 px 内）。这条是上游换算的唯一依据，实测而不是照文档写 |
+| P0-F213 | **`ortho_scale` 读回是 float32**：写 2.4、读回 2.4000000953674316 ⇒ 上游的断言要用**相对**容差（1e-6 量级），用 `==` 会假红。PERSP 的 `metresPerPixel` 给 **null**（没有距离就没有"每像素多少米"） |
+
+### X.2 `render.still`（P0-F214/F215）
+
+用 **`scene.camera`** 渲到 `.png`。与 `capture` 的分工写进 manifest：`capture` 渲**视口**（人看），
+`render.still` 渲**场景相机**（测量）。三条强制：`resolution_percentage=100`（否则返回的 width/height 是谎）、
+`pixel_aspect=1:1`（否则像素比 ≠ 世界比，而所有容差都以米为单位）、`image_settings.color_mode='RGBA'` 当
+`transparent`。
+
+| 编号 | 实测 |
+|---|---|
+| P0-F214 | 返回 12 个键：path/sha256/bytes/width/height/camera/previousCamera/transparent/overwrote/ortho_scale/sensor_fit/metresPerPixel。**没有任何像素/图片字段**（A4 断言锁住：`image`/`pixels`/`base64`/`data`/`inline`/`content` 全不出现） |
+| P0-F215 | 6 类拒绝按码生效：`E_ARG_MISSING`（缺 camera / 缺 path）、`E_NO_SUCH_OBJECT`、`E_NOT_A_CAMERA`（对网格渲）、`E_UNSUPPORTED_FORMAT`（非 .png）、`E_ARG_RANGE`（width=0）、`E_INTERNAL`（operator 没产出文件）。已存在的文件**会覆盖**并回报 `overwrote` —— 渲染是**测量读数**不是交付物，"永不覆盖"那条规则属于 `file.stage_export`/`agh_blender_export` |
+
+### X.3 上游四条验收（全部实测通过）
+
+台架 `.agnes/work/p0-ortho-verify.py`；样本是上游那个 **0.4 × 0.4 × 2 m** 的方块，正交前视，
+`ortho_scale=2.4`、`transparent: true`：
+
+| 尺寸 | 剪影像素框 | 折算（米） | aspect | sha256 |
+|---|---|---|---|---|
+| 512 | `x∈[213,298] y∈[43,468]` = 86×426 | 0.403125 × 1.996875 | 0.201878 | `94245d2e…` |
+| 2048 | `x∈[853,1194] y∈[171,1876]` = 342×1706 | 0.400781 × 1.999219 | 0.200469 | `cbe016b7…` |
+
+- **A1 分辨率无关**：两档按米折算的宽 `0.403125 / 0.400781`（容差 0.009375）、高 `1.996875 / 1.999219`（容差 0.02）都一致
+- **A2 与已知真值一致**：aspect `0.2019 / 0.2005` vs 上游 `outline` 的 **0.200**（512 的容差 = max(2 px, 1%) = 0.02）
+- **A3 已知错误被抓**：加一块 1.6 m 宽的板 ⇒ 量到 **1.598438 m**，远超容差 ⇒ 判据真的在判
+- **A4 seam 零穿透**：见 P0-F214
+
+### X.4 `capabilitySet` 补上 op 表与限额（P0-F216）
+
+原实现 `'primitives-%d' % len(PRIMITIVE_KINDS)` 只在**基元集合**变化时才动 —— 与它自己的注释
+（"op 表或限额变化也要 bump"）不符。实测代价：op 表 10→15，标识**一直是 `primitives-6`**，
+所以上游存进 `target_capability_set` 的溯源指纹**分不出这两代能力面**（而它记这个就是为了"产物可长期依赖"）。
+现为 `primitives-6.ops-16.limits-64-512`。**这是格式变更**：上游的兜底常量与 fixture 要跟着改一次，
+但闸门逻辑读的是 `primitives`/`ops` 两个清单，不受影响。
+
+### X.5 两条教训
+
+| 编号 | 教训 |
+|---|---|
+| **P0-F217** | **裁剪会把测量变成一个"看起来合法"的数**：第一次跑，剪影 `y0=0, y1=255`（贴满整幅）⇒ 量出"高 **1.2 m**"，而真值是 2.0 m。原因是我把相机放在 `z=1`，而方块中心在 `z=0`，**下半截在画框外**。现在台架里有一条**"剪影必须完整落在画幅内"**的断言（`x0>0 & y0>0 & x1<w-1 & y1<h-1`）。这与 `capture` 的 `touchesEdges` 是同一个道理 —— 上游侧也应照抄：**只看比值，会把"被裁掉的图"判成合格** |
+| **P0-F218** | **FAIL 先怀疑断言与夹具**（第三次了，前两次 P0-F198）：本轮 3 类 FAIL **全是我的**：① 相机位置错（上一条）；② 容差写 `1e-12` 撞上 float32 RNA 读回；③ A3 的"挪一下"把部件挪到了画框外。产品一次都没错 |
+
 

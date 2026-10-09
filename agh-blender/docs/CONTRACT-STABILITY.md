@@ -3,7 +3,7 @@
 > 上游：`agh-ortho`（生产网格）。下游：`agh-blender`（本包）。
 > 本文面向 `agh-ortho` 的 lowering 与校验档，说明：**哪些字段可以钉死、哪些必须容忍增长、哪些会变**，
 > 以及四条你方请求的交付状态、一处**语义差异**和一张**精确期望值表**。
-> 版本：`agh-blender@0.3.1`（2026-10-09）。数字全部来自本机实测，证据在 `docs/P0-EVIDENCE.md`。
+> 版本：`agh-blender@0.4.0`（2026-10-10）。数字全部来自本机实测，证据在 `docs/P0-EVIDENCE.md`。
 
 ---
 
@@ -17,8 +17,9 @@
 | `stop` 在 bridge 断连时回落到 PID 判定 | **已交付** | 并区分"未能确认"与"确认失败" |
 | 实例目录只增不减 | **已交付**（0.2.0） | `start` 前裁剪实例目录：**保留最新 20 个**，永不删 pid 仍活着的、永不删即将使用的那个 |
 
-你方 §3 表里 `catalog() 发布 primitives` 一行写的"**待重装生效**" —— 已生效，`agh-blender@0.3.1` 的
-`capabilitySet` 是 `primitives-6`，`primitives` 是六种基元。
+你方 §3 表里 `catalog() 发布 primitives` 一行写的"**待重装生效**" —— 已生效。
+当前版本 **`agh-blender@0.4.0`**：`primitives` 是六种基元，`ops` 是 **16** 个，
+`capabilitySet` 是 **`primitives-6.ops-16.limits-64-512`**（格式有变，见 §2）。
 
 ---
 
@@ -27,7 +28,7 @@
 `catalog()` 的顶层形状是稳定的：
 
 ```json
-{ "version": 1, "capabilitySet": "primitives-6",
+{ "version": 1, "capabilitySet": "primitives-6.ops-16.limits-64-512",
   "primitives": ["cube","uv_sphere","cylinder","cone","torus","plane"],
   "limits": { "maxOpsPerBatch": 64, "maxObjects": 512,
               "nameCharset": "A-Za-z0-9_-.", "nameMaxLength": 96 },
@@ -37,16 +38,72 @@
 | 字段 | 承诺 |
 |---|---|
 | `primitives` | **权威**，判"目标支不支持 `cylinder`"就用它。当前 6 个 |
-| `ops` | **权威**，每个 op 带参数类型/范围/示例与拒绝码。当前 **15** 个 |
+| `ops` | **权威**，每个 op 带参数类型/范围/示例与拒绝码。当前 **16** 个 |
 | `errorCodes` | 权威，拒绝码的可读清单 |
 | `limits` | 稳定；上限变化会同时改 `capabilitySet` |
 | `capabilitySet` | **"能力面换过代"的指纹**：基元集合、op 表、限额**任一**变化都会变。**不要**拿它当"基元集合没变"的证明 |
+
+> **0.4.0 起格式变了**：`primitives-6` → **`primitives-6.ops-16.limits-64-512`**。
+> 原因：旧实现只由**基元数**导出，op 表 10→15 时它**没变** ⇒ 你们存进 `target_capability_set`
+> 的那串溯源指纹**分不出两代能力面**（而你们记它就是为了"产物可长期依赖"）。
+> 你们只需要改**兜底常量**（`agh.capability.json` / fixture）一次；闸门逻辑读的是
+> `primitives` 与 `ops` 两个清单，**不受影响**。
 | `version` | 整数；**形状**变化才 bump（0.3.1 仍为 1） |
 
 **结论**：闸门逻辑 = 读 `primitives` + 读 `ops`；把 `capabilitySet` 记进报告做溯源。
 你方 §4 那张"随包快照 `applied` / 活实例 `not_applied`"的表，0.1.8 起两个来源都会给同一个集合了。
 
 ---
+
+### 2.1 `0.4.0` 新增的两条 op（正交相机 + `render.still`）
+
+**`camera.add` 加两个参数**（不传时旧行为逐字不变）：
+
+| arg | 语义 |
+|---|---|
+| `type` | `"PERSP"`（默认）\| `"ORTHO"` |
+| `ortho_scale` | **ORTHO 时必填**，`(0, 1e5]` 米；**传给 PERSP 会被拒**（`E_ARG_CONFLICT`，不静默忽略） |
+
+返回新增：`type`、`ortho_scale`、`sensorFit`、`resolution`、`metresPerPixel`。
+
+- ⚠️ **`sensor_fit` 被钉死为 `VERTICAL`** ⇒ **`ortho_scale` 就是画幅的"世界高度"**，与你们 §3 的
+  `米/像素 = ortho_scale / height` **一致**。我们**没有**用 Blender 的 AUTO —— 它跟着较长边，
+  画幅比例一翻面 `ortho_scale` 的含义就变。
+- ⚠️ **`ortho_scale` 读回是 float32**：写 `2.4` 读回 `2.4000000953674316` ⇒ **断言请用相对容差（1e-6 量级）**，用 `==` 会假红。
+- ⚠️ `metresPerPixel` 是**声明**，由 `ortho_scale` + `sensorFit` + **当时的** `resolution`（一并返回）推出。
+  `camera.add` 用**场景当前的渲染分辨率**，`render.still` 用它**自己设定的** width/height —— 两者不同是正常的，
+  各自都带 `resolution` 供你复核。**PERSP 下是 `null`**（没有距离就没有"每像素多少米"）。
+
+**`render.still`（新 op）**
+
+```
+args: { camera, width, height, path, transparent? }
+→  { path, sha256, bytes, width, height, camera, previousCamera, transparent, overwrote,
+     ortho_scale, sensor_fit, metresPerPixel }
+```
+
+- 用 **`scene.camera`** 渲（**不是**视口 —— 那是 `capture` 的活）。`camera` 指定的相机会**成为** `scene.camera`，原值在 `previousCamera` 里。
+- `transparent: true` ⇒ `film_transparent` + RGBA ⇒ **剪影 = alpha>0**（不需要猜背景色）。
+- 强制 `resolution_percentage=100` 与**像素 1:1** —— 否则像素比 ≠ 世界比，而你们的容差是**米**。
+- 已存在的文件**会覆盖**，返回里 `overwrote` 告诉你是第几次写。**理由**：渲染是**测量读数**不是交付物；
+  "永不覆盖"那条规则属于 `file.stage_export` / `agh_blender_export`（交付件）。
+- 拒绝码：`E_ARG_MISSING`（缺 camera/path）、`E_NO_SUCH_OBJECT`（相机名不存在）、`E_NOT_A_CAMERA`（对网格渲）、
+  `E_UNSUPPORTED_FORMAT`（非 `.png`）、`E_ARG_RANGE`（width/height 越界）、`E_INTERNAL`（operator 没产出文件）。
+- **返回里没有任何像素/图片字段**（`image`/`pixels`/`base64`/`data`/`inline`/`content` 全不出现，有断言锁着）。
+
+**我们自测过的数**（样本 = 你们那个 0.4×0.4×2 m 方块，正交前视，`ortho_scale=2.4`，`transparent`）：
+
+| 渲染 | 剪影像素框 | 折算（米） | aspect |
+|---|---|---|---|
+| 512×512 | 86 × 426 px | `0.403125 × 1.996875` | **0.201878** |
+| 2048×2048 | 342 × 1706 px | `0.400781 × 1.999219` | **0.200469** |
+
+容差按你们的规则（≥2 像素折算成米，或 1%，取大者）。挪动一个部件（加一块 1.6 m 宽的板）⇒ 量到
+**1.598438 m**，远超容差 ⇒ 判据确实在判（你们的 A3）。
+
+- ⚠️ **一条请你们照抄的自检**：**剪影必须完整落在画幅内**（`x0>0, y0>0, x1<w-1, y1<h-1`）。
+  我们第一次跑时剪影贴满整幅 ⇒ 量出"高 **1.2 m**"，真值是 2.0 m —— **被裁掉的图会给出一个看起来合法的数**。
+  只看比值，会把裁一半的图判成合格（与 `capture` 的 `touchesEdges` 同一个道理）。
 
 ## 3. `describe_scene()`：字段级稳定性（这是你断言尺寸唯一要读的东西）
 
