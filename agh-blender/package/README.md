@@ -17,10 +17,10 @@ you: "build a 3-head-tall figure, dark brown hair, red plaid shirt"
 
   agh_blender_ops_catalog   → what may be called, with argument schemas
   agh_blender_start         → starts Blender itself (no add-on, no setup)
-  agh_blender_apply_ops     → 17 opcodes, applied in order, on Blender's main thread
+  agh_blender_apply_ops     → the whitelisted opcodes, applied in order, on Blender's main thread
   agh_blender_scene         → read the result back
   agh_blender_capture       → offscreen render of the viewport to a PNG on disk
-  agh_blender_checkpoint    → snapshot beside the instance, main file untouched
+  agh_blender_open          → open an existing .blend (a dirty scene is refused)
   agh_blender_export        → deliver a standalone .blend (never overwrites)
 ```
 
@@ -58,16 +58,19 @@ agh package enable agh-blender --profile <your-profile>
 |---|---|---|
 | `agh_blender_start` | effect | discovers `blender.exe`, launches it confined, exchanges a loopback token; **asks for approval** |
 | `agh_blender_probe` | read | is the managed instance still alive? |
-| `agh_blender_stop` | effect | graceful shutdown through the bridge |
+| `agh_blender_stop` | effect | graceful shutdown through the bridge; a dirty scene is refused unless `force` |
+| `agh_blender_open` | effect | open an existing `.blend` (same dirty-scene guard); **asks for approval** |
 | `agh_blender_ops_catalog` | read | the full opcode contract: argument names, types, ranges, examples, limits, refusal codes |
 | `agh_blender_apply_ops` | effect | apply a batch; **asks for approval**; the whole batch shares one undo step |
 | `agh_blender_scene` | read | objects, materials, transforms, known ops |
 | `agh_blender_capture` | read | offscreen viewport render → PNG on disk (**does not inline the image**, see Limitations) |
 | `agh_blender_export` | effect | stage a standalone copy in Blender, deliver it with the host's own file write; **asks for approval** |
 
-The first 7 opcodes cover modelling (`mesh.primitive_add`, `object.transform`, `object.duplicate`,
-`object.delete`, `material.set`, `material.assign`, `object.join`); `data.purge_unused` removes
-orphan datablocks, `file.checkpoint` and `file.stage_export` handle durability.
+The op table covers modelling (`mesh.primitive_add`, `object.transform`, `object.duplicate`,
+`object.delete`, `material.set`, `material.assign`, `object.join`), import (`mesh.import`),
+modifiers, lights and cameras (`modifier.add`, `light.add`, `camera.add`, `object.look_at`),
+cleanup (`data.purge_unused`) and durability (`file.checkpoint`, `file.stage_export`). It grows as
+the whitelist grows: `agh_blender_ops_catalog` is the authoritative list, **no document is.**
 
 ## How it works
 

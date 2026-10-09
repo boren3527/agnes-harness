@@ -591,6 +591,7 @@
 | `mesh.import` 的 `size`/`location` **只比较并回报，不改几何** | **P0 实测（P0-F189）** | 它们是调用方的**期望值**（自检），当作变换会静默重塑"要求原样导入"的东西 |
 | 拒绝必须**按码明确**，且**拒绝后场景保持干净** | **P0 实测（P0-F188）** | `E_NO_SUCH_FILE`/`E_UNSUPPORTED_FORMAT`/`E_BYTE_MISMATCH`/`E_NO_MESH_IMPORTED`；导入产生的非网格残留物先移除再报错 |
 | `start` 必须裁剪旧实例目录 | **P0 实测（P0-F194）** | 保留最新 20 个；**永不删** pid 仍活着的、**永不删**即将使用的那一个 |
+| 读世界尺寸前，`describe_scene()` **必须自己** `view_layer.update()` | **P0 实测（P0-F206/F207）** | `matrix_world` / `bound_box` 是 **depsgraph 求值结果**。原先"读之前先 update"是一条**隐式契约**：桥的 `/op` 处理里有（`bootstrap.py:513`），**别的调用方没有** → 直接 Python 调用序列实测 `scale=[1,2,4]` 的立方体读回 `[1,1,1]`（应为 `[1,2,4]`），转 90° 后仍 `[1,1,1]`。修法是把这个契约搬进被调用方。注意 `/scene` 端点自身**不做** update，它靠 GUI 重绘兜着；headless（`--background`）下桥**根本不成立**（Blender 跑完脚本即退出），见 `P0-EVIDENCE.md` §W.5 |
 
 ## 10. 决策记录
 
@@ -608,6 +609,7 @@
 
 | 时间 | 变更 |
 |---|---|
+| 2026-10-09 21:45 | **0.3.1**：`describe_scene()` 的 `dimensions` 由 `matrix_world`/`bound_box`（**depsgraph 求值结果**）推出，而"读之前先 update"原是一条**隐式契约**、由调用方履行（`bootstrap.py:513` 的 `/op` 处理里本来就有 `view_layer.update()`）。出厂桥路因此**一直是对的**（实测未修版在 GUI 桥路下两个值都正确）；问题在**别的调用方**会静默读到旧值（实测：直接 Python 调用序列读到 `[1,1,1]`，应为 `[1,2,4]`），且 `/scene` 端点自身**不做 update**、靠 GUI 重绘兜着。修法一行，把契约搬进被调用方。**这不是"修用户可见故障"，是消除隐式依赖**——措辞按此为准。12 项回归全 PASS，`OPS`/`OP_MANIFEST` 一字未动。证据见 `P0-EVIDENCE.md` §W（P0-F206~F210） |
 | 2026-10-09 21:15 | **0.3.0**：opcode 由 11 增至 **15**（新增 `modifier.add`/`light.add`/`camera.add`/`object.look_at`，含各自拒绝码）；面板做实（`blender.status` 顺带读回 `/scene` 的紧凑摘要，且**区分**"进程死了"与"桥没应答"）。**规矩**：op 的权威清单是 `catalog()`，**加 op 不改文档**（否则必漂移）。证据见 `P0-EVIDENCE.md` §V（P0-F199~F205） |
 | 2026-10-09 21:05 | **0.2.0**：新增 §3.14（只读读回与导入导出七条约束）。`mesh.import` 落地并发布到 catalog；`dimensions` 改为世界 AABB（原实现忽略旋转）；**取景原来是空操作**（两种模式出图字节相同）→ 改为自建矩阵；capture 新增 `bounds`/`coveredFraction`/`touchesEdges` + 像素交叉验证；`start` 裁剪旧实例目录（保留 20）。死代码 `fit_view_to_bounds()` 已删除并留注释说明原因。证据见 `P0-EVIDENCE.md` §U（P0-F185~F198） |
 | 2026-10-06 09:12 | **v0.1.5 五项修补全部实测**：① `sys.dont_write_bytecode` 移到兄弟 import 之前（**修正 0.1.4 的无效修复**：实测 Blender 嵌入式 CPython **忽略** `PYTHONDONTWRITEBYTECODE`）② `/shutdown` 脏则 **409 `E_DIRTY`** 拒绝（用户选 A；实测完整链：拒绝 → checkpoint 存住含 `cube_a` → `force` 关闭）③ 两条停止路径都写 `stop-report.json` ④ 成功分支带 `identity.observed/expected` ⑤ 压掉 CLIXML 噪声。§3.13 重写；台账新增 §R（P0-F163~F171） |

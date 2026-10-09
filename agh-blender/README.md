@@ -10,7 +10,11 @@
 |---|---|
 | `package/` | **可安装的 AGH 插件包**（12 个文件）。别人装的就是这个 |
 | `docs/DESIGN.md` | 权威设计与实现规范（每条约束都标了来源：v1.1 要求 / 本机 P0 实测） |
-| `docs/P0-EVIDENCE.md` | 证据台账（P0-F1 ~ P0-F184+）：每条都写了**怎么得到的**与**当前状态** |
+| `docs/P0-EVIDENCE.md` | 证据台账（P0-F1 ~ P0-F210）：每条都写了**怎么得到的**与**当前状态** |
+| `docs/CONTRACT-STABILITY.md` | 给上游生产方（`agh-ortho`）的**读回契约稳定性承诺** + 精确期望值表 |
+| `docs/UPSTREAM-ARTIFACT-CONTRACT.md` | 与"产物产出型插件"的两方契约草案（描述符 schema、落点、错误码） |
+| `docs/UPSTREAM-ISSUE-license-allowlist.md` | 给 Agnes Harness 上游的 issue 草稿：许可白名单拒绝时**不说原因** |
+| `tools/reinstall.ps1` | 一条命令走完 `inspect → disable → remove → install → trust → enable → 核对` |
 
 **为什么文档不放进 `package/` 里**：AGH 对已安装包整棵树取哈希，包内任何文档编辑都会改变 `integrity`，导致必须重走 `disable → remove → install → trust → enable`（含一次人工确认）。所以文档与包平级、不进入包内。
 
@@ -19,7 +23,7 @@
 一句话：**让模型用一组固定的、可审批的"建模动词"去操作你本机真实的 Blender —— 不是跑任意脚本。**
 
 - **Blender 侧零安装**：插件用 `blender.exe --factory-startup --disable-autoexec --python <bootstrap.py>` 启动一个受自己管理的实例，不用装任何 add-on、不改你的偏好。
-- **只有白名单动作**：10 个 opcode（`mesh.primitive_add` / `object.transform` / `object.duplicate` / `object.delete` / `material.set` / `material.assign` / `object.join` / `data.purge_unused` / `file.checkpoint` / `file.stage_export`）。**没有** `eval`、**没有**任意 Python 执行。
+- **只有白名单动作**：一组结构化 opcode（当前 **15** 个；**权威清单是运行时的 `agh_blender_ops_catalog`，不在这里列举** —— 列在这里必然漂移）。**没有** `eval`、**没有**任意 Python 执行。
 - **改不坏、丢不掉**：一批 op = 一次 undo；存档点用 `copy=True/relative_remap=True`；导出永远写**新文件**、**永不覆盖**；停止时脏场景会被**拒绝**（`E_DIRTY`），绝不强杀。
 - **过程可见**：一次一小步，你在**自己的 Blender 视口**里看构件一块块长出来。
 

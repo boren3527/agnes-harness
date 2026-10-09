@@ -1603,4 +1603,90 @@ checked 21:12:03                              [refresh]
 |---|---|
 | P0-F205 | 无实例 → `scene=null`；start 后 → `alive=true`、`{objectCount:3, meshCount:1, materialCount:2, knownOps:15}`；跑 3 个 op（删 Cube、加球、加太阳）后 → `objectCount:4`、`meshCount:1`；stop 后 → `scene=null` |
 
+## W. 0.3.1：`describe_scene()` 的陈旧求值读回 —— 一条**隐式调用方契约**（2026-10-09，P0-F206 ~ P0-F210）
+
+这一节是**改口记录**：初判（"0.2.0 引入的回归、会造成用户可见故障"）被实测推翻，下面是订正后的结论与全部原始数据。
+
+### W.1 症状与机制
+
+`dimensions` 由 `matrix_world` / `bound_box` 推出，两者都是 **depsgraph 求值结果**（不是对象自身字段）。
+在**没有任何求值发生**的调用序列里，读回的是**上一次求值**的状态。
+
+### W.2 三格对照（同一串 op：`cube size=1 scale=[1,2,4]` → 绕 X 转 90°）
+
+| # | 配置 | 未修 0.3.0 | 修后 0.3.1 |
+|---|---|---|---|
+| ① | **直接 Python 调用**（调用方不做 update） | `[1.0,1.0,1.0]` → `[1.0,1.0,1.0]` | `[1.0,2.0,4.0]` → `[1.0,4.0,2.0]` |
+| ② | **真实桥路 GUI**（`/op` → `/scene`） | `[1.0,2.0,4.0]` → `[1.0,4.0,2.0]` | `[1.0,2.0,4.0]` → `[1.0,4.0,2.0]` |
+| ③ | 桥路 headless（`--background`） | 不成立 | 不成立 |
+
+① 与 ② 的差别**不是随机性**，而是**谁做了那次 update**：
+
+```
+bootstrap.py:513      bpy.context.view_layer.update()      # /op 的处理里本来就有
+bootstrap.py:514      outcome['scene'] = agh_ops.describe_scene()
+```
+
+> **"读之前先 update" 是一条隐式契约，由调用方（bootstrap）履行；`describe_scene()` 自己不保证。**
+
+② 的 `SCENE_AFTER_*` 也对，是因为 `/scene` 是**另一次**主线程回调，GUI 重绘已经把图求值过了。
+
+台架：`.agnes/work/p0-bridge-stale.ps1`（起真 Blender + 真桥，`/op` 与 `/scene` 各读一次），
+`.agnes/work/p0-stale-before.py`（把 `sys.path` 指到**已装快照**，即未修版），
+`.agnes/work/p0-stale-verify.py`（修后 12 项回归），`.agnes/work/p0-dims-probe.py`（原始字段探测）。
+
+```
+blender --background --factory-startup --python-exit-code 1 --python .agnes/work/p0-stale-verify.py
+powershell -File .agnes/work/p0-bridge-stale.ps1 -BridgeDir agh-blender\package\extensions\main\bridge -Label fixed-gui -Port 8813
+```
+
+### W.3 为什么这不是"修用户可见故障"（P0-F208）
+
+- 出厂路径（②）**一直是对的**，未修版实测两个值都正确。
+- 0.1.8 的实现读 `Object.dimensions` —— 实测**同样陈旧**：
+
+```
+RAW_DIMENSIONS_NO_UPDATE      [1.0, 1.0, 1.0]     # 而 RAW_SCALE_NO_UPDATE 已经是 [1.0, 2.0, 4.0]
+RAW_MATRIX_DIAG_NO_UPDATE     [1.0, 1.0, 1.0]
+RAW_DIMENSIONS_AFTER_UPDATE   [1.0, 2.0, 4.0]
+```
+
+所以这**不是** 0.2.0 换成世界 AABB 引入的回归，是**一直存在**的。**先测再说因果** ——
+我初稿写成"0.2.0 引入"，属于拿版本时间顺序当因果证据。
+- 真正的缺陷是**隐式依赖**：任何**别的**调用方（我们自己的台架、将来在 Blender 里跑 Python 的我们、第三方脚本）都会静默拿到旧值。
+- 同一个隐患还有另一种形态：**`/scene` 端点自己不做 update**，它靠 GUI 重绘兜着。
+
+### W.4 修法与回归
+
+`describe_scene()` 开头加一行 `bpy.context.view_layer.update()`（带注释写明依据），把契约搬进被调用方。
+12 项回归全 PASS：对照 2 项、agh-ortho 五条验收（`cube [12.4,8.6,9.3]` / `plane [2,2,0]` /
+`cyl = cone = [2,2,2]` / 有相机与空物体时 `objectCount=6` / 非几何给 `null` 不抛）、
+`modifier.add`/`light.add`/`camera.add`+`object.look_at` 冒烟、拒绝仍按码（`E_NOT_A_MESH`）、
+`catalog()` 仍 15 个 op。**`OPS` 与 `OP_MANIFEST` 一字未动。**
+
+### W.5 附带发现：headless 桥路**不成立**（不是缺陷，是能力缺口）
+
+`--background` 下 Blender 跑完 `--python` 就退出，桥的 HTTP 线程是 daemon 线程，进程一退端口即关：
+
+```
+[agh-bridge] ready port=8821 pid=44864
+Blender 5.2.2 LTS (hash d13f752e3b9c built 2026-09-15 01:37:04)
+
+Blender quit
+--- 请求侧 ---
+HEALTH FAIL: 无法连接到远程服务器      # 连 port.json 都已经写出来了
+```
+
+**结论：本桥只在 GUI 实例下工作。** CI / 无人值守要跑它，得先解决"让 Blender 在后台不退出"这件事。
+
+### W.6 教训
+
+| 编号 | 教训 |
+|---|---|
+| **P0-F206** | **读路径不能依赖调用方"刚做过某件事"**。隐式契约在"只有一条调用路径"时完全看不出来，在第二条路径上立刻变成**静默错值**。自洽的读函数要么自己 update，要么把前置条件写成**显式参数**（写进签名，让调用方无法忽略） |
+| **P0-F207** | **"有一条测试通过"不等于"契约成立"**。② 一直是对的，于是缺陷在 ① 上活了很久没人看见。**验证一个读路径，要换一种调用方式再问一次** —— 这正是 agh-ortho 的 `against_blender` 档与我们的台架路径不同的地方 |
+| P0-F208 | **先测再说因果**：见 §W.3。实测一份反例，就能挡掉一次错误的"回归"指控 |
+| P0-F209 | **`bpy` 的新鲜度是逐字段的**：同一对象上 `scale` 立刻可读，`matrix_world` / `Object.dimensions` 要等求值。**不能按"对象"判断新鲜度** |
+| **P0-F210** | **台架会污染被度量的东西**：我的验证脚本从源码树 `import agh_ops`，Blender 侧写出了 `agh_ops.cpython-313.pyc`，**已被装进 0.3.0 的运行时快照**（`snapshot/.../bridge/__pycache__/agh_ops.cpython-313.pyc`，60 606 B）。`.pyc` 里含**绝对路径与源文件 mtime** ⇒ 包树哈希变成**机器相关**。修法：脚本里 `sys.dont_write_bytecode = True` 必须在兄弟 import **之前**；源码树的 `__pycache__` 已删，快照要等 0.3.1 重装才干净。与 P0-F160 同类（那次污染的是快照侧） |
+
 

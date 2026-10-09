@@ -1041,6 +1041,13 @@ def _world_dimensions(item):
 
 def describe_scene():
     scene = bpy.context.scene
+    # Settle the depsgraph before measuring anything derived from a world matrix. Measured
+    # 2026-10-09: matrix_world and bound_box are EVALUATED values, so right after a Python-side
+    # transform they still describe the previous state -- an object scaled to [1,2,4] read back as
+    # [1,1,1], and a rotation was ignored entirely ([1,2,4] instead of [1,4,2]). Fields read
+    # straight off the object (name/type/location/scale) are unaffected, but dimensions is derived,
+    # and this is the one place that can hide the difference from every caller.
+    bpy.context.view_layer.update()
     objects = []
     for item in bpy.data.objects:
         entry = {
