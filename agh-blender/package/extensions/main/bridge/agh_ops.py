@@ -184,19 +184,47 @@ def _op_primitive_add(args):
     return {'created': name, 'kind': kind, 'objectCount': _counts()}
 
 
+# Blender applies rotation_euler only while an object is in an EULER rotation mode. Measured
+# 2026-10-10: a mesh imported from glTF is born with rotation_mode='QUATERNION' (glTF stores
+# rotations as quaternions), so assigning rotation_euler stored a value that nothing read -- the
+# matrix, and therefore the render, did not move, while the readback echoed the new euler and
+# looked perfectly healthy. Four renders (0/90z/90x/180y) of the same imported mesh came out
+# pixel-identical, 1048576 pixels and all four channels, zero differing.
+#
+# It is not enough to flip the mode afterwards: Blender rewrites rotation_euler from the quaternion
+# at that moment and discards what the caller asked for. The mode has to be set first.
+_EULER_MODES = ('XYZ', 'XZY', 'YXZ', 'YZX', 'ZXY', 'ZYX')
+
+
+def _ensure_euler_mode(item):
+    """Make `item` able to honour rotation_euler. Returns (before, after) so this is never silent."""
+    before = str(item.rotation_mode)
+    if before not in _EULER_MODES:
+        item.rotation_mode = 'XYZ'
+    return before, str(item.rotation_mode)
+
+
 def _op_transform(args):
     target = _object(_name(args.get('name'), 'name'))
     changed = []
+    rotation_mode = None
     for key in ('location', 'rotation_euler', 'scale'):
         if key in args:
             value = _vec(args[key], key, 3)
             if key == 'scale' and min(value) <= 0:
                 raise OpError('E_ARG_RANGE', 'scale components must be positive')
+            if key == 'rotation_euler':
+                rotation_mode = _ensure_euler_mode(target)
             setattr(target, key, value)
             changed.append(key)
     if not changed:
         raise OpError('E_ARG_MISSING', 'transform needs at least one of location/rotation_euler/scale')
-    return {'transformed': target.name, 'changed': changed, 'objectCount': _counts()}
+    result = {'transformed': target.name, 'changed': changed, 'objectCount': _counts()}
+    if rotation_mode is not None:
+        # Reported, never silent: a caller must be able to see that its object was switched out of
+        # quaternion mode, because that switch is the reason the euler it just set does anything.
+        result['rotationMode'] = {'before': rotation_mode[0], 'after': rotation_mode[1]}
+    return result
 
 
 def _op_duplicate(args):
@@ -749,12 +777,16 @@ def _op_object_look_at(args):
     direction = point - item.matrix_world.translation
     if direction.length < 1e-6:
         raise OpError('E_ARG_RANGE', 'the target is where the object already is; nothing to aim at')
+    # Same trap as object.transform: a quaternion-mode object (every glTF import) would take this
+    # assignment and ignore it. Mode first, then the aim.
+    rotation_mode = _ensure_euler_mode(item)
     item.rotation_euler = direction.to_track_quat('-Z', 'Y').to_euler()
     bpy.context.view_layer.update()
     return {
         'name': item.name,
         'target': [round(v, 6) for v in point],
         'rotationEuler': [round(v, 6) for v in item.rotation_euler],
+        'rotationMode': {'before': rotation_mode[0], 'after': rotation_mode[1]},
     }
 
 
@@ -874,7 +906,10 @@ OP_MANIFEST = {
             'scale': {'type': 'vec3', 'optional': True, 'range': '(0, 10000]'},
         },
         'notes': ['at least one of location/rotation_euler/scale is required',
-                  'values are absolute, not deltas'],
+                  'values are absolute, not deltas',
+                  'rotation_euler switches the object to XYZ mode first when it is not already in an '
+                  'euler mode -- a glTF import arrives as QUATERNION, where rotation_euler would be '
+                  'silently ignored -- and the return reports rotationMode before/after'],
         'example': {'op': 'object.transform',
                     'args': {'name': 'arm_L', 'rotation_euler': [0, 0, -0.35]}},
     },
@@ -1005,6 +1040,8 @@ OP_MANIFEST.update({
         'mutates': True,
         'destructive': False,
         'summary': 'aim an object (camera or light) at a point or at another object',
+        'notes': ['switches the object to XYZ mode first when it is not in an euler mode, and reports '
+                  'rotationMode before/after, for the same reason object.transform does'],
         'args': {
             'name': {'type': 'string', 'required': True},
             'target': {'type': 'string or vec3', 'required': True, 'note': 'an object name, or a world point'},
@@ -1231,6 +1268,13 @@ def describe_scene():
             # empties, which have no geometry to measure.
             'dimensions': _world_dimensions(item),
             'rotation_euler': _rounded3(getattr(item, 'rotation_euler', None)),
+            # Which of the two rotations the object actually obeys. A stored rotation_euler does
+            # nothing while the mode is QUATERNION (P0-F219: glTF imports arrive that way, and four
+            # renders came out identical), so a readback without this field cannot tell "the rotation
+            # applied" from "the rotation was silently ignored". rotation_quaternion is what drives
+            # the transform in that case, so it is reported too.
+            'rotationMode': str(getattr(item, 'rotation_mode', '') or ''),
+            'rotation_quaternion': _rounded3(getattr(item, 'rotation_quaternion', None)),
         }
         if item.type == 'MESH' and item.data is not None:
             entry['vertices'] = len(item.data.vertices)

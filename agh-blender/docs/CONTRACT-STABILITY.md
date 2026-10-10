@@ -105,6 +105,22 @@ args: { camera, width, height, path, transparent? }
   我们第一次跑时剪影贴满整幅 ⇒ 量出"高 **1.2 m**"，真值是 2.0 m —— **被裁掉的图会给出一个看起来合法的数**。
   只看比值，会把裁一半的图判成合格（与 `capture` 的 `touchesEdges` 同一个道理）。
 
+### 2.2 `0.5.0`：`rotation_euler` 的**生效条件**（你们实测抓到的 bug）
+
+`object.transform` / `object.look_at` 收到 `rotation_euler` 时，若对象**不是 euler 模式**，现在会
+**先把 `rotation_mode` 置为 `'XYZ'` 再写**，并在返回里报 `rotationMode: {before, after}`。
+
+- 之前的行为是**静默忽略**：值读回正是你写的，而 `matrix_world` 与渲染**都没动**。
+  **glTF 导入的每个网格都是 `QUATERNION`** —— 你们那四张只改旋转的渲染逐点位全等（1048576 点 × 4 通道）
+  就是这个 bug。
+- ⚠️ **`rotation_euler` 是绝对值**：传 `[0, 0, 0]` 会把 `mesh.import` 的轴纠正**清零** ——
+  那个纠正写在**对象的四元数**里（实测：同一网格 `[0,0,0]` 从"站着" 355×822 变成"躺着" 822×355）。
+  **想保留导入的朝向，就别传 `rotation_euler`。**
+- ⚠️ 顺序（给将来自己写 Blender Python 的人）：**必须先改 `rotation_mode`，再写 `rotation_euler`**。
+  反过来做，Blender 会在改模式那一刻用四元数**覆盖**你刚写的值。
+- 现状没有"真做不了"的情形（任何模式都能切到 `XYZ`），所以本轮**没有新增错误码**；将来若出现真正做不了的
+  组合，会按约定给明确码，不静默。
+
 ## 3. `describe_scene()`：字段级稳定性（这是你断言尺寸唯一要读的东西）
 
 ```json
@@ -122,6 +138,8 @@ args: { camera, width, height, path, transparent? }
 | `location` | **稳定** | 对象自身字段，`round 6`。**不是**世界坐标 |
 | `scale` | **稳定** | 对象自身字段，`round 6` |
 | `rotation_euler` | **稳定** | 弧度，`round 6`；非几何对象给 `null` |
+| `rotationMode` | **稳定（0.5.0 新增）** | 该对象**实际服从**哪种旋转：`XYZ` / `QUATERNION` / …。**没有这个字段，读回无法区分"旋转生效了"与"旋转被静默忽略了"** —— `rotation_euler` 在非 euler 模式下是**死值**（见 §2.2） |
+| `rotation_quaternion` | **稳定（0.5.0 新增）** | `round 6`；`rotationMode='QUATERNION'` 时**它**才是真正驱动变换的那个量 |
 | `dimensions` | **稳定（语义已冻结）** | **世界 AABB 边长**：`matrix_world @ bound_box` 八角求轴对齐范围。**已经包含旋转与 scale**。没有几何的对象给 `null` |
 | `vertices` / `polygons` | **稳定** | 仅 `MESH` |
 | `materials` | 加性 | 仅 `MESH`；顺序未承诺 |
