@@ -185,6 +185,10 @@ export function expectedObjectsFromOps(ops) {
         dimensions: Array.isArray(args.size) && args.size.length === 3 ? [...args.size] : null,
         location: Array.isArray(t?.location) ? [...t.location] : Array.isArray(args.location) ? [...args.location] : [0, 0, 0],
         scale: null,
+        // **我们自己发的那次旋转也要被期望**：`object.transform` 可能带 `rotation_euler`（例如把
+        // 倒过来的内容翻正）。若读回只要求"旋转为零"，就会把我们自己发的一转报成"下游没照做" ——
+        // 实测：mesh-triposr-7 的 matched 掉到 0/1，唯一差异就是它（location/名字/类型全对）。
+        rotation_euler: Array.isArray(t?.rotation_euler) ? [...t.rotation_euler] : null,
       })
       continue
     }
@@ -312,6 +316,17 @@ export function compareScene(expected, scene) {
     const scaleAsserted = scaleDelta !== null
     const rotationPublished = Array.isArray(got.rotation_euler)
     const rotationIsZero = !rotationPublished || got.rotation_euler.every((r) => Math.abs(r) <= SCENE_ROTATION_EPSILON)
+    // "场景与 ops 一致"**包含旋转**：期望为零时要求为零；期望非零（我们发过 object.transform 的
+    // rotation_euler）时要求相符 —— 否则我们自己发的那一转会被读成"下游没照做"。
+    const wantedRotation = Array.isArray(want.rotation_euler) ? want.rotation_euler : null
+    const rotationMatches = !rotationPublished
+      ? true
+      : wantedRotation
+        ? wantedRotation.every((r, i) => Math.abs(Number(r) - Number(got.rotation_euler[i] ?? 0)) <= SCENE_ROTATION_EPSILON)
+        : rotationIsZero
+    // 旋转会把"本地包围盒 × scale"变成另一个世界 AABB —— **除非**它是绕单轴转半圈（各轴只取反、尺寸不变）。
+    const turned = (got.rotation_euler ?? []).filter((r) => Math.abs(Number(r)) > SCENE_ROTATION_EPSILON)
+    const rotationPreservesBox = turned.length === 0 || (turned.length === 1 && Math.abs(Math.sin(Number(turned[0]))) <= 1e-6)
     // 尺寸断言的三个前置条件，缺一个就不做 —— 而"为什么没做"必须写进 rows：
     //   1. 下游为**这个对象**发布了 dimensions；
     //   2. 我们知道这种基元的单位尺寸（否则"期望值"就是我编的，torus 就是反例）；
@@ -322,7 +337,7 @@ export function compareScene(expected, scene) {
     // 三个前置条件必须**每一个都出现在这个条件里** —— 上面注释写了三条，代码里只写两条就是个 bug
     // （自检抓到过：旋转的对象尺寸仍然被"断言"了，于是 size_not_asserted_reason 成了 null）。
     const dimensionsDelta =
-      Array.isArray(got.dimensions) && expectedSize && rotationIsZero ? axisDelta(expectedSize, got.dimensions) : null
+      Array.isArray(got.dimensions) && expectedSize && rotationPreservesBox ? axisDelta(expectedSize, got.dimensions) : null
     const sizeAsserted = dimensionsDelta !== null
     // 这一行用的容差随**这个对象多大**变化 —— 曲面基元的包围盒偏差是按比例缩放的。
     // 期望值来自我们的 ops，而 ops 里的数字**带着参数写入时的精度**（写 4 位小数就只准到 5e-5）。
@@ -342,12 +357,14 @@ export function compareScene(expected, scene) {
         ? 'this downstream published no dimensions for this object'
         : !unit
           ? `no unit-extent entry for kind "${want.kind}", so an expected size would be a guess`
-          : 'the object is rotated, and dimensions is the local bounding box times scale, not the world AABB'
+          : 'the expected size is an axis-aligned box, and this rotation is not a half turn about one axis, so the world AABB would differ from it'
     const typeIsMesh = got.type === 'MESH'
-    // 旋转也算不符：M1 的 ops 从不设置 rotation_euler，所以现场不该有旋转。
+    // 旋转也要一致：**期望为零时要求为零；我们发过 rotation_euler 时要求相符**。
+    // （早先这里写死"现场不该有旋转"——那时 M1 的 ops 确实不发旋转；现在 mesh 路会发，
+    //  实测因此把 1/1 判成 0/1。）
     const ok =
       typeIsMesh &&
-      rotationIsZero &&
+      rotationMatches &&
       locationDelta !== null &&
       locationDelta <= tol &&
       (!scaleAsserted || scaleDelta <= tol) &&
@@ -362,6 +379,8 @@ export function compareScene(expected, scene) {
       scale_not_asserted_reason: scaleNotAssertedReason,
       rotation_published: rotationPublished,
       rotation_is_zero: rotationIsZero,
+      rotation_matches_ops: rotationMatches,
+      expected_rotation: wantedRotation,
       // 这一项的真假说明"尺寸语义"到底验没验；为假时 reason 说明为什么没验。
       size_asserted: sizeAsserted,
       size_not_asserted_reason: sizeNotAssertedReason,

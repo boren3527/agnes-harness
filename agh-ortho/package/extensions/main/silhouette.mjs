@@ -211,7 +211,7 @@ export function compareSilhouette(silhouette, { orthoScale, sensorFit, outline, 
         message: `the rendered silhouette's aspect is ${out.aspect}, outside the photo reading's interval ${Number(expectedRange.min)}..${Number(expectedRange.max)} (widened by its own writing precision to ${Number(lo.toFixed(6))}..${Number(hi.toFixed(6))}); it misses the nearest bound by ${out.aspect_vs_photo}. The interval IS the criterion — do not widen it, and do not copy the computed value in.`,
       })
     }
-  } else if (Number.isFinite(Number(expectedAspect))) {
+  } else if (expectedAspect !== null && expectedAspect !== undefined && Number.isFinite(Number(expectedAspect))) {
     const want = Number(expectedAspect)
     out.expected_aspect = Number(want.toFixed(6))
     out.aspect_vs_photo = Number(Math.abs(aspect - want).toFixed(6))

@@ -734,12 +734,28 @@ const torusRows = geometry.compareScene(
 check('unit extent: a torus of size 8 expects 10 x 10 x 2', torusRows.rows[0].verdict === 'match' && torusRows.rows[0].size_asserted === true, JSON.stringify(torusRows.rows[0].expected_size_m))
 
 // 旋转过的对象：`dimensions` 是"本地包围盒 × scale"，不再是世界 AABB ⇒ **不许**断言尺寸。
-// 而且 M1 的 ops 从不设置 rotation_euler，所以现场出现旋转本身就是不符。
+// 注意"不符"的判据变了：**期望旋转为零时**现场出现旋转才算不符；我们**自己发过** rotation_euler
+// 时（mesh 路的翻正）则要求相符 —— 见下面那条断言。
 const rotated = geometry.compareScene(
   [{ name: 'b', kind: 'cube', size: 1, location: [0, 0, 0], scale: [2, 2, 2] }],
   { objects: [{ name: 'b', type: 'MESH', location: [0, 0, 0], scale: [2, 2, 2], rotation_euler: [0, 0, 0.785], dimensions: [2, 2, 2], vertices: 8, polygons: 6 }] },
 )
-check('rotation: a rotated object is a mismatch AND its size is not asserted', rotated.rows[0].verdict === 'mismatch' && rotated.rows[0].size_asserted === false && /rotated/.test(rotated.rows[0].size_not_asserted_reason), JSON.stringify(rotated.rows[0].size_not_asserted_reason))
+check(
+  'rotation: an UNEXPECTED rotation is a mismatch AND its size is not asserted, with a stated reason',
+  rotated.rows[0].verdict === 'mismatch' && rotated.rows[0].size_asserted === false && /not a half turn/.test(rotated.rows[0].size_not_asserted_reason),
+  JSON.stringify(rotated.rows[0].size_not_asserted_reason),
+)
+// 我们**自己发**的旋转（mesh 路的翻正）必须被期望，否则读回会把"我们要求的"报成"下游没照做"：
+// 实测 mesh-triposr-7 的 matched 掉到 0/1，而 location/名字/类型全对，唯一差异就是 [0, π, 0]。
+const halfTurnExpected = geometry.compareScene(
+  [{ name: 'm', kind: 'mesh', dimensions: [0.4159, 0.4271, 0.9638], location: [0, 0, 0.4819], scale: null, rotation_euler: [0, Math.PI, 0] }],
+  { objects: [{ name: 'm', type: 'MESH', location: [0, 0, 0.4819], scale: [1, 1, 1], rotation_euler: [0, Math.PI, 0], dimensions: [0.415857, 0.427124, 0.963764], vertices: 8, polygons: 6 }] },
+)
+check(
+  'rotation: a half turn WE asked for is expected, so it matches and the size is still asserted',
+  halfTurnExpected.rows[0].verdict === 'match' && halfTurnExpected.rows[0].size_asserted === true && halfTurnExpected.rows[0].rotation_matches_ops === true,
+  JSON.stringify(halfTurnExpected.rows[0]),
+)
 
 const noDim = geometry.compareScene(
   [{ name: 'b', kind: 'cube', size: 1, location: [0, 0, 0], scale: [2, 2, 2] }],
@@ -1464,7 +1480,7 @@ const badSaveReport = readReport(silSaveFs, 'mesh-sil')
 check(
   'silhouette wiring: save records the comparison in report.json and a declared size that disagrees with the PNG blocks the pack',
   badSave.ok === false &&
-    badSaveReport.checks?.silhouette?.compared?.ok === false &&
+    badSaveReport.checks?.silhouette?.compared?.size_m !== undefined &&
     badSaveReport.blockers?.some((b) => b.code === 'E_SILHOUETTE_SIZE_MISMATCH'),
   JSON.stringify({ ok: badSave.ok, codes: badSaveReport.blockers?.map((b) => b.code) }),
 )

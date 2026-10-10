@@ -1837,7 +1837,9 @@ async function silhouetteFinding(tctx, spec, outline, photoCheck) {
       outline: entry && Number.isFinite(entry.u_span_m) && Number.isFinite(entry.v_span_m) ? { u_span: entry.u_span_m, v_span: entry.v_span_m } : null,
       // 与照片比走**区间**（与 photo_check 同源）；expectedAspect 只留给直接调用库的旧路径。
       expectedRange: photoRangeFor(photoCheck, view),
-      expectedAspect: photoCheckMidAspect(photoCheck, view),
+      // **不传 expectedAspect**：没有读数时那一档就是"没发生"。传 null 会被 `Number(null) === 0`
+      // 变成"期望 0"，于是抛出一条理由荒唐的 E_SILHOUETTE_OFF_PHOTO（"expects 0"）—— 实测发生过一轮。
+      // 库侧也加了 null 守卫（双保险：这种 JS 强制转换陷阱值得挡两次）。
     },
   )
   blockers.push(...compared.blockers)
