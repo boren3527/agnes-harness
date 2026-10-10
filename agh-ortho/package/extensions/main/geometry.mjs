@@ -336,6 +336,15 @@ export function compareScene(expected, scene) {
     // 旋转会把"本地包围盒 × scale"变成另一个世界 AABB —— **除非**它是绕单轴转半圈（各轴只取反、尺寸不变）。
     const turned = (got.rotation_euler ?? []).filter((r) => Math.abs(Number(r)) > SCENE_ROTATION_TOLERANCE)
     const rotationPreservesBox = turned.length === 0 || (turned.length === 1 && Math.abs(Math.sin(Number(turned[0]))) <= 1e-6)
+    // **字段设了 ≠ 几何动了**。实测（p0-rot-probe，2026-10-10）：`mesh.import` 走 glTF 导入器，
+    // 对象是 `rotation_mode='QUATERNION'` ⇒ Blender **忽略** rotation_euler ⇒ 值被存下、matrix_world 不动。
+    // 当时我们的读回只比 rotation_euler 字段，于是四组不同旋转"全部匹配" ✗ —— 这是"读回字段 ≠ 效果"的
+    // 又一次现形（前几次：声明 ≠ 事实、测量 ≠ 声明）。
+    // 下游发布 rotation_mode 时我们就判"这次旋转在该模式下能不能生效"；**没发布就不假装判定**。
+    const rotationMode = typeof got.rotation_mode === 'string' ? got.rotation_mode : null
+    const wantsRotation = Array.isArray(wantedRotation) && wantedRotation.some((r) => Math.abs(Number(r)) > SCENE_ROTATION_TOLERANCE)
+    const eulerModes = ['XYZ', 'XZY', 'YXZ', 'YZX', 'ZXY', 'ZYX']
+    const rotationEffective = wantsRotation && rotationMode !== null ? eulerModes.includes(rotationMode) : wantsRotation ? null : true
     // 尺寸断言的三个前置条件，缺一个就不做 —— 而"为什么没做"必须写进 rows：
     //   1. 下游为**这个对象**发布了 dimensions；
     //   2. 我们知道这种基元的单位尺寸（否则"期望值"就是我编的，torus 就是反例）；
@@ -374,6 +383,7 @@ export function compareScene(expected, scene) {
     const ok =
       typeIsMesh &&
       rotationMatches &&
+      rotationEffective !== false &&
       locationDelta !== null &&
       locationDelta <= tol &&
       (!scaleAsserted || scaleDelta <= tol) &&
@@ -392,6 +402,10 @@ export function compareScene(expected, scene) {
       expected_rotation: wantedRotation,
       // 旋转比较实际用的容差（弧度）—— 压线与否必须看得见，而且要能解释"为什么 3.5e-7 不算不符"。
       rotation_tolerance: SCENE_ROTATION_TOLERANCE,
+      // "这次旋转能不能生效"：下游发布 rotation_mode 才判（null = 发布方没给，不假装判定）。
+      // false 表示"我们要求了非零旋转，而该模式忽略 rotation_euler"—— 值会被存下、几何不动。
+      rotation_mode: rotationMode,
+      rotation_effective: rotationEffective,
       // 这一项的真假说明"尺寸语义"到底验没验；为假时 reason 说明为什么没验。
       size_asserted: sizeAsserted,
       size_not_asserted_reason: sizeNotAssertedReason,

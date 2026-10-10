@@ -767,6 +767,31 @@ check(
   roundedRotation.rows[0].rotation_matches_ops === true && roundedRotation.rows[0].verdict === 'match',
   JSON.stringify({ tol: roundedRotation.rows[0].rotation_tolerance, expected: roundedRotation.rows[0].expected_rotation }),
 )
+// **字段设了 ≠ 几何动了**（实测 p0-rot-probe：glTF 导入的对象是 QUATERNION 模式，rotation_euler 被忽略，
+// 四组不同旋转"全部匹配"）。下游一旦发布 rotation_mode，这条就变成可判的。
+const modeRows = (mode) =>
+  geometry.compareScene(
+    [{ name: 'm', kind: 'mesh', dimensions: [1, 1, 1], location: [0, 0, 0], scale: null, rotation_euler: [0, Math.PI / 2, 0] }],
+    { objects: [{ name: 'm', type: 'MESH', location: [0, 0, 0], scale: [1, 1, 1], rotation_euler: [0, Math.PI / 2, 0], ...(mode ? { rotation_mode: mode } : {}), dimensions: [1, 1, 1], vertices: 8, polygons: 6 }] },
+  ).rows[0]
+const quatRow = modeRows('QUATERNION')
+check(
+  'rotation: a wanted rotation on a QUATERNION-mode object is a mismatch (the value is stored, the geometry does not move)',
+  quatRow.verdict === 'mismatch' && quatRow.rotation_effective === false && quatRow.rotation_mode === 'QUATERNION',
+  JSON.stringify({ mode: quatRow.rotation_mode, effective: quatRow.rotation_effective }),
+)
+const xyzRow = modeRows('XYZ')
+check(
+  'rotation: the same rotation on an euler-mode object matches and is effective',
+  xyzRow.verdict === 'match' && xyzRow.rotation_effective === true,
+  JSON.stringify({ mode: xyzRow.rotation_mode, effective: xyzRow.rotation_effective }),
+)
+const noModeRow = modeRows(null)
+check(
+  'rotation: when the downstream publishes no rotation_mode we do NOT pretend to judge effectiveness',
+  noModeRow.verdict === 'match' && noModeRow.rotation_effective === null && noModeRow.rotation_mode === null,
+  JSON.stringify({ mode: noModeRow.rotation_mode, effective: noModeRow.rotation_effective }),
+)
 
 const noDim = geometry.compareScene(
   [{ name: 'b', kind: 'cube', size: 1, location: [0, 0, 0], scale: [2, 2, 2] }],
