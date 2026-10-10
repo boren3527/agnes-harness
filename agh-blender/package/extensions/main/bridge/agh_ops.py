@@ -1365,8 +1365,13 @@ def _world_box(item):
     return {
         'min': minimum,
         'max': maximum,
-        'center': [round((minimum[i] + maximum[i]) / 2.0, 6) for i in range(3)],
-        'size': [round(maximum[i] - minimum[i], 6) for i in range(3)],
+        # center and size are derived from the RAW corners and rounded once, exactly like min/max.
+        # Measured 2026-10-10: deriving size from the rounded corners instead made it disagree with
+        # `dimensions` by 1e-6 on the same object (toy1_mesh: size 0.783172 vs dimensions 0.783171),
+        # i.e. two published views of one box that were supposed to agree did not. One rounding per
+        # quantity is what keeps every view of this box the same box.
+        'center': [round((low[i] + high[i]) / 2.0, 6) for i in range(3)],
+        'size': [round(high[i] - low[i], 6) for i in range(3)],
         'space': 'world',
         'tolerance': tolerance,
         'estimated_tolerance': min(0.5 * (10.0 ** -decimals), tolerance),
