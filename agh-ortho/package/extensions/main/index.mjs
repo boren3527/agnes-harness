@@ -39,6 +39,7 @@ import {
   svgFor,
 } from './views.mjs'
 import { silhouetteOf, compareSilhouette } from './silhouette.mjs'
+import { decodePositions, toWorld, outlinesFor } from './meshoutline.mjs'
 
 const EMITTER_VERSION = '0.1.0'
 
@@ -1279,7 +1280,7 @@ async function assembleArtifacts(args, createdAt, tctx) {
     })
   }
   // ③ 图纸先落：这是复核者该打开的那个文件。六张分图仍在，但"一张图纸"才是 review 对象。
-  const sheet = renderSheet(views, placement, { projection: args.projection })
+  const sheet = renderSheet(views, placement, { projection: args.projection, outlines: (await meshOutlinesFor(tctx, args, emission.ops)) ?? undefined })
   files.push({
     name: 'sheet.svg',
     text: sheet.svg,
@@ -1528,6 +1529,10 @@ async function assembleArtifacts(args, createdAt, tctx) {
           meshMeasured = {
             up_axis: up,
             size_in_file: bounds.size.map((v) => Number(v.toFixed(9))),
+            // 文件**自己的**盒子的位置（文件空间、相对文件原点）：A1 要的就是这两个数 ——
+            // 我们的摆放把**文件原点**放到地上，所以"几何离约定差多少"就等于这个偏移。
+            file_box_min: bounds.min.map((v) => Number(v.toFixed(9))),
+            file_box_max: bounds.max.map((v) => Number(v.toFixed(9))),
             size_declared: declared,
             relative_tolerance: Number(sizeTol.toFixed(9)),
             nodes_measured: bounds.nodes,
@@ -1635,7 +1640,10 @@ async function assembleArtifacts(args, createdAt, tctx) {
         image: imageCheck.finding,
         overlaps: overlapFindings(boxes),
         parts: partCensus(args),
-        placement: placementReport(boxes),
+        placement: placementReport(
+          boxes,
+          meshMeasured && Array.isArray(meshMeasured.file_box_min) ? { min: meshMeasured.file_box_min, max: meshMeasured.file_box_max, space: 'file' } : null,
+        ),
         generated: generatedReport(args),
       },
       // 包里到底有没有模型本身？null = 这一轮没有导出，不是"有但没登记"。
@@ -1685,7 +1693,7 @@ async function retentionPlan(fs, currentRunId) {
   let pinned = []
   try {
     const raw = await fs.read(RETENTION_CONFIG_REL)
-    const parsed = JSON.parse(Buffer.isBuffer(raw) ? raw.toString('utf8') : String(raw))
+    const parsed = JSON.parse(Buffer.from(raw).toString('utf8'))
     if (Array.isArray(parsed?.pinned)) pinned = parsed.pinned.filter((x) => typeof x === 'string')
   } catch {
     pinned = []
@@ -2344,7 +2352,7 @@ async function meshRunFinding(tctx, args, spawnImpl) {
   let historyError = null
   try {
     const rawHistory = await fs.read(MESH_HISTORY_REL)
-    const parsedHistory = JSON.parse(Buffer.isBuffer(rawHistory) ? rawHistory.toString('utf8') : String(rawHistory))
+    const parsedHistory = JSON.parse(Buffer.from(rawHistory).toString('utf8'))
     if (Array.isArray(parsedHistory?.runs)) history = { shape: parsedHistory.shape ?? 'agh-ortho/mesh-history/1', runs: parsedHistory.runs }
   } catch {
     history = { shape: 'agh-ortho/mesh-history/1', runs: [] } // 第一次跑（或读坏了）⇒ 从这一条开始；不猜、不清空
@@ -2650,7 +2658,64 @@ function partCensus(params) {
  * 约定：**底面贴 z=0、水平居中**。容差按模型自身尺寸取**相对值**（"判据精度不能超过输入精度"
  * 那条同样适用）。**只报不挡** —— 这是"便于比较"的约定，不是几何正确性。
  */
-function placementReport(boxes) {
+/** 生成物的"文件空间 → 世界"变换：**只此一处**（几何盒子与图纸轮廓共用同一份）。 */
+function meshTransformFor(args, ops) {
+  const it = (Array.isArray(args.assembly) ? args.assembly : []).find(
+    (x) => x && x.source && x.source.kind === 'generated_mesh' && typeof x.path === 'string',
+  )
+  if (!it) return { why: 'no assembly item declares kind=generated_mesh AND carries its own path' }
+  const up = typeof it.source.up_axis === 'string' ? it.source.up_axis.toUpperCase().replace(/^[+-]/, '') : null
+  if (up !== 'X') return { why: `the file-to-world axis mapping is only measured for up='X' (this item declares ${up ?? 'nothing'})` }
+  const imp = (ops ?? []).find((o) => o.op === 'mesh.import' && o.args?.name === it.id)
+  const tr = (ops ?? []).find((o) => o.op === 'object.transform' && o.args?.name === it.id)
+  return {
+    item: it,
+    transform: {
+      map: [1, 2, 0],
+      scale: Number(imp?.args?.scale ?? 1),
+      location: Array.isArray(tr?.args?.location) ? tr.args.location : [0, 0, 0],
+    },
+  }
+}
+
+async function meshGeometryFor(tctx, args, ops) {
+  const t = meshTransformFor(args, ops)
+  if (t.why) return t
+  if (typeof tctx?.fs?.read !== 'function') return { why: 'the fs seam cannot read, so the file box is unknown' }
+  let b
+  try {
+    b = glbWorldBounds(await tctx.fs.read(t.item.path))
+  } catch (error) {
+    return { why: `the mesh file could not be read (${error?.message ?? error})` }
+  }
+  if (!b.ok) return { why: `the mesh could not be measured (${b.why})` }
+  if (b.rotated) return { why: 'a node carries a rotation, so an axis-aligned world box would be wrong' }
+  const { map, scale, location } = t.transform
+  return {
+    space: 'world',
+    min: [0, 1, 2].map((k) => b.min[map[k]] * scale + (location[k] ?? 0)),
+    max: [0, 1, 2].map((k) => b.max[map[k]] * scale + (location[k] ?? 0)),
+  }
+}
+
+/**
+ * 图纸上那层**轮廓**（B）：同一份变换、同一份顶点 ⇒ 六视图各一组"米"矩形。
+ * 量不出来（读不到/有旋转/顶点缺失）就返回 null —— **宁可只画盒子，也不画一个看起来对的轮廓**。
+ */
+async function meshOutlinesFor(tctx, args, ops) {
+  const t = meshTransformFor(args, ops)
+  if (t.why || typeof tctx?.fs?.read !== 'function') return null
+  let dec
+  try {
+    dec = decodePositions(await tctx.fs.read(t.item.path))
+  } catch {
+    return null
+  }
+  if (!dec.ok) return null
+  return outlinesFor(toWorld(dec.vertices, t.transform))
+}
+
+function placementReport(boxes, geometry = null) {
   if (!Array.isArray(boxes) || boxes.length === 0) {
     return { available: false, convention: 'envelope bottom on z=0, centred on x and y', note: 'no objects to measure' }
   }
@@ -2662,6 +2727,14 @@ function placementReport(boxes) {
   return {
     available: true,
     convention: 'envelope bottom on z=0, centred on x and y, so two versions of the same model diff cleanly',
+    // **这一档证的是哪件事**：`boxes` 来自我们**自己声明的** w/d/h 加上**我们发的** location ⇒
+    // 这是**自洽性**检查。对参数化部件，声明就是形状，所以它与几何是一回事；对**生成网格**不是：
+    // 文件的几何包围盒不必以文件原点为中心（实测 TripoSR 偏 1.3 cm，§9.27），于是"底面贴 z=0"
+    // 在**声明层**成立、在**几何层**不成立 —— 而这条曾经读起来像几何断言。
+    checked_on: 'the DECLARED envelope (w/d/h as placed by our own ops) — a self-consistency check, not a geometry assertion',
+    geometry_checked: false,
+    geometry_note:
+      'for a generated mesh this says nothing about the file\'s own bounding box: an exporter whose geometry is not centred on the file origin leaves the model that far off the ground plane, and no tier here measures it',
     envelope_min: min.map(round6),
     envelope_max: max.map(round6),
     envelope_size: size.map(round6),
@@ -2670,6 +2743,31 @@ function placementReport(boxes) {
     tolerance: round6(tol),
     on_ground: Math.abs(min[2]) <= tol,
     centred: Math.abs(centre[0]) <= tol && Math.abs(centre[1]) <= tol,
+    ...(geometry && Array.isArray(geometry.min) && Array.isArray(geometry.max)
+      ? meshBoxFields(geometry)
+      : geometry && geometry.why
+        ? { geometry_note: `the geometry half did not happen: ${geometry.why}` }
+        : {}),
+  }
+}
+
+/**
+ * `placement` 的**几何**那一半（A1，§9.27）：文件自己的盒子落在哪 —— 而不是我们声明的信封落在哪。
+ * 只有 save 这一侧能算（它手上有文件字节）；`fit` 的两处调用在纯函数 `reviseHints` 里，
+ * 要报几何得由工具层先量好再喂进来（下一步）。
+ */
+function meshBoxFields(g) {
+  const size = [0, 1, 2].map((k) => g.max[k] - g.min[k])
+  const tol = Math.max(1e-9, 0.01 * Math.max(...size))
+  const c = [(g.min[0] + g.max[0]) / 2, (g.min[1] + g.max[1]) / 2]
+  return {
+    geometry_checked: true,
+    file_box_space: g.space ?? 'unknown',
+    geometry_min: g.min.map(round6),
+    geometry_max: g.max.map(round6),
+    file_box_offset: [c[0], c[1], g.min[2]].map(round6),
+    geometry_note:
+      "file space: how far the file's OWN box sits from the file origin. Our placement puts the FILE ORIGIN on the ground plane, so this offset is what the geometry inherits — the envelope check is a statement about our declarations, this one about the bytes.",
   }
 }
 
@@ -2789,7 +2887,7 @@ function overlapFindings(boxes) {
  * 特别地：内部不一致类的 hint 会明确写"**不要靠调参数去凑**"。那说明是代码的 bug；
  * 调参数只会为了迎合一个出错的现场，把本来正确的模型改歪。
  */
-function reviseHints(params, emission, caps, { checked, aligned, fromParams, outline, overlaps, boxes }) {
+function reviseHints(params, emission, caps, { checked, aligned, fromParams, outline, overlaps, boxes, meshGeometry = null }) {
   const hints = []
   const add = (severity, where, problem, suggestion, evidence) => {
     const hint = { severity, where, problem, suggestion }
@@ -2945,7 +3043,7 @@ function reviseHints(params, emission, caps, { checked, aligned, fromParams, out
   }
 
   // ④ 规范摆放：不居中/不落地会让"两次迭代的 diff"混进整体位移，全是噪音。只报不挡。
-  const place = placementReport(boxes)
+  const place = placementReport(boxes, meshGeometry)
   if (place.available && (!place.on_ground || !place.centred)) {
     add(
       'warning',
@@ -3110,7 +3208,7 @@ export const runtime = {
           convention: VIEW_CONVENTION,
           projection: args.projection,
           sheet: placement,
-          sheet_svg: renderSheet(views, placement, { projection: args.projection }),
+          sheet_svg: renderSheet(views, placement, { projection: args.projection, outlines: (await meshOutlinesFor(tctx, args, emission.ops)) ?? undefined }),
           target_capability_set: emission.target_capability_set,
           capability_source: emission.capability_source,
           object_count: boxes.length,
@@ -3280,16 +3378,28 @@ export const runtime = {
         // 注意 fit 里**没有** `blockers` 数组（那是 verify/save 的）：结论走 verdict，所以这里直接进判定。
         const silhouetteFit = await silhouetteFinding(tctx, args.silhouette, outline, args.photo_check)
         const imageFit = await imageFinding(tctx, args)
-        const revise = reviseHints(args, emission, caps, { checked, aligned, fromParams, outline, overlaps, boxes })
+        const meshGeometry = await meshGeometryFor(tctx, args, emission.ops)
+        const revise = reviseHints(args, emission, caps, { checked, aligned, fromParams, outline, overlaps, boxes, meshGeometry })
         const validation = validationReport(args, emission, caps)
         const verdict = numericOk && validation.ok && revise.blocking === 0 && silhouetteFit.blockers.length === 0 && imageFit.blockers.length === 0 ? 'fit' : 'revise'
         // ③ 便宜的那一步的**单一复核对象**：六视图排在一张图纸上，全图一个比例尺。
-        const sheet = renderSheet(views, placement, { projection: args.projection })
+        const meshOutlines = await meshOutlinesFor(tctx, args, emission.ops)
+        const sheet = renderSheet(views, placement, { projection: args.projection, outlines: meshOutlines ?? undefined })
 
         const payload = {
           ok: verdict === 'fit',
           verdict,
-          revise_summary: { blocking: revise.blocking, warning: revise.warning },
+          revise_summary: {
+            // ★ 计数必须覆盖**所有**参与 verdict 的档。实测 2026-10-10：silhouette 有一条 blocking，
+            // 这里却报 0 —— 清单说"没事"而结论说"有事"，是这套东西最坏的一类矛盾。
+            blocking: revise.blocking + silhouetteFit.blockers.length + imageFit.blockers.length,
+            warning: revise.warning,
+            blocking_by_tier: {
+              parameters_and_ops: revise.blocking,
+              silhouette: silhouetteFit.blockers.length,
+              image: imageFit.blockers.length,
+            },
+          },
           revise_hints: revise.hints,
           validation,
           three_state: threeState(emission),
@@ -3339,7 +3449,7 @@ export const runtime = {
           anchor: anchorReport(args),
           // ①④ 两条**跨路对齐**的段（都只报不挡）
           parts: partCensus(args),
-          placement: placementReport(boxes),
+          placement: placementReport(boxes, meshGeometry),
           generated: generatedReport(args),
           target_capability_set: emission.target_capability_set,
           capability_source: emission.capability_source,

@@ -301,6 +301,13 @@ export function renderSheet(views, placement, options = {}) {
     const offY = y0 + 30 + (innerH - 30 - spanV * scale) / 2
     const toX = (u) => offX + (u - box.u[0]) * scale
     const toY = (v) => offY + (box.v[1] - v) * scale
+    // **网格自己的形状**（B）：调用方给的是"米"（每个视图一组 [u0,v0,u1,v1]），像素换算只在这里做一次。
+    // 画在部件矩形**之前**（半透明暗色）⇒ 声明（盒子）与事实（轮廓）叠着看，差在哪一眼就看得见。
+    for (const [i, r] of (options.outlines?.[view.id] ?? []).entries()) {
+      parts.push(
+        `<rect x="${toX(r[0]).toFixed(2)}" y="${toY(r[3]).toFixed(2)}" width="${Math.max(0.5, (r[2] - r[0]) * scale).toFixed(2)}" height="${Math.max(0.5, (r[3] - r[1]) * scale).toFixed(2)}" fill="rgba(30,30,30,0.55)"${i === 0 ? ' data-mesh-outline="1"' : ''}/>`,
+      )
+    }
     for (const [index, rect] of view.rects.entries()) {
       const w = Math.max(1, (rect.u[1] - rect.u[0]) * scale)
       const h = Math.max(1, (rect.v[1] - rect.v[0]) * scale)

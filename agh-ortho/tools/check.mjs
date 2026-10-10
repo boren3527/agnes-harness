@@ -530,6 +530,69 @@ check(
 
 // **网格的身份 + 可复现性的证据**（§9.29）：sidecar 的 `fileSha256` 也是**声明**（与真实字节比一次）；
 // history.json 一并登记成描述符 ⇒ "同一个 sha 跑出过 N 次"这句话**在包里可核**。
+// ---- B：图纸上那层**轮廓**（网格自己的形状）。夹具必须**带真实 BIN chunk** ——
+// `makeGlb` 只给 accessor 的 min/max，喂不了顶点；这里手搭两个 chunk（真值全已知）。
+const meshOutlineMod = await import(pathToFileURL(join(pkgDir, 'extensions', 'main', 'meshoutline.mjs')).href)
+const glbWithVerts = (verts) => {
+  const bin = Buffer.alloc(verts.length * 12)
+  verts.forEach((v, i) => {
+    bin.writeFloatLE(v[0], i * 12)
+    bin.writeFloatLE(v[1], i * 12 + 4)
+    bin.writeFloatLE(v[2], i * 12 + 8)
+  })
+  const lo = [0, 1, 2].map((k) => Math.min(...verts.map((v) => v[k])))
+  const hi = [0, 1, 2].map((k) => Math.max(...verts.map((v) => v[k])))
+  const json = {
+    asset: { version: '2.0' },
+    scene: 0,
+    scenes: [{ nodes: [0] }],
+    nodes: [{ mesh: 0 }],
+    meshes: [{ primitives: [{ attributes: { POSITION: 0 } }] }],
+    accessors: [{ bufferView: 0, componentType: 5126, count: verts.length, type: 'VEC3', min: lo, max: hi }],
+    bufferViews: [{ buffer: 0, byteOffset: 0, byteLength: bin.length }],
+    buffers: [{ byteLength: bin.length }],
+  }
+  const jraw = Buffer.from(JSON.stringify(json), 'utf8')
+  const jchunk = Buffer.concat([jraw, Buffer.alloc((4 - (jraw.length % 4)) % 4, 0x20)])
+  const bchunk = Buffer.concat([bin, Buffer.alloc((4 - (bin.length % 4)) % 4, 0)])
+  const head = Buffer.alloc(12)
+  head.write('glTF', 0, 'latin1')
+  head.writeUInt32LE(2, 4)
+  head.writeUInt32LE(12 + 8 + jchunk.length + 8 + bchunk.length, 8)
+  const jh = Buffer.alloc(8)
+  jh.writeUInt32LE(jchunk.length, 0)
+  jh.write('JSON', 4, 'latin1')
+  const bh = Buffer.alloc(8)
+  bh.writeUInt32LE(bchunk.length, 0)
+  bh.write('BIN\0', 4, 'latin1')
+  return Buffer.concat([head, jh, jchunk, bh, bchunk])
+}
+const boxVerts = []
+for (const x of [0, 0.4]) for (const y of [0, 0.4]) for (const z of [0, 2]) boxVerts.push([x, y, z])
+const decodedBox = meshOutlineMod.decodePositions(glbWithVerts(boxVerts))
+check(
+  'meshoutline: the vertices come out of a real BIN chunk (a fixture that lies about the container would prove nothing)',
+  decodedBox.ok === true && decodedBox.vertices.length === 8,
+  JSON.stringify({ ok: decodedBox.ok, n: decodedBox.vertices?.length, why: decodedBox.why }),
+)
+const boxOutlines = meshOutlineMod.outlinesFor(decodedBox.vertices)
+const spanOf = (runs) => [
+  Math.max(...runs.map((r) => r[2])) - Math.min(...runs.map((r) => r[0])),
+  Math.max(...runs.map((r) => r[3])) - Math.min(...runs.map((r) => r[1])),
+]
+const fSpan = spanOf(boxOutlines.front)
+const tSpan = spanOf(boxOutlines.top)
+check(
+  'meshoutline: a known 0.4 x 0.4 x 2 box projects to the u/v spans it must (front 0.4x2, top 0.4x0.4)',
+  Math.abs(fSpan[0] - 0.4) <= 0.02 && Math.abs(fSpan[1] - 2) <= 0.02 && Math.abs(tSpan[0] - 0.4) <= 0.02 && Math.abs(tSpan[1] - 0.4) <= 0.02,
+  JSON.stringify({ front: fSpan, top: tSpan }),
+)
+check(
+  'meshoutline: the runs are MERGED (a handful of rectangles, not one per cell) and hold the outline aspect',
+  boxOutlines.front.length <= 4 && boxOutlines.front.length >= 1 && Math.abs(fSpan[0] / fSpan[1] - 0.2) <= 0.02,
+  JSON.stringify({ runs: boxOutlines.front.length, aspect: fSpan[0] / fSpan[1] }),
+)
+
 const glbForHist = makeGlb([0.2, 1, 0.2])
 const glbHistSha = createHash('sha256').update(glbForHist).digest('hex')
 const fsMeshHist = meshFs(glbForHist)
@@ -555,6 +618,20 @@ check(
     histReport.mesh_reproduction?.sha256 === glbHistSha &&
     (histSaved.artifacts ?? []).some((a) => String(a.path).endsWith('history.json')),
   JSON.stringify({ repro: histReport.mesh_reproduction, codes: histReport.blockers?.map((b) => b.code) }),
+)
+check(
+  "placement: save now reports the FILE's own box (the geometry half of the convention), not only our declared envelope",
+  (() => {
+    const p = histReport.checks?.placement
+    const mm = histReport.mesh_measured
+    return (
+      p?.available === true &&
+      p.geometry_checked === true &&
+      Array.isArray(p.file_box_offset) &&
+      JSON.stringify(p.geometry_min) === JSON.stringify(mm.file_box_min)
+    )
+  })(),
+  JSON.stringify({ p: histReport.checks?.placement, mm_min: histReport.mesh_measured?.file_box_min }),
 )
 const fsMeshBadSha = meshFs(glbForHist)
 fsMeshBadSha.files.set(`${MESH_DIR}/source.json`, Buffer.from(JSON.stringify({ generator: 'StdGEN', unit: 'm', upAxis: 'Y', declaredHeight: 2, fileSha256: 'ff'.repeat(32) }), 'utf8'))
@@ -1652,6 +1729,14 @@ check(
 const baseFit = (await fitTool.execute({ ...MCAP_ARGS, against_scene: false }, withMCap)).structured
 const frontAspect = baseFit.outline.find((o) => o.view === 'front')?.w_over_h
 check('silhouette wiring: the fixture knows the front outline aspect it must reproduce', Number.isFinite(frontAspect), `front w_over_h = ${frontAspect}`)
+check(
+  'placement: the report says it checked the DECLARED envelope, not the geometry (the 1.3 cm that passed every tier)',
+  baseFit.placement?.geometry_checked === false &&
+    /DECLARED envelope/.test(baseFit.placement?.checked_on ?? '') &&
+    // 参数化部件**没有**几何那一半，而且现在的措辞是"**没发生 + 为什么**"（比原来那句更准）。
+    /geometry half did not happen|not centred on the file origin/.test(baseFit.placement?.geometry_note ?? ''),
+  JSON.stringify({ checked_on: baseFit.placement?.checked_on, geometry_checked: baseFit.placement?.geometry_checked }),
+)
 const silFitFs = (bw, bh) => {
   const f = memoryFs()
   f.files.set('D:/ws/out/front.png', blockPng(512, bw, bh))
@@ -1695,6 +1780,13 @@ for (const [upAxis, expect] of upAxisTable) {
   )
 }
 
+const meshGeomItem = { ...meshItem(), path: MESH_PATH_WIN, source: { ...meshItem().source, kind: 'generated_mesh', up_axis: 'X' } }
+const geomFit = (await fitTool.execute({ ...MCAP_ARGS, against_scene: false, assembly: [meshGeomItem] }, { fs: meshFs(makeGlb([0.2, 1, 0.2])), session: { workspaceRoot: ws } })).structured
+check(
+  'placement(fit): a generated mesh carries its own box into the report, and says which space it is in (A1 second half)',
+  geomFit.placement?.geometry_checked === true && geomFit.placement?.file_box_space === 'world' && Array.isArray(geomFit.placement?.file_box_offset),
+  JSON.stringify({ p: geomFit.placement, codes: geomFit.silhouette_blockers?.map((b) => b.code) }),
+)
 const silFitArgs = { ...MCAP_ARGS, against_scene: false, silhouette: silArgs, photo_check: { front: { w_over_h_min: 0.29, w_over_h_max: 0.33 } } }
 
 // 与照片比**只认区间**（与 photo_check 同源，宽度按写入精度放宽），不再用"中点 ± 渲染容差"。
@@ -1739,6 +1831,12 @@ check(
   'silhouette wiring: a render that disagrees with the outline forces the verdict to revise',
   badSil.verdict === 'revise' && badSil.silhouette?.compared?.ok === false && badSil.silhouette?.compared?.blockers?.some((b) => b.code === 'E_SILHOUETTE_OFF_OUTLINE'),
   JSON.stringify({ verdict: badSil.verdict, codes: badSil.silhouette?.compared?.blockers?.map((b) => b.code) }),
+)
+const summaryCountTest = badSil.revise_summary
+check(
+  'fit: the summary count covers EVERY tier that decides the verdict (a count of 0 next to verdict=revise is a lie)',
+  (summaryCountTest?.blocking ?? 0) >= 1 && (summaryCountTest?.blocking_by_tier?.silhouette ?? 0) >= 1 && badSil.ok === false,
+  JSON.stringify({ summary: summaryCountTest, verdict: badSil.verdict, ok: badSil.ok }),
 )
 const noScale = (await fitTool.execute({ ...MCAP_ARGS, against_scene: false, silhouette: { path: 'D:/ws/out/front.png' } }, { fs: silFitFs(100, 200), session: { workspaceRoot: ws } })).structured
 check(
