@@ -436,6 +436,38 @@ def _op_file_stage_export(args):
 _IMPORT_FORMATS = {'.glb': 'gltf', '.gltf': 'gltf', '.obj': 'obj'}
 
 
+def _bake_correction(items, correction):
+    """Move a world-space correction out of the object transforms and into the mesh data.
+
+    A correction that lives in an object's rotation (or scale) is one absolute write away from being
+    cleared without a trace. Measured 2026-10-10: a glTF import arrives in QUATERNION mode, so
+    rotation_euler was ignored outright and four renders that differed only in rotation came out
+    pixel-identical over 1048576 pixels and all four channels. Orientation belongs to the data.
+
+    The correction is conjugated into each object's own space (M^-1 @ C @ M) and applied to the
+    vertices, so world positions are unchanged and the object transform -- whatever the file
+    declared -- is left exactly as it was. Nothing here needs a selection or the operator context,
+    and it cannot be undone by a later absolute write to rotation_euler or scale.
+    """
+    baked = 0
+    for item in items:
+        if item.type != 'MESH' or item.data is None:
+            continue
+        if item.data.users > 1:
+            # Transforming shared data would move every other user of it too.
+            item.data = item.data.copy()
+        matrix = item.matrix_world.copy()
+        try:
+            local = matrix.inverted() @ correction @ matrix
+        except ValueError:
+            continue
+        item.data.transform(local, shape_keys=True)
+        baked += 1
+    if baked:
+        bpy.context.view_layer.update()
+    return baked
+
+
 def _op_mesh_import(args):
     """Import an external mesh into the managed scene.
 
@@ -486,15 +518,20 @@ def _op_mesh_import(args):
                 pass
         raise OpError('E_NO_MESH_IMPORTED', 'the file produced no mesh object (%d object(s) were created and removed)' % len(created))
 
+    # The up-axis correction and the import scale are both WORLD-space corrections, and neither
+    # belongs in the object transform: while they live there, an absolute write to rotation_euler or
+    # scale silently clears them. Compose them into one matrix and bake it into the vertices.
+    correction = None
     if _IMPORT_FORMATS[extension] == 'gltf' and up_axis != 'Y':
         degrees, axis = (-90.0, 'X') if up_axis == 'Z' else (90.0, 'Y')
-        rotation = Matrix.Rotation(math.radians(degrees), 4, axis)
-        for item in meshes:
-            item.matrix_world = rotation @ item.matrix_world
+        correction = Matrix.Rotation(math.radians(degrees), 4, axis)
     if scale != 1.0:
         resize = Matrix.Scale(scale, 4)
-        for item in meshes:
-            item.matrix_world = resize @ item.matrix_world
+        correction = resize if correction is None else resize @ correction
+    baked = 0
+    if correction is not None:
+        bpy.context.view_layer.update()  # matrix_world is a depsgraph value; settle it before reading
+        baked = _bake_correction(meshes, correction)
 
     requested_name = args.get('name')
     if isinstance(requested_name, str) and requested_name.strip():
@@ -518,6 +555,7 @@ def _op_mesh_import(args):
         'format': _IMPORT_FORMATS[extension],
         'upAxis': up_axis,
         'scale': scale,
+        'transformBaked': baked,
         'bytes': actual_bytes,
         'sha256': _sha256_file(path),
         'imported': sorted(item.name for item in meshes),
