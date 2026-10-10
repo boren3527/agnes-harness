@@ -868,6 +868,24 @@ check('retention honestly says this plugin cannot delete', saved.retention.canno
 // **引用即钉住**（§9.28 发现二）：一个 owned 但已过保留期的 run，若在 `retention.json` 里被点名，
 // 就**不得**出现在待清清单里 —— "被记录引用过"是工具**不可能知道**的事，只能由调用方点名。
 await fs2.write('.agnes/agh-ortho/runs/oldsim/marker.json', JSON.stringify({ contract: 1, producer: 'agh-ortho@0.1.0', createdAt: '2020-01-01T00:00:00.000Z' }))
+const hrFalse = (await save.execute({ ...SAMPLE, run_id: 'hr-false', human_review: { performed: false, note: 'filming take' } }, { fs: fs2, session: { workspaceRoot: ws } })).structured
+const hrNone = (await save.execute({ ...SAMPLE, run_id: 'hr-none' }, { fs: fs2, session: { workspaceRoot: ws } })).structured
+const hrDefault = (await save.execute({ ...SAMPLE, run_id: 'hr-default', human_review: { performed: false } }, { fs: fs2, session: { workspaceRoot: ws } })).structured
+const hrFalseReport = readReport(fs2, 'hr-false')
+const hrDefaultReport = readReport(fs2, 'hr-default')
+const hrNoneReport = readReport(fs2, 'hr-none')
+check(
+  'human_review: the package says whether a human looked, and says "not recorded" instead of implying yes',
+  hrFalseReport.human_review?.performed === false &&
+    hrFalseReport.human_review?.declared === true &&
+    hrFalseReport.human_review?.note === 'filming take' &&
+    hrDefaultReport.human_review?.performed === false &&
+    /NOT reviewed by a human/.test(hrDefaultReport.human_review?.note ?? '') &&
+    hrNoneReport.human_review?.performed === null &&
+    hrNoneReport.human_review?.declared === false &&
+    /does not say whether/.test(hrNoneReport.human_review?.note ?? ''),
+  JSON.stringify({ f: hrFalseReport.human_review, d: hrDefaultReport.human_review, n: hrNoneReport.human_review }),
+)
 const retPlain = (await save.execute({ ...SAMPLE, run_id: 'ret-plain' }, { fs: fs2, session: { workspaceRoot: ws } })).structured
 await fs2.write('.agnes/agh-ortho/retention.json', JSON.stringify({ pinned: ['oldsim'] }))
 const retPinned = (await save.execute({ ...SAMPLE, run_id: 'ret-pinned' }, { fs: fs2, session: { workspaceRoot: ws } })).structured

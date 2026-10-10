@@ -419,6 +419,16 @@ const SAVE_INPUT = {
     silhouette: SILHOUETTE_INPUT,
     // 源照片的真实路径（可选）：登记进包，并核 `source.input_image_sha256` 的声明。
     image_file: { type: 'string', minLength: 2 },
+    // **人有没有看过**（B 那一关）。不传 ⇒ 包里记 `performed: null` 并写明"没有记录" ——
+    // 因为"跳过复核"和"没记录"不是一回事，而"中途不用等我"那种用法必须留痕。
+    human_review: {
+      type: 'object',
+      properties: {
+        performed: { type: 'boolean' },
+        note: { type: 'string' },
+      },
+      additionalProperties: false,
+    },
   },
   required: EMIT_OPS_INPUT.required,
   additionalProperties: false,
@@ -1648,6 +1658,18 @@ async function assembleArtifacts(args, createdAt, tctx) {
       },
       // 包里到底有没有模型本身？null = 这一轮没有导出，不是"有但没登记"。
       scene_file: sceneFile,
+      // 形状**没有任何一档能证**（numeric 证自洽、读回证下游照做、剪影抓量级），
+      // 所以"人到底看没看"必须写在包里 —— 尤其是"默认放行"那种跑法。
+      human_review: {
+        performed: args.human_review?.performed ?? null,
+        declared: args.human_review !== undefined,
+        note:
+          args.human_review?.performed === true
+            ? args.human_review.note ?? 'a human reports having looked at the sheet and the render'
+            : args.human_review?.performed === false
+              ? args.human_review.note ?? 'recorded as NOT reviewed by a human'
+              : 'no human_review was declared, so this package does not say whether anyone looked at the sheet or the render. Shape is unproven by every tier here.',
+      },
     mesh_file: meshFile,
     mesh_source: meshSource,
     mesh_measured: meshMeasured,
@@ -2841,6 +2863,8 @@ function meshBoxFields(g) {
     file_box_offset: [c[0], c[1], g.min[2]].map(round6),
     geometry_note:
       "file space: how far the file's OWN box sits from the file origin. Our placement puts the FILE ORIGIN on the ground plane, so this offset is what the geometry inherits — the envelope check is a statement about our declarations, this one about the bytes.",
+    geometry_mapping_note:
+      "up='X': world x comes from file y, world y from file z, world z from file x (plus the placement). The axis mapping is a PERMUTATION, so world ranges can carry numbers that look like the file's own — that is why the space of every box is named here.",
   }
 }
 
