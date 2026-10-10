@@ -756,6 +756,17 @@ check(
   halfTurnExpected.rows[0].verdict === 'match' && halfTurnExpected.rows[0].size_asserted === true && halfTurnExpected.rows[0].rotation_matches_ops === true,
   JSON.stringify(halfTurnExpected.rows[0]),
 )
+// **复刻实测**：下游把 rotation_euler 印成 6 位小数（3.141593）而我们的期望是 π（3.141592653589793），
+// 差 3.5e-7 ⇒ 必须判"相符"（容差 = 半个末位 5e-7）。拿 1e-9 比会把"印得短"当成"没照做"。
+const roundedRotation = geometry.compareScene(
+  [{ name: 'm', kind: 'mesh', dimensions: [1, 1, 1], location: [0, 0, 0], scale: null, rotation_euler: [0, Math.PI, 0] }],
+  { objects: [{ name: 'm', type: 'MESH', location: [0, 0, 0], scale: [1, 1, 1], rotation_euler: [0, 3.141593, 0], dimensions: [1, 1, 1], vertices: 8, polygons: 6 }] },
+)
+check(
+  'rotation: a rotation published to 6 decimals still matches an expected pi (the tolerance follows the published precision)',
+  roundedRotation.rows[0].rotation_matches_ops === true && roundedRotation.rows[0].verdict === 'match',
+  JSON.stringify({ tol: roundedRotation.rows[0].rotation_tolerance, expected: roundedRotation.rows[0].expected_rotation }),
+)
 
 const noDim = geometry.compareScene(
   [{ name: 'b', kind: 'cube', size: 1, location: [0, 0, 0], scale: [2, 2, 2] }],

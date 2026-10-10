@@ -208,7 +208,7 @@ export function compareSilhouette(silhouette, { orthoScale, sensorFit, outline, 
     if (!out.matches_photo) {
       out.blockers.push({
         code: 'E_SILHOUETTE_OFF_PHOTO',
-        message: `the rendered silhouette's aspect is ${out.aspect}, outside the photo reading's interval ${Number(expectedRange.min)}..${Number(expectedRange.max)} (widened by its own writing precision to ${Number(lo.toFixed(6))}..${Number(hi.toFixed(6))}); it misses the nearest bound by ${out.aspect_vs_photo}. The interval IS the criterion — do not widen it, and do not copy the computed value in.`,
+        message: `the rendered silhouette's aspect is ${out.aspect}, outside the photo reading's interval ${Number(expectedRange.min)}..${Number(expectedRange.max)} (widened by its own writing precision to ${Number(lo.toFixed(6))}..${Number(hi.toFixed(6))}); it misses the nearest bound by ${out.aspect_vs_photo}. The interval IS the criterion — do not widen it, and do not copy the computed value in. Note what this tier is for: it catches errors of magnitude, it cannot certify agreement within 10% — so read a small miss as "the generated silhouette is this much wider than the reading" (recordable, and a fact about the generator), not as proof that the geometry is wrong.`,
       })
     }
   } else if (expectedAspect !== null && expectedAspect !== undefined && Number.isFinite(Number(expectedAspect))) {

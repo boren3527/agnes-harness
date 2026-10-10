@@ -226,6 +226,15 @@ export const SCENE_ABSOLUTE_FLOOR = 1e-9
 /** 旋转是弧度、无量纲，不能用长度推出的容差；M1 的 ops 从不设旋转，这里取一个极小绝对值。 */
 const SCENE_ROTATION_EPSILON = 1e-9
 
+/**
+ * 旋转的**比较**容差。下游发布的 `rotation_euler` 带精度：实测读到 `3.141593`（6 位小数），
+ * 而我们期望 `3.141592653589793` —— 差 3.5e-7。拿 1e-9 去比，等于把"下游把数印成 6 位小数"
+ * 判成"下游没照做"（实测：matched 0/1，唯一不符项就是它，而同一行的尺寸差 4.3e-5 能过容差）。
+ *
+ * 这是"判据精度不能超过输入精度"的**第 9 次**。容差取**半个末位**（1e-6 / 2），并把依据写在载荷里。
+ */
+const SCENE_ROTATION_TOLERANCE = 5e-7
+
 export function sceneToleranceFor(...values) {
   const scale = Math.max(0, ...values.map((v) => Math.abs(Number(v) || 0)))
   return Math.max(SCENE_ABSOLUTE_FLOOR, SCENE_RELATIVE_TOLERANCE * scale)
@@ -315,17 +324,17 @@ export function compareScene(expected, scene) {
     const scaleDelta = axisDelta(want.scale, got.scale)
     const scaleAsserted = scaleDelta !== null
     const rotationPublished = Array.isArray(got.rotation_euler)
-    const rotationIsZero = !rotationPublished || got.rotation_euler.every((r) => Math.abs(r) <= SCENE_ROTATION_EPSILON)
+    const rotationIsZero = !rotationPublished || got.rotation_euler.every((r) => Math.abs(r) <= SCENE_ROTATION_TOLERANCE)
     // "场景与 ops 一致"**包含旋转**：期望为零时要求为零；期望非零（我们发过 object.transform 的
     // rotation_euler）时要求相符 —— 否则我们自己发的那一转会被读成"下游没照做"。
     const wantedRotation = Array.isArray(want.rotation_euler) ? want.rotation_euler : null
     const rotationMatches = !rotationPublished
       ? true
       : wantedRotation
-        ? wantedRotation.every((r, i) => Math.abs(Number(r) - Number(got.rotation_euler[i] ?? 0)) <= SCENE_ROTATION_EPSILON)
+        ? wantedRotation.every((r, i) => Math.abs(Number(r) - Number(got.rotation_euler[i] ?? 0)) <= SCENE_ROTATION_TOLERANCE)
         : rotationIsZero
     // 旋转会把"本地包围盒 × scale"变成另一个世界 AABB —— **除非**它是绕单轴转半圈（各轴只取反、尺寸不变）。
-    const turned = (got.rotation_euler ?? []).filter((r) => Math.abs(Number(r)) > SCENE_ROTATION_EPSILON)
+    const turned = (got.rotation_euler ?? []).filter((r) => Math.abs(Number(r)) > SCENE_ROTATION_TOLERANCE)
     const rotationPreservesBox = turned.length === 0 || (turned.length === 1 && Math.abs(Math.sin(Number(turned[0]))) <= 1e-6)
     // 尺寸断言的三个前置条件，缺一个就不做 —— 而"为什么没做"必须写进 rows：
     //   1. 下游为**这个对象**发布了 dimensions；
@@ -381,6 +390,8 @@ export function compareScene(expected, scene) {
       rotation_is_zero: rotationIsZero,
       rotation_matches_ops: rotationMatches,
       expected_rotation: wantedRotation,
+      // 旋转比较实际用的容差（弧度）—— 压线与否必须看得见，而且要能解释"为什么 3.5e-7 不算不符"。
+      rotation_tolerance: SCENE_ROTATION_TOLERANCE,
       // 这一项的真假说明"尺寸语义"到底验没验；为假时 reason 说明为什么没验。
       size_asserted: sizeAsserted,
       size_not_asserted_reason: sizeNotAssertedReason,
