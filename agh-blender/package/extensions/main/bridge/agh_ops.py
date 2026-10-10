@@ -561,7 +561,18 @@ def _op_mesh_import(args):
         'imported': sorted(item.name for item in meshes),
         'meshCount': len(meshes),
         'dimensions': dimensions,
-        'bounds': {'min': [round(v, 6) for v in low], 'max': [round(v, 6) for v in high], 'center': center},
+        # FILE space, not the scene: this is measured before the caller's object.transform runs, so
+        # it is the geometry's own box at import. It is NOT a substitute for the world box that
+        # describe_scene() publishes -- measured on this project, one and the same object read
+        # z = -0.487 here and z = 0.0002 in the scene, half a metre apart. Labeled so the two can
+        # never be mistaken for each other (agh-ortho raised exactly this in
+        # DOWNSTREAM-REQUEST-frame-and-bounds.md P1).
+        'bounds': {
+            'min': [round(v, 6) for v in low],
+            'max': [round(v, 6) for v in high],
+            'center': center,
+            'space': 'scene at import, BEFORE object.transform',
+        },
         'objectCount': _counts(),
     }
 
@@ -891,6 +902,41 @@ def _op_render_still(args):
         'ortho_scale': readback['ortho_scale'],
         'sensor_fit': readback['sensor_fit'],
         'metresPerPixel': readback['metresPerPixel'],
+        # WHERE the camera was when this image was made. Requested by agh-ortho
+        # (DOWNSTREAM-REQUEST-frame-and-bounds.md P2): ortho_scale fixes the frame height, but the
+        # POSE is what decides what was actually seen -- without it, "this image" and "this camera"
+        # have no checkable relation, and the pose has to be transcribed from a separate scene read.
+        # `rotation_euler` is reported even though the render only uses it in an euler rotation
+        # mode (0.5.0): a reader that cannot tell whether the stored euler was the effective
+        # rotation cannot check the pose at all. `camera.rotation_euler` below is the effective
+        # orientation for EVERY mode -- for a quaternion object the stored euler is dead (P0-F219),
+        # so reading the raw field would certify a pose that was never rendered.
+        'camera_pose': _camera_pose(item),
+    }
+
+
+def _camera_pose(item):
+    """The camera's placement at render time, plus how it was obtained.
+
+    `rotation_euler` is `item.rotation_euler`, the field a consumer can compare against the value it
+    sent to `camera.add`. `rotation_mode` and `rotation_effective` say whether that field is the one
+    that decided the orientation: in a non-euler mode it is not, and then the honest orientation is
+    `rotation_quaternion`. Both are published so a caller never has to assume which arm it is on.
+    """
+    mode = str(getattr(item, 'rotation_mode', '') or '')
+    euler = _rounded3(getattr(item, 'rotation_euler', None))
+    quaternion = _rounded3(getattr(item, 'rotation_quaternion', None))
+    zero = [0.0, 0.0, 0.0]
+    effective = euler if mode == 'XYZ' else quaternion
+    return {
+        'name': item.name,
+        'location': [round(v, 6) for v in item.location],
+        'rotation_euler': euler,
+        'rotation_quaternion': quaternion,
+        'rotation_mode': mode,
+        # True only when the published rotation_euler is the one that oriented the camera.
+        'rotation_effective': bool(mode == 'XYZ' or (effective == zero if effective is not None else True)),
+        'scale': [round(v, 6) for v in item.scale],
     }
 
 
@@ -1062,7 +1108,7 @@ OP_MANIFEST.update({
     'render.still': {
         'mutates': True,
         'destructive': False,
-        'summary': 'render scene.camera to a .png on disk (capture renders the viewport instead); returns path, sha256, bytes, width, height, ortho_scale, sensor_fit and metresPerPixel -- never an image block',
+        'summary': 'render scene.camera to a .png on disk (capture renders the viewport instead); returns path, sha256, bytes, width, height, ortho_scale, sensor_fit, metresPerPixel and camera_pose (name/location/rotation_euler/rotation_mode/rotation_effective) -- never an image block',
         'args': {
             'camera': {'type': 'string', 'required': True, 'note': 'the camera to render with; it becomes scene.camera'},
             'width': {'type': 'number', 'required': True, 'range': '1..16384 pixels'},
@@ -1267,6 +1313,66 @@ def _world_bounds(item):
     return low, high
 
 
+def _decimal_places(value):
+    """How many decimals a value was published with; 0 when it is integral.
+
+    Python drops trailing zeros when it renders a float, so 0.5 prints as "0.5" while 1.0 prints
+    as "1.0". Used only to state a tolerance -- never to change a value.
+    """
+    text = repr(float(value))
+    if 'e' in text or 'E' in text:
+        return 6
+    return len(text.split('.')[1]) if '.' in text else 0
+
+
+def _world_box(item):
+    """The object's world axis-aligned box, None when it has no geometry to measure.
+
+    Same type gate as `_world_dimensions`, for the same measured reason: cameras, lights and
+    empties answer [0, 0, 0] instead of raising, so a "box" for them would be a legal-looking lie.
+
+    `min`/`max` are the property a consumer asserts against; `center`/`size` are conveniences that
+    make the box self-contained (`size` must equal `dimensions` for the same object). The two
+    tolerances are published rather than implied, because "how close is close enough" differs by
+    reference and only one of them is a limit we can defend:
+
+    - `tolerance` (1e-6) is the limit the COMPUTATION can defend: every component is published
+      through `round(v, 6)`, so a value cannot be off by more than half a unit in the sixth decimal.
+      It is deliberately not claimed to be a measured jitter bound -- repeated-read stability has not
+      been measured on this path, and an unmeasured number presented as measured is the defect this
+      project keeps catching.
+    - `estimated_tolerance` (half a unit in the last published decimal) is what the *printed*
+      precision can actually support. It is 5e-7 when six decimals are printed and much looser for a
+      value that happens to print as an integer, which is exactly when a reader should not treat the
+      digits as significant.
+
+    The two disagree by design: a consumer comparing with `tolerance` sees a tighter, stricter
+    answer, and can compare against `estimated_tolerance` as well instead of turning the published
+    default into the only verdict (CONTRACT §3.7). `decimals` says which value produced
+    `estimated_tolerance`, so the bound can be audited rather than trusted.
+    """
+    if item.type not in _GEOMETRY_TYPES:
+        return None
+    try:
+        low, high = _world_bounds(item)
+    except Exception:
+        return None
+    minimum = [round(v, 6) for v in low]
+    maximum = [round(v, 6) for v in high]
+    decimals = max([_decimal_places(v) for v in minimum + maximum] or [6])
+    tolerance = 1e-6
+    return {
+        'min': minimum,
+        'max': maximum,
+        'center': [round((minimum[i] + maximum[i]) / 2.0, 6) for i in range(3)],
+        'size': [round(maximum[i] - minimum[i], 6) for i in range(3)],
+        'space': 'world',
+        'tolerance': tolerance,
+        'estimated_tolerance': min(0.5 * (10.0 ** -decimals), tolerance),
+        'decimals': decimals,
+    }
+
+
 def _world_dimensions(item):
     """Final world-space size of the object, or None when it has no geometry to measure.
 
@@ -1305,6 +1411,15 @@ def describe_scene():
             # Final world-space size (scale is already baked in). None for cameras, lights and
             # empties, which have no geometry to measure.
             'dimensions': _world_dimensions(item),
+            # Where the geometry actually SITS, not merely how big it is. Requested by agh-ortho
+            # (DOWNSTREAM-REQUEST-frame-and-bounds.md P1): `dimensions` cannot catch a placement
+            # error -- measured on their side, a geometry base 1.3 cm high and another shifted
+            # -0.206 m both passed every tier, because every read said the object was exactly where
+            # it had been asked to be. min/max are world space, taken AFTER the transform, so a
+            # consumer can compare its own numbers against the scene instead of against its own
+            # intent. None for objects with no geometry, exactly like `dimensions`, and tagged with
+            # its space so it cannot be confused with mesh.import's file-space box.
+            'bounds': _world_box(item),
             'rotation_euler': _rounded3(getattr(item, 'rotation_euler', None)),
             # Which of the two rotations the object actually obeys. A stored rotation_euler does
             # nothing while the mode is QUATERNION (P0-F219: glTF imports arrive that way, and four

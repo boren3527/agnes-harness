@@ -79,8 +79,23 @@
 ```
 args: { camera, width, height, path, transparent? }
 →  { path, sha256, bytes, width, height, camera, previousCamera, transparent, overwrote,
-     ortho_scale, sensor_fit, metresPerPixel }
+     ortho_scale, sensor_fit, metresPerPixel, camera_pose }
+
+camera_pose = { name, location, rotation_euler, rotation_quaternion, rotation_mode,
+                rotation_effective, scale }
 ```
+
+> **0.7.0 加 `camera_pose`**，回你方 `DOWNSTREAM-REQUEST-frame-and-bounds.md` P2。
+> ⚠ **更正你方文档的一处表述**：0.6.0 的 `render.still` 返回里**没有顶层 `location`**
+> （只有 `camera`/`previousCamera`/`ortho_scale`/`sensor_fit`/`metresPerPixel` 等）——
+> 你方 P2 验收文字把第一个 `camera` 当成了 `camera: {name, location, ...}` 对象，实际它是**字符串**。
+> 所以我们补的是**两个**字段而不是一个。以本行为准。
+>
+> `camera_pose.rotation_euler` 就是 `Object.rotation_euler`，可与 `camera.add` 发出的值逐项比。
+> 但**非欧拉模式下它是死值**（§2.2）：所以同时发布 `rotation_quaternion` 与 `rotation_mode`，
+> 并用 `rotation_effective` 说明**这次**朝向是否由 `rotation_euler` 决定。
+> ⚠ `rotation_mode` 只在**真的发生过旋转写入**时才是 `XYZ`：`camera.add` 不传 `rotation_euler` 时
+> 相机可能是 `QUATERNION`，此时若朝向非零，`rotation_effective` 为 `false` —— 那是**如实报告**，不是故障。
 
 - 用 **`scene.camera`** 渲（**不是**视口 —— 那是 `capture` 的活）。`camera` 指定的相机会**成为** `scene.camera`，原值在 `previousCamera` 里。
 - `transparent: true` ⇒ `film_transparent` + RGBA ⇒ **剪影 = alpha>0**（不需要猜背景色）。
@@ -156,6 +171,7 @@ args: { camera, width, height, path, transparent? }
 | `rotationMode` | **稳定（0.5.0 新增）** | 该对象**实际服从**哪种旋转：`XYZ` / `QUATERNION` / …。**没有这个字段，读回无法区分"旋转生效了"与"旋转被静默忽略了"** —— `rotation_euler` 在非 euler 模式下是**死值**（见 §2.2） |
 | `rotation_quaternion` | **稳定（0.5.0 新增）** | `round 6`；`rotationMode='QUATERNION'` 时**它**才是真正驱动变换的那个量 |
 | `dimensions` | **稳定（语义已冻结）** | **世界 AABB 边长**：`matrix_world @ bound_box` 八角求轴对齐范围。**已经包含旋转与 scale**。没有几何的对象给 `null` |
+| `bounds` | **稳定（0.7.0 新增）** | **世界 AABB 本身**：`{min, max, center, size, space:'world', tolerance, estimated_tolerance, decimals}`。`min`/`max` 是断言用的那对；`size` 必等于同一对象的 `dimensions`。与 `dimensions` 同一类型闸门：无几何 ⇒ `null`（不是 `[0,0,0]`）。⚠ 与 `mesh.import` 的 `bounds` **不同空间**（那是导入那一刻、`object.transform` 之前，带 `space` 标签） |
 | `vertices` / `polygons` | **稳定** | 仅 `MESH` |
 | `materials` | 加性 | 仅 `MESH`；顺序未承诺 |
 | `objectCount` / `materials` / `knownOps` | 稳定 | `knownOps` 是"当前实例认识的 op 名"，长度会随加 op 增长 |

@@ -1869,3 +1869,50 @@ after euler=90x   rotation_euler=[1.570796,0,0]           <- 读回是你写的
   （要求了非零旋转而模式非欧拉 ⇒ 该行判 `mismatch`）；**没发布就不假装判定**。所以这个字段要保持发布。
 
 
+## AA. 0.7.0：世界包围盒 + 渲染位姿（2026-10-10，上游 P1/P2）
+
+**任务**：`DOWNSTREAM-REQUEST-frame-and-bounds.md` 的 P1/P2。P3（`view.frame`）上游已于 19:56 **撤回**：op 不存在，
+但 `capture` 本来就按对象取景（`objectsFramed: 1`、`margin: 1.15`），按请求文档自己的先决条件**不必做**。
+
+### AA.1 改了什么（全部是返回字段，op 表未动）
+
+| 位置 | 新增 |
+|---|---|
+| `describe_scene()` 每对象 | `bounds` = `{min, max, center, size, space:'world', tolerance, estimated_tolerance, decimals}` |
+| `render.still` 返回 | `camera_pose` = `{name, location, rotation_euler, rotation_quaternion, rotation_mode, rotation_effective, scale}` |
+| `mesh.import` 返回 | 原有的**文件空间** `bounds` 加 `space: 'scene at import, BEFORE object.transform'` |
+
+- **类型闸门照旧**：`bounds` 走 `_GEOMETRY_TYPES`，相机/灯光/空物体给 `null` 而非 `[0,0,0]`（与 §5 同一实测理由）。
+- **两个容差分开发布**：`tolerance`=1e-6 是 `round(v,6)` 能担保的**计算限**（**未实测抖动就不声称实测抖动** ——
+  第一版注释里我把没测过的"重复读稳定"写成了实测结论，已自行改掉）；`estimated_tolerance`=末位半个单位（6 位时 5e-7），
+  并把 `decimals` 一并写出，使这个界可审。
+- **`rotation_effective`**：非欧拉模式下 `rotation_euler` 是死值（P0-F219），故位姿块同时发四元数与模式，
+  并明说这次朝向**是否**由 `rotation_euler` 决定。不能一边把死值报出去、一边假装它是那一张图的朝向。
+- **`space` 标签**：`mesh.import` 的 `bounds` 是**导入那一刻**的盒子（`object.transform` 之前），与
+  `describe_scene()` 的世界盒子是两个空间 —— firefly1 实测同物差半米（`z=-0.487` vs `z≈0.0002`）⇒
+  两者都打标签，使误读不可能发生。这正是上游 P1 点名的那个坑。
+
+### AA.2 关键流程事实：改源码 ≠ 生效（重新实测确认）
+
+AGH 加载的是**已安装的内容寻址快照** `…\.runtime-snapshots\sha256-ca3aa3f5…`。
+把工作区 `package/` 改完之后 `agh_blender_start`，实例**仍返回旧形状**（`render.still` 无 `camera_pose`、
+对象行无 `bounds`），而快照里的 `agh_ops.py` 就是 0.6.0 版。⇒ **必须重装**（`disable → remove → install → trust → enable`）
+才会进运行态。这条与 §8.2 的承诺逐字一致，本轮再次实测确认。
+
+### AA.3 上游文档里的一处偏差（已在本包内留下注释）
+
+上游 P2 的验收文字说 `render.still` **已有** `camera / location / ortho_scale / sensor_fit`。
+实测（快照 0.6.0 源码 + 活体返回值）**只有 8 个键**：`path / sha256 / bytes / width / height / camera /
+previousCamera / transparent / overwrote / ortho_scale / sensor_fit / metresPerPixel` —— **顶层没有 `location`**。
+
+⇒ 上游那个 5e-7 的 location 差值不是从 `render.still` 读的，而是从 `camera.add` 的返回（那里确实有 `location`）
+或场景读数里得到的。所以 P2 的真实缺口**比上游写的更大**：是**两个**字段（`location` 与 `rotation_euler`），
+而不是一个。本包不拿这条去反驳对方，只在代码注释里写明真实缺口 —— 否则下一个人会接着假定那里有 `location`。
+
+### AA.4 本轮的验证边界（明确写清）
+
+`py_compile` 通过、AST 结构自检确认三个新块都在；但**改动生效与否必须靠重装后的活体复核**，
+而那一步需要人按 `y`（`install` 走 AGH 原生确认）。因此在本节写下时，**`bounds` 与 `camera_pose`
+在运行态尚未被观测**。跑完活体后再把实测值与上游给的可复算验收值并入本节。
+
+
