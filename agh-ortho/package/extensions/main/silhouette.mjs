@@ -142,7 +142,7 @@ export function metresPerPixel({ orthoScale, sensorFit, width, height }) {
  *   - `expectedAspect`（来自 photo_check 的区间中点）⇒ 像不像照片。
  * 容差 = max(2 像素折算成米, 相对 1%) —— 见文件头第 3 条。
  */
-export function compareSilhouette(silhouette, { orthoScale, sensorFit, outline, expectedAspect, minPixels = 2, relativeTolerance = 0.01 } = {}) {
+export function compareSilhouette(silhouette, { orthoScale, sensorFit, outline, expectedAspect, expectedRange, minPixels = 2, relativeTolerance = 0.01 } = {}) {
   const out = { view: silhouette?.view ?? null, blockers: [] }
   if (!silhouette || silhouette.aspect_px === null || silhouette.aspect_px === undefined) {
     out.blockers.push({ code: 'E_SILHOUETTE_EMPTY', message: 'the render contains no foreground pixels, so there is no outline to compare' })
@@ -186,7 +186,32 @@ export function compareSilhouette(silhouette, { orthoScale, sensorFit, outline, 
       })
     }
   }
-  if (Number.isFinite(Number(expectedAspect))) {
+  // 与照片比：**认照片读数写下的那个区间**（宽度按它的写入精度放宽），与 photo_check 同一套口径。
+  // 实测抓到过同一件事两个结论：`photo_check` 的区间判定说 inside:true，而这里拿"区间中点 ± 渲染容差"
+  // 去比，说差 0.033 > 容差 0.0097 ⇒ 挡住。一个事实两套判据、两个结论，读者无从解释。
+  // 所以**区间是判据**；中点距离只作为信息印出来，不参与判定。
+  if (expectedRange && Number.isFinite(Number(expectedRange.min)) && Number.isFinite(Number(expectedRange.max))) {
+    const bound = Number(expectedRange.boundTolerance ?? 0)
+    const lo = Number(expectedRange.min) - bound
+    const hi = Number(expectedRange.max) + bound
+    const mid = (Number(expectedRange.min) + Number(expectedRange.max)) / 2
+    out.photo_range = {
+      min: Number(expectedRange.min),
+      max: Number(expectedRange.max),
+      bound_tolerance: bound,
+      widened_to: [Number(lo.toFixed(6)), Number(hi.toFixed(6))],
+    }
+    out.expected_aspect = Number(mid.toFixed(6))
+    out.aspect_vs_photo = Number((aspect < lo ? lo - aspect : aspect > hi ? aspect - hi : 0).toFixed(6))
+    out.aspect_vs_photo_midpoint = Number(Math.abs(aspect - mid).toFixed(6))
+    out.matches_photo = aspect >= lo && aspect <= hi
+    if (!out.matches_photo) {
+      out.blockers.push({
+        code: 'E_SILHOUETTE_OFF_PHOTO',
+        message: `the rendered silhouette's aspect is ${out.aspect}, outside the photo reading's interval ${Number(expectedRange.min)}..${Number(expectedRange.max)} (widened by its own writing precision to ${Number(lo.toFixed(6))}..${Number(hi.toFixed(6))}); it misses the nearest bound by ${out.aspect_vs_photo}. The interval IS the criterion — do not widen it, and do not copy the computed value in.`,
+      })
+    }
+  } else if (Number.isFinite(Number(expectedAspect))) {
     const want = Number(expectedAspect)
     out.expected_aspect = Number(want.toFixed(6))
     out.aspect_vs_photo = Number(Math.abs(aspect - want).toFixed(6))

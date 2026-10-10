@@ -1360,7 +1360,69 @@ const silFitFs = (bw, bh) => {
 const silArgs = { path: 'D:/ws/out/front.png', ortho_scale: 2, sensor_fit: 'VERTICAL' }
 // 夹具里的 `photo_check` 写的是 0（那是别处用例），这里要一份**与渲染相称**的读数，
 // 否则这一档会被"照片读数 0"挡住 —— 那验证的是另一件事。
-const silFitArgs = { ...MCAP_ARGS, against_scene: false, silhouette: silArgs, photo_check: { front: { w_over_h_min: frontAspect, w_over_h_max: frontAspect } } }
+// up_axis 的**符号**：方向不是任何一档能算出来的（包围盒对 ± 不敏感）—— 实测 mesh-triposr-6 里
+// 人物站起来但**是倒的**，只有人眼看渲染图才知道。一旦写进声明，插件要把它翻译成一次确定的旋转，
+// 而且必须落在**第二条 op**（object.transform）上：那样它与下游"upAxis 转换与变换谁先谁后"无关。
+const upAxisCase = async (upAxis) => {
+  const item = {
+    id: 'body_mesh',
+    feature: 'mesh',
+    w: { v: 0.4159 },
+    d: { v: 0.4271 },
+    h: { v: 0.9638 },
+    path: '.agnes/agh-ortho/meshes/x/mesh.glb',
+    source: { kind: 'generated_mesh', unit: 'normalised', up_axis: upAxis, declared_height: 0.9638 },
+  }
+  const res = (await byName.agh_ortho_emit_ops.execute({ ...MCAP_ARGS, assembly: [item] }, {})).structured
+  const t = (res.ops ?? []).find((o) => o.op === 'object.transform')
+  return t?.args?.rotation_euler ?? null
+}
+const upAxisTable = [
+  ['X', null],
+  ['+X', null],
+  ['-X', [0, Math.PI, 0]],
+  ['Y', null],
+  ['-Y', [Math.PI, 0, 0]],
+  ['Z', null],
+  ['-Z', [Math.PI, 0, 0]],
+]
+for (const [upAxis, expect] of upAxisTable) {
+  const got = await upAxisCase(upAxis)
+  check(
+    `up_axis "${upAxis}": the flip ${expect ? 'is emitted on the second op' : 'is absent'}`,
+    JSON.stringify(got) === JSON.stringify(expect),
+    JSON.stringify(got),
+  )
+}
+
+const silFitArgs = { ...MCAP_ARGS, against_scene: false, silhouette: silArgs, photo_check: { front: { w_over_h_min: 0.29, w_over_h_max: 0.33 } } }
+
+// 与照片比**只认区间**（与 photo_check 同源，宽度按写入精度放宽），不再用"中点 ± 渲染容差"。
+// 依据是实测：同一轮里 photo_check 说 inside:true，而中点判据说差 0.033 > 容差 0.0097 ⇒ 挡住。
+// 一个事实两套判据、两个结论 —— 读者无从解释。这两条断言把区间语义钉死。
+const silPhotoMod = await import(pathToFileURL(join(pkgDir, 'extensions', 'main', 'silhouette.mjs')).href)
+const silPhotoUnit = (aspectPx) => ({
+  width: 1024,
+  height: 1024,
+  touches_edges: { left: false, right: false, top: false, bottom: false },
+  bbox_px: { width: aspectPx, height: 1 },
+  aspect_px: aspectPx,
+})
+const silPhotoRange = { min: 0.37, max: 0.43, boundTolerance: 0.005 }
+const silPhotoEdge = silPhotoMod.compareSilhouette(silPhotoUnit(0.4315), { orthoScale: 1.2, sensorFit: 'VERTICAL', expectedRange: silPhotoRange })
+check(
+  'photo interval: an aspect just outside the written bound but inside its writing precision does NOT block',
+  silPhotoEdge.matches_photo === true && silPhotoEdge.blockers.length === 0 && silPhotoEdge.aspect_vs_photo === 0,
+  JSON.stringify({ delta_to_bound: silPhotoEdge.aspect_vs_photo, distance_to_midpoint: silPhotoEdge.aspect_vs_photo_midpoint }),
+)
+const silPhotoFar = silPhotoMod.compareSilhouette(silPhotoUnit(0.75), { orthoScale: 1.2, sensorFit: 'VERTICAL', expectedRange: silPhotoRange })
+check(
+  'photo interval: an aspect clearly outside the interval blocks, and says which bound it missed',
+  silPhotoFar.matches_photo === false &&
+    silPhotoFar.blockers.some((b) => b.code === 'E_SILHOUETTE_OFF_PHOTO') &&
+    silPhotoFar.aspect_vs_photo > 0,
+  JSON.stringify(silPhotoFar.blockers.map((b) => b.code)),
+)
 const okSil = (await fitTool.execute({ ...silFitArgs }, { fs: silFitFs(Math.round(200 * frontAspect), 200), session: { workspaceRoot: ws } })).structured
 check(
   'silhouette wiring: fit compares the render against its own outline, and agrees when they match',

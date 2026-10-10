@@ -652,6 +652,23 @@ function buildBox(item, name, blockers) {
   ]
 }
 
+/**
+ * 声明里的 up 轴 → 需要的那次旋转（弧度）。
+ *
+ * 为什么需要符号：`up_axis: "X"` 只说"最长轴是 X"，**没说方向**。实测（`mesh-triposr-6`）：
+ * 按 X 声明之后人物从"躺"变成"站"，但**是倒的**（脚在上）—— 也就是说内容的 up 是 **−X**。
+ * 方向不是任何一档能算出来的（包围盒对 ± 不敏感），只有人眼看渲染图才知道；但一旦知道，
+ * 它可以写进声明，由插件翻译成一次确定的旋转。
+ *
+ * 旋转表达成**第二条 op**（`object.transform`，在导入之后执行），所以不受下游
+ * "upAxis 转换与变换谁先谁后"的影响：翻转作用在**已经立正**的对象上。
+ * 负号 ⇒ 绕一条水平轴翻 180°，即把"上"变成"下"。
+ */
+function upAxisRotation(axis, sign) {
+  if (sign > 0) return null
+  return axis === 'X' ? [0, Math.PI, 0] : [Math.PI, 0, 0]
+}
+
 /** 外部生成的网格（StdGEN / CharacterGen 那类）：**声明驱动**。
  *
  *  emit 阶段是纯函数、**不读盘**，所以这里只认参数里写下的声明：`path`（文件在哪）、
@@ -668,7 +685,10 @@ function buildMesh(item, name, blockers) {
   const w = leafNumber(item, 'w', blockers)
   const d = leafNumber(item, 'd', blockers)
   const h = leafNumber(item, 'h', blockers)
-  const upAxis = typeof source.up_axis === 'string' ? source.up_axis.toUpperCase() : null
+  const upRaw = typeof source.up_axis === 'string' ? source.up_axis.trim().toUpperCase() : null
+  // 符号可选：`-X` 表示内容沿 −X 朝上（"站起来了但是倒的"）。不写符号即正方向。
+  const upSign = typeof upRaw === 'string' && upRaw.startsWith('-') ? -1 : 1
+  const upAxis = typeof upRaw === 'string' ? upRaw.replace(/^[+-]/, '') : null
   const unit = typeof source.unit === 'string' ? source.unit : null
   const declared = Number(source.declared_height)
   if (!path) {
@@ -681,7 +701,7 @@ function buildMesh(item, name, blockers) {
   if (upAxis === null || !['X', 'Y', 'Z'].includes(upAxis)) {
     blockers.push({
       code: 'E_ARG_MISSING',
-      message: `"${item.id}": source.up_axis must name the axis the FILE is up (X/Y/Z). Guessing it silently produces a rotated, plausible-looking model — that is a silent error, so it is refused.`,
+      message: `"${item.id}": source.up_axis must name the axis the FILE is up (X/Y/Z, optionally signed: -X means the content's up points along -X). Guessing it silently produces a rotated, plausible-looking model — that is a silent error, so it is refused.`,
     })
     return []
   }
@@ -724,7 +744,7 @@ function buildMesh(item, name, blockers) {
     // 否则对象停在原点（实测：第 3 步 location 未生效，正是这个原因）。
     {
       op: 'object.transform',
-      args: { name, location: placementOf(item, h) },
+      args: { name, location: placementOf(item, h), ...(upAxisRotation(upAxis, upSign) ? { rotation_euler: upAxisRotation(upAxis, upSign) } : {}) },
     },
   ]
 }
@@ -1759,6 +1779,18 @@ function photoCheckMidAspect(photoCheck, view) {
 }
 
 /**
+ * 与照片比时用的**区间**（含写入精度带来的边界容差）—— 与 `photoCheckFindings` 同源。
+ * 不能退化成"中点 ± 渲染容差"：那是同一件事的第二套判据（实测抓到过一次，两个结论）。
+ */
+function photoRangeFor(photoCheck, view) {
+  const reading = photoCheck?.[view]
+  if (!reading || typeof reading.w_over_h_min !== 'number' || typeof reading.w_over_h_max !== 'number') return null
+  const lo = Math.min(reading.w_over_h_min, reading.w_over_h_max)
+  const hi = Math.max(reading.w_over_h_min, reading.w_over_h_max)
+  return { min: lo, max: hi, boundTolerance: declaredBoundTolerance(lo, hi) }
+}
+
+/**
  * 读一张剪影图，并与参数侧 `outline`（几何自洽）和 `photo_check`（像不像照片）比。
  * 返回 `{ finding, blockers }`；**绝不抛错** —— 读不到/解不开/没有尺度都是**明确 blocker**，
  * 因为"没发生"必须和"通过了"分开说。
@@ -1803,6 +1835,8 @@ async function silhouetteFinding(tctx, spec, outline, photoCheck) {
       sensorFit: spec.sensor_fit,
       // numericOutline 给的是 `u_span_m` / `v_span_m`（米），这里对齐字段名。
       outline: entry && Number.isFinite(entry.u_span_m) && Number.isFinite(entry.v_span_m) ? { u_span: entry.u_span_m, v_span: entry.v_span_m } : null,
+      // 与照片比走**区间**（与 photo_check 同源）；expectedAspect 只留给直接调用库的旧路径。
+      expectedRange: photoRangeFor(photoCheck, view),
       expectedAspect: photoCheckMidAspect(photoCheck, view),
     },
   )
