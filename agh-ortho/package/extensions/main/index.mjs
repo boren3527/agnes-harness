@@ -227,6 +227,10 @@ const MESH_SOURCE = {
     unit: { type: 'string' },
     declared_height: { type: 'number' },
     note: { type: 'string' },
+    // **这份照片读数是以什么为基准的**：`cutout`（抠过图，量的是主体）还是 `whole_frame`（整幅画面）。
+    // 同一张照片两者能差 2.4 倍（实测 0.755 vs 1.78），所以不写基准，读者无法判断那个区间量的是什么；
+    // 而"事后把基准换掉"就成了一次同义反复 —— 这是真实病史（区间从 0.84 改成 1.78，且改在出结果之后）。
+    subject: { type: 'string' },
   },
   required: ['kind'],
   additionalProperties: false,
@@ -1645,6 +1649,8 @@ async function assembleArtifacts(args, createdAt, tctx) {
         anchor: anchorReport(args),
         declared_confidence: declaredConfidence(args),
         photo_check: photoCheckFindings(args, outline),
+        // 读数量的**基准**（主体 / 整幅画面）：不声明就明写"未声明"，不替它猜。
+        photo_basis: photoBasisFinding(args),
         silhouette: silhouetteCheck.finding,
         // 源图那一环的结论（声明 vs 真实字节的 sha256）。
         image: imageCheck.finding,
@@ -2637,6 +2643,29 @@ function anchorReport(params) {
  * 两者都摆在明面上。而随手填一个跟几何一样的数字，等于承认"我按模型反推的"，
  * 那就等于没读（这一点写在建议里，逼它自己说清楚）。
  */
+/**
+ * `photo_check` 的**基准**（§5）：生成物的那些比例读数量的是"主体"还是"整幅画面"？
+ * 这不是文档洁癖 —— 同一张照片两者能差 2.4 倍（实测 0.755 与 1.78），
+ * 而不写基准时，一个区间可以被事后换成另一个基准（真实病史），那正好是一次同义反复。
+ * 所以由 `source.subject` 声明，报告里随时可核；缺了就**明写缺**，不替它猜。
+ */
+function photoBasisFinding(params) {
+  const items = Array.isArray(params?.assembly) ? params.assembly : []
+  const meshes = items.filter((it) => it?.source?.kind === 'generated_mesh')
+  const declared = [...new Set(meshes.map((it) => it?.source?.subject).filter((s) => typeof s === 'string'))]
+  const basis = meshes.length === 0 ? 'not_applicable' : declared.length === 0 ? 'undeclared' : declared.join('+')
+  return {
+    basis,
+    declared_by: meshes.length === 0 ? null : 'assembly[].source.subject',
+    note:
+      basis === 'not_applicable'
+        ? 'no generated mesh here: the intervals describe the parametric parts themselves, so there is no cut-out to distinguish from a whole frame'
+        : basis === 'undeclared'
+          ? 'a generated mesh is present but nothing declares the BASIS of the photo readings (cutout vs whole_frame). The same photograph measures very differently either way (0.755 vs 1.78 measured), so a reader cannot tell what the interval covers — and switching the basis after seeing a result would be a tautology.'
+          : `the photo readings are taken on: ${basis}`,
+  }
+}
+
 function photoCheckFindings(params, outline) {
   const declared = params.photo_check
   if (!declared || typeof declared !== 'object' || Object.keys(declared).length === 0) {
@@ -3532,6 +3561,7 @@ export const runtime = {
           },
           // ③ 那一关的可核部分：模型写下的照片读数 vs 我们算出来的轮廓。
           photo_check: photoCheckFindings(args, outline),
+          photo_basis: photoBasisFinding(args),
           // 剪影那一档：渲染出的轮廓 vs 上面两个（就像不像照片，这是可判的那一半）。
           silhouette: silhouetteFit.finding,
           // 剪影那一档的 blockers **单独列出**：读不到图时 finding 是 null，若只留 finding，

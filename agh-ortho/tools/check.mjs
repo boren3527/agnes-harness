@@ -1845,6 +1845,17 @@ check(
   geomFit.placement?.geometry_checked === true && geomFit.placement?.file_box_space === 'world' && Array.isArray(geomFit.placement?.file_box_offset),
   JSON.stringify({ p: geomFit.placement, codes: geomFit.silhouette_blockers?.map((b) => b.code) }),
 )
+check(
+  'photo basis: a generated mesh without a declared subject says "undeclared" instead of letting a reader guess',
+  geomFit.photo_basis?.basis === 'undeclared' && /nothing declares the BASIS/.test(geomFit.photo_basis?.note ?? ''),
+  JSON.stringify({ flat: geomFit.photo_basis, nested: geomFit.checks?.photo_basis }),
+)
+const declaredSubjFit = (await fitTool.execute({ ...MCAP_ARGS, against_scene: false, assembly: [{ ...meshGeomItem, source: { ...meshGeomItem.source, subject: 'cutout' } }] }, { fs: meshFs(makeGlb([0.2, 1, 0.2])), session: { workspaceRoot: ws } })).structured
+check(
+  'photo basis: declaring subject=cutout is reflected, so the interval can be read for what it measures',
+  (declaredSubjFit.photo_basis ?? declaredSubjFit.checks?.photo_basis)?.basis === 'cutout',
+  JSON.stringify({ flat: declaredSubjFit.photo_basis, nested: declaredSubjFit.checks?.photo_basis }),
+)
 const silFitArgs = { ...MCAP_ARGS, against_scene: false, silhouette: silArgs, photo_check: { front: { w_over_h_min: 0.29, w_over_h_max: 0.33 } } }
 
 // 与照片比**只认区间**（与 photo_check 同源，宽度按写入精度放宽），不再用"中点 ± 渲染容差"。
