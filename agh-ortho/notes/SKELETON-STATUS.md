@@ -1534,6 +1534,30 @@ aspect `0.889151` 与包里的 measured 值一致 ⇒ **内容一致**，但那�
 `human_review` + `geometry_mapping_note`（`95995b73`）、`photo_basis` + `subject`（`8494ab74`）、
 `silhouettes` 数组（`0f00a2e7`）。自检 **289 PASS / 0 FAIL**。
 
+## 9.32 三条下游请求的实测裁决（2026-10-10 19:56）：两减一撤，外加我自己的一个判据错误
+
+**P1（世界包围盒）未做到 —— 仍是唯一挡着的那条。** `agh_blender_scene` / `agh_blender_open` 的对象行只有
+`location / scale / dimensions / rotation / vertices / polygons`；`mesh.import` 那个 `bounds` 是**文件空间**的
+（在 `object.transform` **之前**）⇒ **世界包围盒无处可读**。同一件东西在两个空间里能差半米
+（`firefly1`：import 回报底面 `z=-0.487`，世界几何底面 `z≈0.0002`）。⇒ 那 **1.3 cm 与 20 cm** 的偏差，
+**下游读数仍然抓不到**；我们现在的 `geometry_*` 是**自己解 GLB 字节**得来的 —— 是"我们侧的解"，
+不是"下游场景的读数"。这正是要修的那条缝。
+
+**P2（渲染位姿）缩小为一句话。** `render.still` 已经有 `camera / location / ortho_scale / sensor_fit`
+（`location` 差 5e-7），**只差 `rotation_euler` 不自报** ⇒ 朝向仍在被**抄**（从 `object.look_at` 的回报）。
+（请求原文里"把 `sensor_fit` 放进 `camera`"那句是我写得含糊 —— 我们这侧 `sensor_fit` 在顶层，位姿三项在
+`camera` 块里，够用。）
+
+**P3（取景 op）撤回。** op 不存在（`E_UNKNOWN_OP`，16 个 op 里没有 `view.*`），**但先决条件成立**：
+`capture` 的回报带 `framing.objectsFramed: 1`、`margin: 1.15`、全套 `center/radius/fov` —— **它本来就按对象取景**。
+按请求文档开头自己写的"若已取好 ⇒ 这条可以不做"：不必做。
+
+**我自己写错的那条判据（同族第 12 次）。** 我给 P3 定的验收"模型占画幅 **≥60%**"**是错的**：
+同一场景同一对象，占**画幅高度**的比例**随画幅长宽比变** —— `1600×1200 → 60.5%`、`700×1000（与主体相称）
+→ 41.1%`、`420×1000 → 34%`。⇒ 那个数是一个**没有写明基准的比值**，它测的是**画幅**，不是**对象**。
+与这一轮刚给 `photo_check` 补上的 `photo_basis`（主体 vs 整幅画面）**是同一件事**：
+**判据必须带着它的基准一起写** —— 否则同一个数字可以被两个基准读成两个结论。
+
 ## 10. 未决项
 
 

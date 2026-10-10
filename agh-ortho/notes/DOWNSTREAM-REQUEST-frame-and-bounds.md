@@ -19,6 +19,19 @@
 
 **注意**：`dimensions` 不够 —— 它只有尺寸，没有**位置**；而偏差恰恰全在位置上。
 
+### 验收结果（2026-10-10 19:56 实测）：**未做到 —— 这条仍然挡着**
+
+- `agh_blender_scene` 与 `agh_blender_open` 的对象行里只有 `location / scale / dimensions / rotation /
+  vertices / polygons` —— **没有 `bounds`**。
+- `mesh.import` **确实**回报 `bounds{min,max,center}`，但那是**文件空间**的盒子（`object.transform` **之前**）。
+  放进世界的那一步**不在这个盒子里** ⇒ 世界包围盒**仍然无处可读**。
+  对照：`firefly1` 的 import 回报底面在 `z = -0.487`，而世界里的几何底面在 `z ≈ 0.0002` —— 同一件东西，
+  两个空间，差出半米。
+- 后果：**1.3 cm 与 20 cm 那两个偏差，靠下游现有读数仍然抓不到**。我们今天是用自己解 GLB 字节算出的
+  `geometry_*` 顶着 —— 那是**我们侧的解**，不是**下游场景的读数**。这正是要修的那条缝。
+- 也说明 P1 后半句（"改成贴地居中后应报 `min[2] == 0`"）**无法验**：前半句就没有可读的世界包围盒，
+  属"**没有东西可验**"，不是"没验"。
+
 ---
 
 ## P2. `render.still` 的回报里带上**相机位姿**
@@ -29,6 +42,15 @@
 
 **验收**：回报里出现 `camera: { name, location, rotation_euler }`（`sensor_fit` 已由你们钉死 VERTICAL，也带上），
 数值与调用方 `camera.add` 发的**在 1e-6 内一致**。配合已有的 `sha256`，那一档就从"我知道答案"变成"包能证明答案"。
+
+### 验收结果（2026-10-10 19:56 实测）：**部分做到 —— 只缺 `rotation_euler`**
+
+- `render.still` 回报里 **已有** `camera` / `location` / `ortho_scale` / `sensor_fit`
+  （`location` 差值 5e-7，其余 0，`metresPerPixel` 自洽）✓
+- **但 `rotation_euler` 没有自报** ⇒ 那张图的朝向仍然是从 `object.look_at` 的回报里**抄**的。
+- 所以这条请求**缩小为一句**：`render.still` 的回报里**把 `rotation_euler` 也带上**（三项一起），其余照旧。
+- （我们这侧不改：`silhouette` 的 `sensor_fit` 在顶层，`camera` 块装位姿三项 —— 请求原文那句
+  "sensor_fit 放进 camera 里"是我写得含糊，以本节为准。）
 
 ---
 
@@ -44,6 +66,18 @@
 必须 `temp_override(area=<VIEW_3D>)`，否则报 `context is incorrect`。
 
 **验收**：`view.frame { "target": "body_mesh" }` 之后 `capture` 里**模型占画幅 ≥ 60%**。
+
+### 验收结果（2026-10-10 19:56 实测）：**撤回这条请求；而且我那个 60% 是错的**
+
+- `view.frame` 现场试过：`E_UNKNOWN_OP`（16 个 op 里没有任何 `view.*`）—— **op 不存在**。
+- **但先决条件成立**：`capture` 的回报带 `framing.objectsFramed: 1`、`margin: 1.15`、全套
+  `center/radius/fov` ⇒ **它已经按对象取景**。按本文开头的"若已取好 ⇒ 这条可以不做"：
+  **P3 撤回，不必做。** 我们只要在流程里写清"要看效果就看 capture / 正交渲染图"。
+- **我写的 `≥60%` 站不住，撤回**：同一场景、同一对象，占**画幅高度**的比例是
+  `1600×1200 → 60.5%`、`700×1000（与模型比例相称）→ 41.1%`、`正交渲图 420×1000 → 34%`。
+  也就是说那个数**依赖于画幅长宽比**，不是一个对象的属性 —— 按我们自己的 §3.7
+  （**门槛不许超过输入**），这个判据必须重述成"**按画幅高度、且画幅长宽比与主体相称**"，
+  或者先把 `margin` 调小再定数。**错的是判据，不是工具。**
 
 ---
 
