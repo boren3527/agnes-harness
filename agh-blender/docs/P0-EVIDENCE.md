@@ -1884,8 +1884,9 @@ after euler=90x   rotation_euler=[1.570796,0,0]           <- 读回是你写的
 
 - **类型闸门照旧**：`bounds` 走 `_GEOMETRY_TYPES`，相机/灯光/空物体给 `null` 而非 `[0,0,0]`（与 §5 同一实测理由）。
 - **两个容差分开发布**：`tolerance`=1e-6 是 `round(v,6)` 能担保的**计算限**（**未实测抖动就不声称实测抖动** ——
-  第一版注释里我把没测过的"重复读稳定"写成了实测结论，已自行改掉）；`estimated_tolerance`=末位半个单位（6 位时 5e-7），
-  并把 `decimals` 一并写出，使这个界可审。
+  第一版注释里我把没测过的"重复读稳定"写成了实测结论，已自行改掉）；`estimated_tolerance`=末位半个单位、
+  以 `tolerance` 为下限。**实测行为**：`0.006172` → `decimals 6 / 5e-7`；而 `0.5`/`1.0` 这种打印不出末位的值
+  → `decimals 1`，clamp 回 `1e-6` ⇒ 它陈述的是"打印精度能支持多少"，**不会自行放宽判据**。
 - **`rotation_effective`**：非欧拉模式下 `rotation_euler` 是死值（P0-F219），故位姿块同时发四元数与模式，
   并明说这次朝向**是否**由 `rotation_euler` 决定。不能一边把死值报出去、一边假装它是那一张图的朝向。
 - **`space` 标签**：`mesh.import` 的 `bounds` 是**导入那一刻**的盒子（`object.transform` 之前），与
@@ -1911,8 +1912,42 @@ previousCamera / transparent / overwrote / ortho_scale / sensor_fit / metresPerP
 
 ### AA.4 本轮的验证边界（明确写清）
 
-`py_compile` 通过、AST 结构自检确认三个新块都在；但**改动生效与否必须靠重装后的活体复核**，
-而那一步需要人按 `y`（`install` 走 AGH 原生确认）。因此在本节写下时，**`bounds` 与 `camera_pose`
-在运行态尚未被观测**。跑完活体后再把实测值与上游给的可复算验收值并入本节。
+**已做的离线证据**：`py_compile` 通过；AST 自检确认三个新块与全部新键都在；从文件里抽出 `_decimal_places`
+**实测**了它（`0.006172 → 6 / 5e-7`、`0.5 → 1 / clamp 回 1e-6`）。
+
+**测试到什么、没测到什么**：✅ 语法与结构；✅ 新容差助手的行为；❌ **运行态未验证**。
+
+**重装被"人"挡住（实测，非推测）**：
+
+- `package/cli` 的 `confirmPackageInstall()`：`if (io.stdin.isTTY !== true || io.stdout.isTTY !== true) return false`
+  ⇒ 非 TTY 下**只会预览、绝不安装**（INV-33）。
+- 本会话的 shell 实测 **`stdin_isTTY:false, stdout_isTTY:false`**；且在 `packages/cli/src/bin.ts` 里搜遍
+  `yes|nonInteractive|assumeYes|AGH_ASSUME` **无任何非交互开关**（零命中）。⇒ **没有合规的自动路径**，
+  也不会去合成一个 TTY（那是绕过用户同意）。
+- 只读 `package inspect file:./agh-blender/package` **通过**：`Preview agh-blender@0.7.0`、
+  `integrity sha256-54d15ade9a8cd006cf6b29d31ca96f19efd4e3a242dd841f4e9c447e6aa7d3cb`（对应本次提交的内容）。
+
+**给人照抄的两条**（任选一，必须在**真实控制台**里跑）：
+
+```powershell
+# A) 完整周期（脚本会在安装那步停在提示符，按 y）
+powershell -ExecutionPolicy Bypass -File .\agh-blender\tools\reinstall.ps1
+
+# B) 只做安装这一步
+node packages/cli/dist/local/agnes.mjs install file:./agh-blender/package --profile local-dev
+```
+
+**装完请回到上一节（AA.5）看复核结果。** 在装上之前，本节的结论就是：
+**P1/P2 已在源码里写完并已提交，但在运行态仍不成立** —— 这正是 d44eb9b0 记下的那个状态。
+
+### AA.5 活体复核（P1/P2 的验收）
+
+**待填。** 仅在重装后填写，且必须写实测值：
+
+- P1：`describe_scene()` 对 `toy1.blend` 要报 `bounds.min = [-0.398227, -0.327651, -0.006172]`、
+  `bounds.max = [0.384945, 0.270593, 1.004803]`（上游给的可复算值）。
+- P2：`camera_pose` 的 `location` / `rotation_euler` 要与 `camera.add` 发出的在 1e-6 内一致。
+
+**未填之前不得把 §AA.4 读成"通过了"** —— 没发生的验证不叫通过（同族教训）。
 
 

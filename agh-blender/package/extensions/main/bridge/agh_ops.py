@@ -1341,10 +1341,11 @@ def _world_box(item):
       It is deliberately not claimed to be a measured jitter bound -- repeated-read stability has not
       been measured on this path, and an unmeasured number presented as measured is the defect this
       project keeps catching.
-    - `estimated_tolerance` (half a unit in the last published decimal) is what the *printed*
-      precision can actually support. It is 5e-7 when six decimals are printed and much looser for a
-      value that happens to print as an integer, which is exactly when a reader should not treat the
-      digits as significant.
+    - `estimated_tolerance` is half a unit in the last published decimal, with a floor of
+      `tolerance` so it can never promise more than the computation limit. Source of the decimals is
+      `repr()` the way a consumer would read the printed value, so 0.006172 gives 6 decimals (5e-7)
+      while a value that happens to round to 0.5 gives 1 -> clamped back to the floor (1e-6). It
+      states what the PRINTED precision supports, and never widens the criterion on its own.
 
     The two disagree by design: a consumer comparing with `tolerance` sees a tighter, stricter
     answer, and can compare against `estimated_tolerance` as well instead of turning the published
