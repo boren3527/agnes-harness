@@ -1153,6 +1153,55 @@ MESH-PLAN 任务 1.1。自检 203 → **208 全过**；新 integrity `sha256-8ed
 
 提交：`511f5d7b`（剪影档）· `9aa0febb`（裁切 blocking + 快照 0.4.0）· `8fedc041`（源图档）。
 
+## 9.24 A 段（生成段）从零到出网格 + 网格路真实闭环（2026-10-10）
+
+这一天的目标：**把"照片 → 网格"这一段真的跑起来**，然后让真实网格走完网格路。
+
+### A 段环境（Windows 11 / RTX 5060 Laptop 8 GB）
+
+- **装成的**：torch 2.11.0+cu128（`cuda True`、`cc (12,0)`）；CUDA Toolkit 12.8（`nvcc V12.8.61`）；VS 2022 Build Tools（`cl.exe 19.44`）；`nvdiffrast 0.4.0`（**必须 `--no-build-isolation`**，否则构建环境里没有 torch）；`torch-scatter 2.1.2+pt211cu128`（pyg 有预编译轮子）；StdGEN 环境（PyMCubes、LoRA-Torch）+ TripoSR 环境（独立 venv）。
+- **权重**：StdGEN 47 个文件 / 20.59 GB。下载的三条经验：① `huggingface_hub` 客户端对 mirror 会报 `missing commit header` ⇒ **改用 curl 直接抓 `/resolve/main/...`**；② 有的文件**只有走代理**才通（`config.yaml`），有的直连就行（`model.ckpt`）⇒ 脚本要"直连失败自动改代理"；③ **0 字节残留必须删掉再重下**，否则尺寸校验会把它当"已下好"。
+
+### StdGEN 在这台机器上跑不动（四个补丁之后仍然）
+
+- 四个上游问题（都已补丁化，见 `patch-stdgen.py`）：`rm_anime_bg` **上游漏发**（PyPI/仓库都没有）→ 容错 stub + 用带 alpha 的图；`xformers` 未装而 `infer_multiview.py` 硬调 `enable_xformers_...` → try/except（xformers 只是加速，两个模型文件里本来就有 `is_xformers_available()` 守卫）；`MVAttnProcessor.__call__` **缺 `cross_domain_attention` 参数**（xformers 版有、非 xformers 版漏了，装了 xformers 的人永远碰不到）→ 补参数（全仓 grep 确认没有调用点传 True）；`main()` 里分辨率是**硬编码 640×1024**，配置文件的 `validation.width_input` **根本没人读** → 做成 CLI 参数。
+- **8 GB 装不下**：640×1024 要 ~13 GB，靠 Windows 共享内存硬撑到 OOM（`Tried to allocate 1.95 GiB`；把 `get_attention_scores` 换成融合注意力后 OOM 点后移，但总量仍超）；**384×640 能跑完，但产出是一张全黑图**（`decodePng` 实测：384×640、1 种颜色、全 0）。
+- **结论：这台机器不适合 StdGEN**（它是为 ~24 GB 设计的）。要它就得云卡/WSL。
+
+### 改用 TripoSR（本机自足，单网格）
+
+- 权重 `model.ckpt` 1.6 GB、**每张图约 7 秒**（8 GB 完全够）。
+- 四个坑：① `torchmcubes` 编译失败（缺 `scikit-build-core`；且 pip 走代理会挂）→ **改用 PyMCubes**（CPU 同算法）+ 补丁；② **`trimesh 4.0.5` 与 numpy 2 不兼容**（`ndarray.ptp()` 在 numpy 2 被删）→ 升级 trimesh；③ `--render`（它自带渲染器）因输出子目录缺失而崩，且**网格还没保存** → 去掉它（我们有自己的 `capture`/`render.still`）；④ 默认路径调 **rembg**，首次要下 u2net（github，不走代理会**静默挂住**）→ 自备"灰底 + 前景占 90%"的图 + `--no-remove-bg`。
+- 产物：`ayaka.glb` = 1,022,256 B / **25,534 顶点 / 51,060 面**；世界包围盒 0.9638×0.4159×0.4271（TripoSR 归一化 ⇒ `unit: normalised`）。
+
+### 网格路真实闭环（`mesh-triposr-4`）
+
+| 步 | 结果 |
+|---|---|
+| `fit` | blockers []、**2 条 op**（`mesh.import`{path,name,upAxis:Z,scale:1,size}+`object.transform`{location[0,0,0.21355]}）、image 档相符、numeric 残差 0 |
+| `apply_ops` | 2/2，真网格进场景（导入实测 `[0.963763,0.415857,0.427124]`） |
+| `fit{against_scene}` | **1/1 match**、`dimensions_delta 0.000043 < 容差 0.00005`、`scale_asserted:false`（附理由） |
+| `save` | **ok:true**、blockers []、**12 个描述符**（源图+sheet+6 视图+3 json+**mesh** 只登记不复制） |
+| 磁盘核验 | **12/12 描述符逐字节相符**；`mesh_measured` 两组容差与实测差都印出来 |
+
+**human 那一档的实据**：capture 的渲染"有点泥塑感、线条细节不完善" —— 这是 TripoSR 的真实特征（无贴图、仅顶点色、几何平滑），也印证了"线条要么由上游 `.glb` 内嵌、要么做成几何"这条边界。
+
+### 这一天修的 7 处（都被实测咬出来）
+
+1. `unit` 枚举**对外宽容**：接受 `normalized`/`normalised`/`unitless`（一个拼写不该挡整轮）。
+2. **容差按"声明写了几位小数"推**（`declarationRelativeTolerance`）—— **第 8 次**撞"判据精度不能超过输入精度"：4 位小数（0.9638）vs 真值 0.963763 被固定 1e-5 判成不符，连带读回 `ok:false`。
+3. **整数写法不当作"舍入过的测量"**：`2` 读成 ±0.5 ⇒ 25% 容差 ⇒ 什么都挡不住（自检一分钟内抓出，并留下"差异不超过声明精度就不是 mismatch"这条断言）。
+4. **`E_MESH_MEASUREMENT_BUG`**：我们自己的 bug（ReferenceError/TypeError）不再伪装成"文件读不了"（起因：漏一个 import，8 条断言全变成同一个谜）。
+5. **重放必须回报磁盘的结论**：首跑被挡（`ok:false`）→ 补传后走重放 → 工具曾回报 `ok:true` 而磁盘仍写 `ok:false` ⇒ 现在 `ok`/`blockers` 取自磁盘那份报告。
+6. **过时文案**：`cannot_assert` 不再说"没有正交/没有场景相机渲染"，改成事实版（能渲、能数值化比对，只有审美留给人）。
+7. 断言同步 + 新增："重放回报磁盘结论"、"差异不超声明精度不算 mismatch"。
+
+### 三条流程教训（都咬了两次以上）
+
+- **装完必须核 `actual=running`**：`enable` 那步被中断时，整包工具在新会话里"不存在"（咬了两次，两次都表现为"工具查不到"）。
+- **`edit` 的锚点要唯一、且注意单行 import**：`SCENE_RELATIVE_TOLERANCE,` 这种锚点在逗号分隔的单行 import 里匹配不到（我因此漏了 import，8 条断言全红）；`async function` 的锚点是 `function` 子串会把 `async` 留在注释前（第 2 次犯）。
+- **改了必须跑**：语法检查过不等于对（括号没配平只会在运行时炸）；catch 里的编程错误会把多条断言变成同一个谜。
+
 ## 10. 未决项
 
 
