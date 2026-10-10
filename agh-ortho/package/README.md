@@ -8,7 +8,7 @@
 
 ## 状态：M1 闭环（0.1.0）
 
-六个工具。前五个是只读纯函数、不写盘；第六个是唯一的变更型工具：
+七个工具。其中五个是只读纯函数、不写盘；另两个是**变更型**（`requiresApproval: always`，且永不重放）：
 
 | 工具 | 作用 |
 |---|---|
@@ -18,6 +18,7 @@
 | `agh_ortho_verify` | 两档校验。默认只跑 `numeric`：参数 → 六视图 → 反解 → 与参数比对，**残差必须为 0**，不需要 Blender。加 `against_scene: true` 再跑 `scene_readback` 半档：读回真实场景，比对名字/位置/缩放/**尺寸**。 |
 | `agh_ortho_fit` | **M2 闭环里"便宜那一半"的入口**，一次给全：逐条 validation、三态清单、numeric、六视图 + **数值轮廓**（供你拿照片做粗核对）、**图纸的指针**（`sheet`：全图比例尺 + 每张视图落在哪一格 + "进 `apply_ops` 之前该复核什么"）、`conf` 的如实标注、`scale_anchor` 的换算与脆弱性、逐项逐轴的 `revise_hints`。只读、不落盘。 |
 | `agh_ortho_save` | 唯一写盘的工具（`requiresApproval: always`）。落一个 run：**一张图纸 `sheet.svg`（第一个描述符：复核就看它）**、六个分视图 SVG、参数（**键序已规范化** ⇒ 同值即同字节）、ops、校验结果、`marker.json`、`report.json`（共 10 个描述符；另可传 `scene_file` 把下游导出的 `.blend` **登记**成第 11 个）。`report.json` 除描述符外还带 `checks`（便宜那一档的结论摘要）与 `scene_file`。 |
+| `agh_ortho_mesh_run` | **一键生成段**：把照片交给**外部生成器**（命令来自 `.agnes/agh-ortho/mesh-run.json`；插件**不内置任何机器的路径**，缺席即拒），把产出的 `.glb` 按**真实字节**量出尺寸、落到 `.agnes/agh-ortho/meshes/<name>/`，并写一份"**声明 = 实测**"的 `source.json`。argv 先过 `tctx.sandbox.confine()`；超时 / 非零退出 / 没有 `.glb` / 量不出尺寸 / **目录已存在** / **多产出且没声明 `output`** 各有明确错误码。它只**生产输入**：登记与校验仍由 `fit` 与 `save` 走同一条路。 |
 
 `views` 只返回 SVG **文本**、不落盘 —— SVG 本来就是文本，模型读得到；文件与描述符归 `save`。
 `save` 遵守上游契约 §5.2：**先把 `report.json` 落到磁盘再返回**，消费者以磁盘上的报告为准。
@@ -35,8 +36,8 @@
 node agh-ortho/tools/check.mjs     # 零依赖，不需要 Blender
 ```
 
-覆盖工具定义结构、六个工具的行为、5 个负例（把 lowering 改坏残差必须非 0）、落位假设、
-单位/投影的拒绝路径。当前 **ALL PASS**。
+覆盖工具定义结构、七个工具的行为、5 个负例（把 lowering 改坏残差必须非 0）、落位假设、
+单位/投影的拒绝路径，以及生成段的四条拒绝路径（配置缺席 / 无沙箱缝 / 覆盖已有目录 / 多产出）。当前 **ALL PASS**。
 
 
 ## 设计契约

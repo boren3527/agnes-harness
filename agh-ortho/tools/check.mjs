@@ -77,7 +77,7 @@ const depthOf = (value, d = 0) => {
 }
 
 // --- 1. 工具定义 ---
-check('runtime registers 6 tools', tools.length === 6, tools.map((t) => t.name).join(', '))
+check('runtime registers 7 tools', tools.length === 7, tools.map((t) => t.name).join(', '))
 for (const tool of tools) {
   const problems = [
     ...(/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(tool.name) ? [] : ['name pattern']),
@@ -204,11 +204,205 @@ check('capability snapshot records mutates per op (drives approval)', caps.ops.e
 
 // --- 8. 描述符层 + agh_ortho_save（上游契约 §3/§4/§5/§9）---
 const save = byName['agh_ortho_save']
-check('save is the only mutating tool', save.meta.isReadOnly === false)
+check('save is a mutating tool', save.meta.isReadOnly === false)
 check('save is not destructive but always approved', save.meta.isDestructive === false && save.meta.requiresApproval === 'always')
 check('save is not concurrency safe and never replays', save.meta.isConcurrencySafe === false && save.meta.replay === 'never')
-check('every other tool stays read-only + safe + never-approved',
-  tools.filter((t) => t.name !== 'agh_ortho_save').every((t) => t.meta.isReadOnly === true && t.meta.replay === 'safe' && t.meta.requiresApproval === 'never'))
+// 变更型工具的**集合**必须是显式的：新增一个就必须在这里写明，否则"哪些工具会改工作区"就没人知道了。
+const MUTATING = ['agh_ortho_save', 'agh_ortho_mesh_run']
+check(
+  'exactly the declared mutating tools are mutating + always approved + never replayed',
+  tools.filter((t) => t.meta.isReadOnly === false).map((t) => t.name).sort().join(',') === [...MUTATING].sort().join(',') &&
+    tools.filter((t) => MUTATING.includes(t.name)).every((t) => t.meta.requiresApproval === 'always' && t.meta.replay === 'never'),
+  tools.map((t) => `${t.name}:${t.meta.isReadOnly ? 'ro' : 'rw'}`).join(' '),
+)
+check(
+  'every other tool stays read-only + safe + never-approved',
+  tools.filter((t) => !MUTATING.includes(t.name)).every((t) => t.meta.isReadOnly === true && t.meta.replay === 'safe' && t.meta.requiresApproval === 'never'),
+)
+
+// ---- 一键生成段：agh_ortho_mesh_run（spawnImpl 是参数化的 ⇒ 不起真进程也能测全流程）----
+const meshRunTool = byName['agh_ortho_mesh_run']
+const meshRunFs = memoryFs()
+meshRunFs.files.set('D:/ws/photo.png', Buffer.from('fake-jpeg-bytes', 'utf8'))
+const runMissingConfig = (await meshRunTool.execute({ name: 'fake', image_file: 'D:/ws/photo.png' }, { fs: meshRunFs })).structured
+check(
+  'mesh_run: without a config and without a command it REFUSES and prints the template',
+  runMissingConfig.ok === false &&
+    runMissingConfig.blockers.some((b) => b.code === 'E_MESH_RUN_NOT_CONFIGURED' && b.template?.command?.length >= 1),
+  JSON.stringify(runMissingConfig.blockers.map((b) => b.code)),
+)
+const runBadName = (await meshRunTool.execute({ name: 'bad name!', image_file: 'D:/ws/photo.png' }, { fs: meshRunFs })).structured
+check('mesh_run: the name becomes a directory, so its charset is checked', runBadName.blockers.some((b) => b.code === 'E_ARG_RANGE'), JSON.stringify(runBadName.blockers.map((b) => b.code)))
+const runNoSeam = (await meshRunTool.execute({ name: 'fake', image_file: 'D:/ws/photo.png', command: ['x'] }, { fs: meshRunFs })).structured
+check(
+  'mesh_run: no sandbox seam ⇒ refuse rather than spawn unconfined',
+  runNoSeam.blockers.some((b) => b.code === 'E_NO_SANDBOX_SEAM'),
+  JSON.stringify(runNoSeam.blockers.map((b) => b.code)),
+)
+// 全流程（stub 掉 spawnImpl：它把一份已知 GLB 写进 {out}/0/）：命令模板替换、递归找产出、
+// 按真实字节量、写 mesh.glb + sidecar（声明 = 实测）、返回 measured。
+const meshRunFs2 = memoryFs()
+meshRunFs2.files.set('D:/ws/photo.png', Buffer.from('fake-jpeg-bytes', 'utf8'))
+// 就地造一个最小 GLB（不依赖文件后部才定义的 makeGlb）：一个立方体的 POSITION accessor，
+// 尺寸由**节点 scale** 施加 ⇒ glbWorldBounds 量到的世界尺寸 = 2 × scale。
+const inlineGlb = (scale) => {
+  const corners = [[-1,-1,-1],[1,-1,-1],[1,1,-1],[-1,1,-1],[-1,-1,1],[1,-1,1],[1,1,1],[-1,1,1]]
+  const positions = Buffer.alloc(corners.length * 12)
+  corners.forEach((c, i) => c.forEach((v, k) => positions.writeFloatLE(v, (i * 3 + k) * 4)))
+  const json = {
+    asset: { version: '2.0' },
+    scenes: [{ nodes: [0] }],
+    nodes: [{ name: 'geometry_0', mesh: 0, scale }],
+    meshes: [{ primitives: [{ attributes: { POSITION: 0 } }] }],
+    accessors: [{ bufferView: 0, componentType: 5126, count: corners.length, type: 'VEC3', min: [-1, -1, -1], max: [1, 1, 1] }],
+    bufferViews: [{ buffer: 0, byteOffset: 0, byteLength: positions.length }],
+    buffers: [{ byteLength: positions.length }],
+  }
+  const pad = (b, byte) => (b.length % 4 === 0 ? b : Buffer.concat([b, Buffer.alloc(4 - (b.length % 4), byte)]))
+  const jsonChunk = pad(Buffer.from(JSON.stringify(json), 'utf8'), 0x20)
+  const binChunk = pad(positions, 0)
+  const out = Buffer.alloc(12 + 8 + jsonChunk.length + 8 + binChunk.length)
+  out.writeUInt32LE(0x46546c67, 0)
+  out.writeUInt32LE(2, 4)
+  out.writeUInt32LE(out.length, 8)
+  let at = 12
+  out.writeUInt32LE(jsonChunk.length, at)
+  out.writeUInt32LE(0x4e4f534a, at + 4)
+  jsonChunk.copy(out, at + 8)
+  at += 8 + jsonChunk.length
+  out.writeUInt32LE(binChunk.length, at)
+  out.writeUInt32LE(0x004e4942, at + 4)
+  binChunk.copy(out, at + 8)
+  return out
+}
+const fakeGlb = inlineGlb([0.4819, 0.2079, 0.2136]) // 世界尺寸 = 2×scale = [0.9638, 0.4159, 0.4272]
+let sawArgv = null
+const fakeSpawn = async (argv) => {
+  sawArgv = argv
+  const out = argv[argv.length - 1]
+  // memoryFs 的 list 要求目录**逐级存在**（真实 fs 也是）⇒ 夹具把祖先也建上。
+  for (const d of ['.agnes', '.agnes/agh-ortho', '.agnes/agh-ortho/mesh-run', out, `${out}/0`]) meshRunFs2.dirs.add(d)
+  meshRunFs2.files.set(`${out}/0/mesh.glb`, fakeGlb)
+  return { code: 0, signal: null, timedOut: false, log: 'fake generator ok' }
+}
+const runOk = (await meshRunTool.execute(
+  { name: 'fake', image_file: 'D:/ws/photo.png', command: ['/fake/python', 'gen.py', '--image', '{image}', '--out', '{out}'], up_axis: 'X', unit: 'normalised' },
+  { fs: meshRunFs2, sandbox: { confine: async (a) => a }, meshRunSpawn: fakeSpawn },
+)).structured
+check(
+  'mesh_run: the whole flow works end to end with an injected spawn (argv substitution, recursive find, measured sidecar)',
+  runOk.ok === true &&
+    sawArgv[3] === 'D:/ws/photo.png' &&                                    // {image} 被替换
+    sawArgv[sawArgv.length - 1] === '.agnes/agh-ortho/mesh-run/fake' &&    // {out} 被替换
+    runOk.mesh_run.measured.up_axis === 'X' &&
+    runOk.mesh_run.measured.declared_height === 0.9638 &&                  // 沿声明的上轴实测（= 2×0.4819）
+    runOk.mesh_run.file.bytes === fakeGlb.length,
+  JSON.stringify({ argv: sawArgv, measured: runOk.mesh_run?.measured, codes: runOk.blockers?.map((b) => b.code) }),
+)
+const sidecarText = meshRunFs2.files.get('.agnes/agh-ortho/meshes/fake/source.json')
+const sidecarObj = sidecarText ? JSON.parse(Buffer.isBuffer(sidecarText) ? sidecarText.toString('utf8') : sidecarText) : null
+check(
+  'mesh_run: the sidecar it writes declares MEASURED values, and records the command and the photograph hash',
+  sidecarObj !== null &&
+    sidecarObj.declaredHeight === 0.9638 &&
+    sidecarObj.declaredHeightKind === 'measured' &&
+    sidecarObj.upAxis === 'X' &&
+    typeof sidecarObj.imageSha256 === 'string' &&
+    Array.isArray(sidecarObj.command),
+  JSON.stringify(sidecarObj && { h: sidecarObj.declaredHeight, kind: sidecarObj.declaredHeightKind, up: sidecarObj.upAxis }),
+)
+check(
+  'mesh_run: the produced mesh is written where the rest of the path expects it',
+  meshRunFs2.files.has('.agnes/agh-ortho/meshes/fake/mesh.glb'),
+  [...meshRunFs2.files.keys()].join(' '),
+)
+const fakeFail = async () => ({ code: 3, signal: null, timedOut: false, log: 'boom: model file missing' })
+const runFail = (await meshRunTool.execute(
+  { name: 'fake2', image_file: 'D:/ws/photo.png', command: ['/fake/python', 'gen.py'] },
+  { fs: meshRunFs2, sandbox: { confine: async (a) => a }, meshRunSpawn: fakeFail },
+)).structured
+check(
+  'mesh_run: a non-zero exit is a blocker that carries the log tail, and nothing is written',
+  runFail.ok === false && runFail.blockers.some((b) => b.code === 'E_MESH_RUN_FAILED' && /boom/.test(String(b.log))) && !meshRunFs2.files.has('.agnes/agh-ortho/meshes/fake2/mesh.glb'),
+  JSON.stringify(runFail.blockers?.map((b) => b.code)),
+)
+
+// **不许覆盖**：`meshes/<name>/` 里已经有东西时必须拒绝，而且必须在**起生成器之前**拒绝 ——
+// 那里可能是手工写的 sidecar（记着朝向那三轮的来历），被本工具那份整份换掉就永久丢了。
+// 判据第二半是"没有起过子进程"：便宜的一步必须先挡，否则"拒写"救不了已经烧掉的那 15 分钟。
+let clobberSpawned = false
+const runClobber = (await meshRunTool.execute(
+  { name: 'fake', image_file: 'D:/ws/photo.png', command: ['/fake/python', 'gen.py'], up_axis: 'X', unit: 'normalised' },
+  {
+    fs: meshRunFs2,
+    sandbox: { confine: async (a) => a },
+    meshRunSpawn: async () => {
+      clobberSpawned = true
+      return { code: 0, signal: null, timedOut: false, log: 'should not have run' }
+    },
+  },
+)).structured
+check(
+  'mesh_run: an existing mesh directory is a blocker, decided BEFORE the generator is started (§9.11.2)',
+  runClobber.ok === false && runClobber.blockers.some((b) => b.code === 'E_MESH_TARGET_EXISTS') && clobberSpawned === false,
+  JSON.stringify({ codes: runClobber.blockers?.map((b) => b.code), spawned: clobberSpawned }),
+)
+
+// 产出多于一个 .glb 时**不许按文件名顺序挑**：那等于让一个与内容无关的字符串决定"量的是哪一个"，
+// 而 sidecar 会把量到的值写成"这个网格的声明"。声明了 `output` 就只量声明的那一份。
+const meshRunFs3 = memoryFs()
+meshRunFs3.files.set('D:/ws/photo.png', Buffer.from('fake-jpeg-bytes', 'utf8'))
+const cfgRel = '.agnes/agh-ortho/mesh-run.json'
+const writeCfg = (extra) => meshRunFs3.files.set(cfgRel, JSON.stringify({ command: ['/fake/python', 'gen.py', '--out', '{out}'], upAxis: 'X', unit: 'normalised', generator: 'fakegen', ...extra }))
+writeCfg({})
+const twoGlbSpawn = async (argv) => {
+  const out = argv[argv.length - 1]
+  for (const d of ['.agnes', '.agnes/agh-ortho', '.agnes/agh-ortho/mesh-run', out, `${out}/gen`, `${out}/gen/0`, `${out}/final`]) meshRunFs3.dirs.add(d)
+  meshRunFs3.files.set(`${out}/gen/0/mesh.glb`, inlineGlb([0.4819, 0.2079, 0.2136])) // 世界 0.9638（原始件）
+  meshRunFs3.files.set(`${out}/final/mesh.glb`, inlineGlb([0.1, 0.1, 0.1])) // 世界 0.2（后处理后的成品件）
+  return { code: 0, signal: null, timedOut: false, log: 'two outputs' }
+}
+const runAmbiguous = (await meshRunTool.execute(
+  { name: 'fake3', image_file: 'D:/ws/photo.png' },
+  { fs: meshRunFs3, sandbox: { confine: async (a) => a }, meshRunSpawn: twoGlbSpawn },
+)).structured
+check(
+  'mesh_run: two .glb outputs without a declared "output" is a blocker (a file name must not decide what got measured)',
+  runAmbiguous.ok === false && runAmbiguous.blockers.some((b) => b.code === 'E_MESH_RUN_AMBIGUOUS_OUTPUT'),
+  JSON.stringify(runAmbiguous.blockers?.map((b) => b.code)),
+)
+writeCfg({ output: '{out}/final/mesh.glb' })
+const runDeclared = (await meshRunTool.execute(
+  { name: 'fake4', image_file: 'D:/ws/photo.png' },
+  { fs: meshRunFs3, sandbox: { confine: async (a) => a }, meshRunSpawn: twoGlbSpawn },
+)).structured
+check(
+  'mesh_run: a declared "output" measures exactly that file (here the smaller one, not the name-last one)',
+  runDeclared.ok === true && runDeclared.mesh_run.measured.declared_height === 0.2,
+  JSON.stringify({ h: runDeclared.mesh_run?.measured?.declared_height, codes: runDeclared.blockers?.map((b) => b.code) }),
+)
+
+// **可复现性落成证据**（§9.29）：每次产出追加进**生成器层面的** history.json，于是"同一张照片 + 同一条命令
+// 跑出过几次同一个文件"是**可数的事实**（第一次 ⇒ 1）。名字必须换（同名重跑会被闸门拒），
+// 这正是为什么历史不放在 meshes/<name>/ 里 —— 放那儿它永远长不到第二条。
+check(
+  'mesh_run: the run is appended to a generator-level history, so "identical_runs" is a count and not a claim',
+  meshRunFs2.files.has('.agnes/agh-ortho/mesh-run/history.json') && runOk.mesh_run?.reproduction?.identical_runs === 1,
+  JSON.stringify({ repro: runOk.mesh_run?.reproduction, has: meshRunFs2.files.has('.agnes/agh-ortho/mesh-run/history.json') }),
+)
+const runAgain = (
+  await meshRunTool.execute(
+    { name: 'fake5', image_file: 'D:/ws/photo.png', command: ['/fake/python', 'gen.py', '--out', '{out}'], up_axis: 'X', unit: 'normalised' },
+    { fs: meshRunFs2, sandbox: { confine: async (a) => a }, meshRunSpawn: fakeSpawn },
+  )
+).structured
+check(
+  'mesh_run: a second run of the same photo and command counts as a second identical production (2, not "reproducible: true")',
+  runAgain.ok === true && runAgain.mesh_run?.reproduction?.identical_runs === 2,
+  JSON.stringify({ ok: runAgain.ok, repro: runAgain.mesh_run?.reproduction, codes: runAgain.blockers?.map((b) => b.code) }),
+)
+
+
 
 /** 内存 fs，复刻宿主 fs.ts:223 的行为：write 会 mkdir 父目录（recursive）。 */
 function memoryFs() {
@@ -332,6 +526,43 @@ check(
   'mesh_file is registered as a descriptor with its own path (not copied) and binary-correct bytes',
   meshDesc?.path === MESH_PATH_WIN && meshDesc?.bytes === makeGlb([0.2, 1, 0.2]).length && meshDesc?.sha256 === createHash('sha256').update(makeGlb([0.2, 1, 0.2])).digest('hex'),
   JSON.stringify(meshDesc),
+)
+
+// **网格的身份 + 可复现性的证据**（§9.29）：sidecar 的 `fileSha256` 也是**声明**（与真实字节比一次）；
+// history.json 一并登记成描述符 ⇒ "同一个 sha 跑出过 N 次"这句话**在包里可核**。
+const glbForHist = makeGlb([0.2, 1, 0.2])
+const glbHistSha = createHash('sha256').update(glbForHist).digest('hex')
+const fsMeshHist = meshFs(glbForHist)
+fsMeshHist.files.set(
+  '.agnes/agh-ortho/mesh-run/history.json',
+  Buffer.from(
+    JSON.stringify({
+      shape: 'agh-ortho/mesh-history/1',
+      runs: [
+        { name: 'a', sha256: glbHistSha, imageSha256: 'aa' },
+        { name: 'b', sha256: glbHistSha, imageSha256: 'bb' },
+      ],
+    }),
+    'utf8',
+  ),
+)
+const histSaved = (await save.execute({ ...SAMPLE, assembly: [meshItem()], run_id: 'mesh-hist', mesh_file: MESH_PATH_WIN }, { fs: fsMeshHist, session: { workspaceRoot: ws } })).structured
+const histReport = readReport(fsMeshHist, 'mesh-hist')
+check(
+  'mesh identity: the pack counts how many times this exact file was produced, and registers the history as a descriptor',
+  histSaved.ok === true &&
+    histReport.mesh_reproduction?.identical_runs === 2 &&
+    histReport.mesh_reproduction?.sha256 === glbHistSha &&
+    (histSaved.artifacts ?? []).some((a) => String(a.path).endsWith('history.json')),
+  JSON.stringify({ repro: histReport.mesh_reproduction, codes: histReport.blockers?.map((b) => b.code) }),
+)
+const fsMeshBadSha = meshFs(glbForHist)
+fsMeshBadSha.files.set(`${MESH_DIR}/source.json`, Buffer.from(JSON.stringify({ generator: 'StdGEN', unit: 'm', upAxis: 'Y', declaredHeight: 2, fileSha256: 'ff'.repeat(32) }), 'utf8'))
+const badShaSaved = (await save.execute({ ...SAMPLE, assembly: [meshItem()], run_id: 'mesh-badsha', mesh_file: MESH_PATH_WIN }, { fs: fsMeshBadSha, session: { workspaceRoot: ws } })).structured
+check(
+  'mesh identity: a sidecar whose declared fileSha256 does not match the file BLOCKS the pack',
+  badShaSaved.ok === false && badShaSaved.blockers.some((b) => b.code === 'E_MESH_SHA_MISMATCH'),
+  JSON.stringify(badShaSaved.blockers?.map((b) => b.code)),
 )
 const meshReport = readReport(fsMeshOk, 'mesh-a')
 check(
@@ -517,6 +748,23 @@ check('the refusal reports the actual marker content', foreign.blockers[0].marke
 // §7 保留：只出计划，且明说做不到删除。
 check('retention policy is stated', saved.retention.policy.maxRuns === 20 && saved.retention.policy.maxAgeDays === 30, JSON.stringify(saved.retention.policy))
 check('retention honestly says this plugin cannot delete', saved.retention.cannot_delete_here.includes('no rm'))
+// **引用即钉住**（§9.28 发现二）：一个 owned 但已过保留期的 run，若在 `retention.json` 里被点名，
+// 就**不得**出现在待清清单里 —— "被记录引用过"是工具**不可能知道**的事，只能由调用方点名。
+await fs2.write('.agnes/agh-ortho/runs/oldsim/marker.json', JSON.stringify({ contract: 1, producer: 'agh-ortho@0.1.0', createdAt: '2020-01-01T00:00:00.000Z' }))
+const retPlain = (await save.execute({ ...SAMPLE, run_id: 'ret-plain' }, { fs: fs2, session: { workspaceRoot: ws } })).structured
+await fs2.write('.agnes/agh-ortho/retention.json', JSON.stringify({ pinned: ['oldsim'] }))
+const retPinned = (await save.execute({ ...SAMPLE, run_id: 'ret-pinned' }, { fs: fs2, session: { workspaceRoot: ws } })).structured
+check(
+  'retention: a run named in retention.json is never proposed for pruning (the tool cannot know what the record cites)',
+  (retPlain.retention?.would_prune ?? []).some((r) => r.runId === 'oldsim') &&
+    !(retPinned.retention?.would_prune ?? []).some((r) => r.runId === 'oldsim') &&
+    (retPinned.retention?.pinned_kept ?? []).includes('oldsim'),
+  JSON.stringify({
+    plain: (retPlain.retention?.would_prune ?? []).map((r) => r.runId),
+    pinned_prune: (retPinned.retention?.would_prune ?? []).map((r) => r.runId),
+    pinned_kept: retPinned.retention?.pinned_kept,
+  }),
+)
 check('report.json on disk is the authority (contract + artifact count)',
   (() => { const r = JSON.parse(fs1.files.get(`.agnes/agh-ortho/runs/${saved.run_id}/report.json`)); return r.contract === 1 && r.artifacts.length === 10 && r.unlowered.length >= 1 && r.unresolved[0] === '屋面厚度' })())
 
@@ -1519,6 +1767,43 @@ check(
     badSaveReport.checks?.silhouette?.compared?.size_m !== undefined &&
     badSaveReport.blockers?.some((b) => b.code === 'E_SILHOUETTE_SIZE_MISMATCH'),
   JSON.stringify({ ok: badSave.ok, codes: badSaveReport.blockers?.map((b) => b.code) }),
+)
+
+// **身份**（§9.29 缺口一）：声明了下游回报的 sha256/bytes 就**复算比对**；不符 ⇒ blocking；
+// 没声明 ⇒ `declared_sha256_matches: null`（那是"没声明"，不是"通过"）—— 与 photo_check 的缺席同一条纪律。
+const silBytes = blockPng(512, Math.round(200 * frontAspect), 200)
+const silSha = createHash('sha256').update(silBytes).digest('hex')
+const silFsOf = (bw) => {
+  const f = memoryFs()
+  f.files.set('D:/ws/out/front.png', bw)
+  return f
+}
+const silCamera = { name: 'Front', location: [0, -8, 0.5], rotation_euler: [1.5707963, 0, 0] }
+const idOk = (
+  await fitTool.execute(
+    { ...silFitArgs, silhouette: { ...silArgs, sha256: silSha, bytes: silBytes.length, camera: silCamera } },
+    { fs: silFsOf(silBytes), session: { workspaceRoot: ws } },
+  )
+).structured
+check(
+  'silhouette identity: a declared sha256/bytes that matches the PNG is recorded, and the camera pose is carried through',
+  (idOk.silhouette_blockers ?? []).length === 0 &&
+    idOk.silhouette?.render?.declared_sha256_matches === true &&
+    idOk.silhouette?.render?.sha256 === silSha &&
+    idOk.silhouette?.camera?.name === 'Front',
+  JSON.stringify({ render: idOk.silhouette?.render, camera: idOk.silhouette?.camera, codes: idOk.silhouette_blockers?.map((b) => b.code) }),
+)
+const idBad = (await fitTool.execute({ ...silFitArgs, silhouette: { ...silArgs, sha256: 'deadbeef'.repeat(8) } }, { fs: silFsOf(silBytes), session: { workspaceRoot: ws } })).structured
+check(
+  'silhouette identity: a sha256 that does not match BLOCKS (otherwise the numbers are about "a render", not the certified one)',
+  idBad.verdict === 'revise' && idBad.silhouette_blockers?.some((b) => b.code === 'E_SILHOUETTE_IDENTITY_MISMATCH'),
+  JSON.stringify({ verdict: idBad.verdict, codes: idBad.silhouette_blockers?.map((b) => b.code) }),
+)
+const idNone = (await fitTool.execute({ ...silFitArgs }, { fs: silFsOf(silBytes), session: { workspaceRoot: ws } })).structured
+check(
+  'silhouette identity: with nothing declared it is recorded as NOT DECLARED (null), never as a pass',
+  idNone.silhouette?.render?.declared_sha256_matches === null && idNone.silhouette?.render?.sha256 === silSha,
+  JSON.stringify(idNone.silhouette?.render),
 )
 
 // ---- 源图那一环：声明必须可核对（E_IMAGE_*）----

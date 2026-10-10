@@ -11,6 +11,7 @@
  * 六视图渲染器是下一步，它自己写正交投影 → SVG，不依赖下游（下游没有相机 op）。
  */
 import { createHash } from 'node:crypto'
+import { spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { SCENE_ABSOLUTE_FLOOR, SCENE_RELATIVE_TOLERANCE, declarationRelativeTolerance, boxesFromOps, compareScene, expectedObjectsFromOps, extentsFromBoxes, extentsFromParams, placementOf } from './geometry.mjs'
@@ -375,6 +376,24 @@ const SILHOUETTE_INPUT = {
     sensor_fit: { type: 'string', enum: ['HORIZONTAL', 'VERTICAL', 'AUTO'] },
     width: { type: 'integer', exclusiveMinimum: 0 },
     height: { type: 'integer', exclusiveMinimum: 0 },
+    // 这张渲染图的**身份**（可选，但强烈建议）：下游 `render.still` 会回报 sha256/bytes，原样填进来，
+    // 我们这侧**自己解 PNG** 复算并与它比 —— 不符 ⇒ blocking。没有它，包里就只有一条**路径**，
+    // 于是"我们认证过的那张图"事后**认不出来**：拿同样的路径换一张图，没人知道（§9.29 缺口一）。
+    sha256: { type: 'string', minLength: 16 },
+    bytes: { type: 'integer', minimum: 1 },
+    // 拍这张图时相机的**位姿**（可选）：`ortho_scale` 只定画幅高度，**位姿定的是"看到了什么"**。
+    // 不记它，这张被认证的图就**复现不出来**（§9.29 缺口二：这一轮的 .blend 里相机还被手调过，
+    // 与被认证的那张不是同一个位姿）。
+    camera: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        location: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+        rotation_euler: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+      },
+      required: ['name'],
+      additionalProperties: false,
+    },
   },
   required: ['path', 'ortho_scale'],
   additionalProperties: false,
@@ -1361,6 +1380,7 @@ async function assembleArtifacts(args, createdAt, tctx) {
   let meshFile = null
   let meshSource = null
   let meshMeasured = null
+  let meshReproduction = null
   const dirOf = (p) => String(p).replace(/[\\/][^\\/]*$/, '')
   if (meshPath !== null) {
     try {
@@ -1392,6 +1412,11 @@ async function assembleArtifacts(args, createdAt, tctx) {
         upAxis: parsed.upAxis ?? null,
         declaredHeight: parsed.declaredHeight ?? null,
         declaredHeightKind: parsed.declaredHeightKind ?? null,
+        // 这两个也是**声明** ⇒ 下面会与真实字节比一次（"文件被换过"必须能被发现，§9.29 同族）。
+        fileSha256: typeof parsed.fileSha256 === 'string' ? parsed.fileSha256 : null,
+        fileBytes: Number.isInteger(parsed.fileBytes) ? parsed.fileBytes : null,
+        // 与 history.json 里的条目**按同一张输入照片**配对（否则"同样是 3154704 字节"可能来自两张图）。
+        imageSha256: typeof parsed.imageSha256 === 'string' ? parsed.imageSha256 : null,
       }
     } catch (error) {
       blockers.push({
@@ -1399,6 +1424,60 @@ async function assembleArtifacts(args, createdAt, tctx) {
         message: `the mesh's source.json could not be read next to ${meshPath} (${error?.message ?? error}). Without it the mesh's unit/upAxis/declaredHeight are unknown — and guessing them silently rotates or rescales the model.`,
         path: sidecarPath,
       })
+    }
+
+    // **网格的身份 + 可复现性的证据**（§9.29）：
+    //  ① sidecar 的 `fileSha256`/`fileBytes` 也是**声明** ⇒ 与真实字节比一次（"文件被换过"必须能被发现）；
+    //  ② 同目录的 `history.json` 记着每次产出的 sha ⇒ "同一个 sha 跑出过几次"是**可数的事实**；
+    //     它一并**登记成描述符**，于是那句强话**在包里可核**，而不只是 note 里的一句话。
+    try {
+      const rawMesh = await tctx.fs.read(meshPath)
+      const meshBuf = Buffer.isBuffer(rawMesh) ? rawMesh : Buffer.from(rawMesh)
+      const digest = createHash('sha256').update(meshBuf).digest('hex')
+      const sidecarSays = typeof meshSource?.fileSha256 === 'string' ? meshSource.fileSha256.toLowerCase() : null
+      const historyAt = MESH_HISTORY_REL
+      let history = null
+      try {
+        const rawHistory = await tctx.fs.read(historyAt)
+        const parsedHistory = JSON.parse(typeof rawHistory === 'string' ? rawHistory : Buffer.from(rawHistory).toString('utf8'))
+        if (Array.isArray(parsedHistory?.runs)) history = parsedHistory
+      } catch {
+        history = null // 没有 history.json 就是"没有证据"，不是"没有复现过"—— 字段留 null 说明这一点
+      }
+      // 配对条件：**同一个 sha** 且 **同一张输入照片**（只有 sha 相同可能是两张图凑巧同尺寸）。
+      const imageSha = typeof meshSource?.imageSha256 === 'string' ? meshSource.imageSha256 : null
+      const identical =
+        history === null
+          ? null
+          : history.runs.filter((r) => r && r.sha256 === digest && (imageSha === null || r.imageSha256 === imageSha)).length
+      meshReproduction = {
+        sha256: digest,
+        bytes: meshBuf.length,
+        sidecar_sha256: sidecarSays,
+        sha256_matches_sidecar: sidecarSays === null ? null : sidecarSays === digest,
+        history_path: history === null ? null : historyAt,
+        identical_runs: identical,
+      }
+      if (sidecarSays !== null && sidecarSays !== digest) {
+        blockers.push({
+          code: 'E_MESH_SHA_MISMATCH',
+          message: `the mesh's source.json records fileSha256 ${sidecarSays.slice(0, 16)}…, but the file on disk hashes to ${digest.slice(0, 16)}…. The sidecar describes a different file than the one being packed.`,
+          path: meshPath,
+        })
+      }
+      if (history !== null) {
+        files.push({
+          name: 'history.json',
+          data: Buffer.from(JSON.stringify(history, null, 2), 'utf8'),
+          absolutePath: historyAt,
+          preview: `网格产出历史：同一 sha 出现过 ${identical} 次 —— "可复现"这件事的**证据**，不是声明`,
+          meta: { external: true, register_only: true, producer_tool: 'agh_ortho_mesh_run' },
+        })
+      }
+    } catch {
+      // 网格字节读不到这件事，上面已经用 E_MESH_FILE_UNREADABLE 报过；这里不重复报，
+      // 只让"没有证据"保持为 null（缺席不是不通过，也不是通过）。
+      meshReproduction = null
     }
 
     // ---- 声明 vs 测量：这是"不静默"的最后一道闸 ----
@@ -1564,6 +1643,7 @@ async function assembleArtifacts(args, createdAt, tctx) {
     mesh_file: meshFile,
     mesh_source: meshSource,
     mesh_measured: meshMeasured,
+    mesh_reproduction: meshReproduction,
       // ③ 交付物里必须有"图纸"这一项：复核对象是它，不是六张分图。
       sheet: {
         artifact: 'sheet.svg',
@@ -1599,11 +1679,29 @@ async function assembleArtifacts(args, createdAt, tctx) {
 async function retentionPlan(fs, currentRunId) {
   const runs = await listRuns(fs)
   const plan = planRetention(runs, { currentRunId })
+  // **引用即钉住**（§9.28 发现二）：保留策略只认"新/旧"，**不可能知道**哪些 run 被记录引用过 ——
+  // 而实测里它列出的"该清"名单，正好是 `kuson*` / `photo-round-*` / `m1-probe-1` 这些被逐条引用过的轮次。
+  // 所以由调用方在 `.agnes/agh-ortho/retention.json` 里点名；点名的一律**不进待清清单**。
+  let pinned = []
+  try {
+    const raw = await fs.read(RETENTION_CONFIG_REL)
+    const parsed = JSON.parse(Buffer.isBuffer(raw) ? raw.toString('utf8') : String(raw))
+    if (Array.isArray(parsed?.pinned)) pinned = parsed.pinned.filter((x) => typeof x === 'string')
+  } catch {
+    pinned = []
+  }
+  const pinnedKept = plan.wouldPrune.filter((r) => pinned.includes(r.runId)).map((r) => r.runId)
+  const wouldPrune = plan.wouldPrune.filter((r) => !pinned.includes(r.runId))
   return {
     policy: { maxRuns: RETENTION.maxRuns, maxAgeDays: RETENTION.maxAgeDays },
     runs_on_disk: runs.length,
     kept: plan.kept,
-    would_prune: plan.wouldPrune,
+    would_prune: wouldPrune,
+    pinned_kept: pinnedKept,
+    pinning:
+      pinned.length > 0
+        ? `${pinned.length} run(s) pinned in ${RETENTION_CONFIG_REL} — never proposed for pruning`
+        : `no ${RETENTION_CONFIG_REL}: runs cited by the written record are NOT protected here, and this plan only knows newest/oldest`,
     // 【实测】工具侧的 fs seam 只有 read / write / list / stat
     // （packages/core/src/effects/tool-context.ts 的 fs），**没有 rm**。
     // 契约 §7 说"谁删：生产方"，但本插件的工具面做不到删除 ⇒ 只出计划，不执行。
@@ -1826,6 +1924,25 @@ async function silhouetteFinding(tctx, spec, outline, photoCheck) {
   if (Number.isInteger(spec.height) && spec.height !== metrics.height) {
     blockers.push({ code: 'E_SILHOUETTE_SIZE_MISMATCH', message: `the caller declared height ${spec.height} but the PNG is ${metrics.height} px tall`, path: spec.path })
   }
+  // **身份**：调用方声明的是**下游回报的** sha256/bytes，这里按**我们自己读到的字节**复算。
+  // 没有这一条，包里就只有路径 ⇒ "认证过的那张图"事后认不出来（§9.29 缺口一）。
+  const raw = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes)
+  const digest = createHash('sha256').update(raw).digest('hex')
+  const declaredSha = typeof spec.sha256 === 'string' ? spec.sha256.replace(/^sha256-/, '').toLowerCase() : null
+  if (declaredSha !== null && declaredSha !== digest) {
+    blockers.push({
+      code: 'E_SILHOUETTE_IDENTITY_MISMATCH',
+      message: `the render's sha256 is not what was declared: declared ${declaredSha.slice(0, 16)}…, this file is ${digest.slice(0, 16)}…. The comparison below would be about "a render", not "the render you certified".`,
+      path: spec.path,
+    })
+  }
+  if (Number.isInteger(spec.bytes) && spec.bytes !== raw.length) {
+    blockers.push({
+      code: 'E_SILHOUETTE_IDENTITY_MISMATCH',
+      message: `the render's size is not what was declared: declared ${spec.bytes} bytes, this file is ${raw.length}.`,
+      path: spec.path,
+    })
+  }
   const view = spec.view ?? 'front'
   const entry = (outline ?? []).find((o) => o.view === view) ?? null
   const compared = compareSilhouette(
@@ -1849,7 +1966,419 @@ async function silhouetteFinding(tctx, spec, outline, photoCheck) {
       view,
       declared_ortho_scale: spec.ortho_scale,
       declared_sensor_fit: spec.sensor_fit ?? null,
+      // 这张图的**身份**（我们自己算的）+ 调用方声明的身份是否对得上（没声明就是 null，不是"通过"）。
+      render: {
+        sha256: digest,
+        bytes: raw.length,
+        width: metrics.width,
+        height: metrics.height,
+        declared_sha256_matches: declaredSha === null ? null : declaredSha === digest,
+      },
+      // 位姿按调用方声明原样记下（我们不 emit 相机，所以这是我们唯一能拿到它的地方）。
+      camera: spec.camera ?? null,
       compared,
+    },
+    blockers,
+  }
+}
+
+/**
+ * 一键生成段（`agh_ortho_mesh_run`）：照片 → 调用**外部生成器** → 网格落地 + sidecar。
+ *
+ * 三条纪律，各自都有实测来源：
+ *  ① **命令只能来自配置**（`.agnes/agh-ortho/mesh-run.json`），不许插件内置任何一台机器的路径 ——
+ *     我们这台是 `D:\cod\TripoSR`，别人的不是；配置缺席就**明确拒绝**并把模板打出来（fail-closed）。
+ *  ② 子进程 argv **先过 `tctx.sandbox.confine()`**（与下游拉 Blender 同一条缝）：不 confine
+ *     就是静默绕过沙箱，而那正是我们在别处一直在防的事。
+ *  ③ 产出的网格**按真实字节量**（`glbWorldBounds`）并写进 sidecar 的**声明**；量不出来就拒绝 ——
+ *     "声明"必须是**可核对的**，这条已经有用（`E_MESH_SIZE_MISMATCH` 抓过假声明）。
+ *
+ * 与既有分工的关系：本工具只**生产**输入（`meshes/<name>/{mesh.glb, source.json}`），
+ * 登记/校验仍由 `save`/`fit` 走同一条路 —— 于是"网格从哪来"与"网格是否可信"保持两件事。
+ */
+/** 起一个被 confine 过的子进程，收 stdout/stderr 的尾部，超时就杀。
+ *  日志只留最后 8 KB：生成器的输出可能有几 MB，而我们要的是"为什么失败"。 */
+function spawnConfined(argv, timeoutMs) {
+  return new Promise((resolve) => {
+    let child
+    try {
+      child = spawn(argv[0], argv.slice(1), { shell: false, windowsHide: true })
+    } catch (error) {
+      resolve({ code: -1, signal: null, timedOut: false, log: `spawn failed: ${error?.message ?? error}` })
+      return
+    }
+    let log = ''
+    const keep = (chunk) => {
+      log += chunk.toString('utf8')
+      if (log.length > 8192) log = log.slice(-8192)
+    }
+    child.stdout?.on('data', keep)
+    child.stderr?.on('data', keep)
+    let timedOut = false
+    const timer = setTimeout(() => {
+      timedOut = true
+      child.kill()
+    }, timeoutMs)
+    child.on('error', (error) => {
+      clearTimeout(timer)
+      resolve({ code: -1, signal: null, timedOut, log: `${log}\nspawn error: ${error?.message ?? error}` })
+    })
+    child.on('close', (code, signal) => {
+      clearTimeout(timer)
+      resolve({ code, signal, timedOut, timeoutMs, log })
+    })
+  })
+}
+
+const MESH_RUN_META = {
+  isReadOnly: false,
+  isDestructive: false,
+  isConcurrencySafe: false,
+  isOpenWorld: false,
+  replay: 'never',
+  costHint: { wallMs: 600000 },
+  deferLoading: false,
+  requiresApproval: 'always',
+}
+
+const MESH_RUN_INPUT = {
+  type: 'object',
+  properties: {
+    name: { type: 'string', minLength: 1, maxLength: 64 },
+    // 源照片的真实路径（要给生成器的那一张）
+    image_file: { type: 'string', minLength: 2 },
+    // 覆盖配置里的命令（可选）：数组，argv[0] 是可执行文件
+    command: { type: 'array', items: { type: 'string' }, minItems: 1 },
+    // 生成器的**内容朝向**与**单位**：不可从文件推断（包围盒对 ± 不敏感），必须由调用方声明。
+    up_axis: { type: 'string', minLength: 1, maxLength: 2 },
+    unit: { type: 'string', minLength: 1, maxLength: 16 },
+    timeout_ms: { type: 'integer', minimum: 1000 },
+  },
+  required: ['name', 'image_file'],
+  additionalProperties: false,
+}
+
+const MESH_RUN_CONFIG_REL = '.agnes/agh-ortho/mesh-run.json'
+// 生成器层面的产出历史（与"这一根网格"无关，按 **同一张照片 + 同一条命令** 记）：
+// "同一个 sha 跑出过几次"是可数的**事实**，是"可复现"这句话能被核对的形式（§9.29）。
+const MESH_HISTORY_REL = '.agnes/agh-ortho/mesh-run/history.json'
+// "引用即钉住"：被记录引用过的 run 由调用方在这里点名，保留计划不得把它们列进待清（§9.28 发现二）。
+const RETENTION_CONFIG_REL = '.agnes/agh-ortho/retention.json'
+
+/** 配置模板：拒绝时打给调用方看，让他知道该写什么。 */
+function meshRunTemplate() {
+  return {
+    note: 'this file tells agh_ortho_mesh_run how to turn a photograph into a mesh on THIS machine; the plugin ships no command of its own',
+    command: ['<absolute path to your python>', '<absolute path to the generator script>', '--image', '{image}', '--out', '{out}'],
+    outputDir: '{out}',
+    upAxis: 'X',
+    unit: 'normalised',
+    generator: '<name of the generator, e.g. TripoSR>',
+    aboutPlaceholders: '{image} and {out} are substituted by the tool: {image} = the photograph, {out} = a fresh directory for the generator to write into. Add "output": "{out}/<the file>.glb" only if your command leaves more than one .glb — otherwise the tool refuses rather than choosing one by file name.',
+  }
+}
+
+const MESH_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/
+
+/**
+ * 跑一次生成段。返回 `{ finding, blockers }`；**不抛** —— 每一类失败都有明确错误码与可操作的下一步。
+ */
+async function meshRunFinding(tctx, args, spawnImpl) {
+  const blockers = []
+  const name = typeof args?.name === 'string' ? args.name : ''
+  if (!MESH_NAME_RE.test(name)) {
+    blockers.push({
+      code: 'E_ARG_RANGE',
+      message: `name must match ${MESH_NAME_RE} (it becomes a directory under meshes/): got "${name}"`,
+    })
+    return { finding: null, blockers }
+  }
+  const fs = tctx?.fs
+  if (!fs || typeof fs.read !== 'function' || typeof fs.write !== 'function') {
+    blockers.push({ code: 'E_NO_FS', message: 'mesh_run needs the workspace file seam (read/write/list/stat)' })
+    return { finding: null, blockers }
+  }
+  const imageFile = typeof args?.image_file === 'string' && args.image_file.length > 0 ? args.image_file : null
+  if (!imageFile) {
+    blockers.push({ code: 'E_ARG_MISSING', message: 'image_file is required: it is the photograph the generator is given' })
+    return { finding: null, blockers }
+  }
+  try {
+    await fs.stat(imageFile)
+  } catch (error) {
+    blockers.push({
+      code: 'E_IMAGE_FILE_UNREADABLE',
+      message: `the photograph could not be read (${error?.message ?? error}); running a generator on a path that is not there would waste minutes and produce a provenance chain we cannot check`,
+      path: imageFile,
+    })
+    return { finding: null, blockers }
+  }
+  // **不许覆盖已存在的网格目录**：本项目已经真实发生过一次"交付包被就地改坏"（§9.11.2），而这里更糟 ——
+  // 被覆盖的可能是**手工写过的** sidecar（`meshes/ayaka/source.json` 里记着朝向那三轮的来历），
+  // 本工具写出的 sidecar 会把它整份换掉。所以先问"那里有没有东西"，而且必须在**起生成器之前**问：
+  // 一个跑 15 分钟的子进程交付后才说"我不写"，等于白烧了那 15 分钟。
+  const meshDirRel = `${ARTIFACT_ROOT_SEGMENTS[0]}/agh-ortho/meshes/${name}`
+  try {
+    const existing = await fs.list(meshDirRel)
+    if ((existing ?? []).length > 0) {
+      blockers.push({
+        code: 'E_MESH_TARGET_EXISTS',
+        message: `${meshDirRel} already holds ${existing.length} entry(ies); refusing to overwrite. A sidecar there may be hand-written (it records how that mesh was made, e.g. a baked axis correction) and this tool's sidecar would replace it whole. Use another name, or move that directory aside first.`,
+        path: meshDirRel,
+      })
+      return { finding: null, blockers }
+    }
+  } catch {
+    // 列不出来 ⇒ 目录不存在（或为空）⇒ 可以写。用"能不能列出来"判断存在性，不去依赖 stat 的返回形状。
+  }
+  // 配置：要么调用方直接给命令，要么从工作区配置读。**没有就拒绝**，不内置任何机器的路径。
+  let config = null
+  if (!Array.isArray(args?.command)) {
+    let text = null
+    try {
+      text = await fs.read(MESH_RUN_CONFIG_REL)
+    } catch {
+      text = null
+    }
+    if (text === null) {
+      blockers.push({
+        code: 'E_MESH_RUN_NOT_CONFIGURED',
+        message: `no ${MESH_RUN_CONFIG_REL} and no command argument. This plugin deliberately ships no generator command: it would be a path on one machine. Write the file (or pass command) — template:`,
+        template: meshRunTemplate(),
+      })
+      return { finding: null, blockers }
+    }
+    try {
+      const raw = Buffer.isBuffer(text) ? text : Buffer.from(text)
+      config = JSON.parse(raw.toString('utf8'))
+    } catch (error) {
+      blockers.push({
+        code: 'E_MESH_RUN_CONFIG_INVALID',
+        message: `${MESH_RUN_CONFIG_REL} is not valid JSON (${error?.message ?? error})`,
+        template: meshRunTemplate(),
+      })
+      return { finding: null, blockers }
+    }
+  }
+  const argvTemplate = Array.isArray(args?.command) ? args.command : config?.command
+  if (!Array.isArray(argvTemplate) || argvTemplate.length === 0 || argvTemplate.some((a) => typeof a !== 'string')) {
+    blockers.push({
+      code: 'E_MESH_RUN_CONFIG_INVALID',
+      message: 'the command must be a non-empty array of strings (argv[0] is the executable)',
+      template: meshRunTemplate(),
+    })
+    return { finding: null, blockers }
+  }
+  const outDir = `${ARTIFACT_ROOT_SEGMENTS[0]}/agh-ortho/mesh-run/${name}` // 工作区内的临时输出目录
+  const argv = argvTemplate.map((a) => a.split('{image}').join(imageFile).split('{out}').join(outDir))
+  // ② argv 先过沙箱：不 confine 就是静默绕过沙箱。
+  let confined = argv
+  if (typeof tctx?.sandbox?.confine === 'function') {
+    try {
+      confined = await tctx.sandbox.confine(argv)
+    } catch (error) {
+      blockers.push({
+        code: 'E_SANDBOX_REFUSED',
+        message: `sandbox.confine refused the generator command (${error?.message ?? error}); running it unconfined would be a silent bypass`,
+        argv,
+      })
+      return { finding: null, blockers }
+    }
+  } else {
+    blockers.push({
+      code: 'E_NO_SANDBOX_SEAM',
+      message: 'this tool context has no sandbox seam, so a generator command cannot be confined; refusing rather than spawning unconfined',
+    })
+    return { finding: null, blockers }
+  }
+  const run = await spawnImpl(confined, Number.isInteger(args?.timeout_ms) ? args.timeout_ms : 15 * 60 * 1000)
+  if (run.timedOut) {
+    blockers.push({
+      code: 'E_MESH_RUN_TIMEOUT',
+      message: `the generator did not finish in ${run.timeoutMs} ms and was killed`,
+      log: run.log,
+    })
+    return { finding: null, blockers }
+  }
+  if (run.code !== 0) {
+    blockers.push({
+      code: 'E_MESH_RUN_FAILED',
+      message: `the generator exited with code ${run.code}${run.signal ? ` (signal ${run.signal})` : ''}. Nothing was written; the log tail is attached.`,
+      log: run.log,
+    })
+    return { finding: null, blockers }
+  }
+  // 找出产出：优先 .glb（我们量得了），.obj 明确说"量不了"而不是假装量过。
+  // `fs.list` 有两种形状（memoryFs 给字符串、真实 fs 给 {name,kind}）⇒ 两种都吃；产出常在子目录
+  // （如 out/0/mesh.glb）⇒ 递归找，深度限 3。
+  const listNames = async (dir) => {
+    const entries = await fs.list(dir)
+    return (entries ?? []).map((e) => (typeof e === 'string' ? e : e?.name)).filter((n) => typeof n === 'string' && n.length > 0)
+  }
+  const findMeshes = async (dir, depth) => {
+    if (depth > 3) return []
+    let names = []
+    try {
+      names = await listNames(dir)
+    } catch {
+      // 列不出来 ⇒ 它不是目录（或是空的/不存在的）。**靠"能列出来"判断目录**，
+      // 不去依赖 `stat` 的返回形状（memoryFs 与真实 fs 的形状不同，实测踩过）。
+      return []
+    }
+    const found = []
+    for (const n of names) {
+      const child = `${dir}/${n}`
+      if (/\.(glb|obj)$/i.test(n)) found.push(child)
+      else found.push(...(await findMeshes(child, depth + 1)))
+    }
+    return found
+  }
+  const produced = await findMeshes(outDir, 0)
+  const glbs = produced.filter((p) => /\.glb$/i.test(p)).sort()
+  const objs = produced.filter((p) => /\.obj$/i.test(p))
+  const declaredOut = typeof config?.output === 'string' && config.output.length > 0 ? config.output.split('{out}').join(outDir).replace(/\\/g, '/') : null
+  let meshAbs = null
+  if (declaredOut !== null) {
+    // 声明了 output 就**只量那一个**：带后处理的命令（预处理/翻正/减面）最清楚哪一份是成品。
+    const hit = glbs.find((p) => p.replace(/\\/g, '/') === declaredOut)
+    if (!hit) {
+      blockers.push({
+        code: 'E_MESH_RUN_NO_OUTPUT',
+        message: `mesh-run.json declares output "${config.output}" but after the run there is no such file; found: ${glbs.join(', ') || '(no .glb at all)'}`,
+        log: run.log,
+        found: glbs,
+      })
+      return { finding: null, blockers }
+    }
+    meshAbs = hit
+  } else if (glbs.length === 0) {
+    blockers.push({
+      code: 'E_MESH_RUN_NO_OUTPUT',
+      message: objs.length
+        ? `the generator produced ${objs.length} .obj file(s) and no .glb. Measuring an OBJ is not implemented, and a sidecar whose declared height nothing measured would be a claim we cannot check — ask the generator for .glb.`
+        : `the generator exited 0 but wrote no .glb under ${outDir}; the log tail is attached`,
+      log: run.log,
+      objects: objs.length,
+    })
+    return { finding: null, blockers }
+  } else if (glbs.length > 1) {
+    // 多于一个 .glb 时**不许按文件名顺序挑**：那等于让一个与内容无关的字符串决定"量的是哪一个"，
+    // 而 sidecar 随后会把量到的值写成"这个网格的声明"。（本路真的会走到这里：带后处理的命令往往
+    // 既留原始件又留成品件。）⇒ 要么声明 output，要么让命令只留一个。
+    blockers.push({
+      code: 'E_MESH_RUN_AMBIGUOUS_OUTPUT',
+      message: `the generator left ${glbs.length} .glb files under ${outDir} and mesh-run.json declares no "output": choosing one by name order would decide, silently, which file got measured. Declare "output" (a path template, e.g. "{out}/final/mesh.glb") or make the command leave exactly one.`,
+      found: glbs,
+      log: run.log,
+    })
+    return { finding: null, blockers }
+  } else {
+    meshAbs = glbs[0]
+  }
+  let bytes
+  try {
+    bytes = await fs.read(meshAbs)
+  } catch (error) {
+    blockers.push({ code: 'E_MESH_RUN_NO_OUTPUT', message: `the produced mesh could not be read back (${error?.message ?? error})`, path: meshAbs })
+    return { finding: null, blockers }
+  }
+  const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes)
+  const bounds = glbWorldBounds(buf)
+  if (!bounds.ok) {
+    blockers.push({ code: 'E_MESH_UNMEASURABLE', message: `the produced mesh could not be measured (${bounds.why}); a sidecar must record measured values`, path: meshAbs })
+    return { finding: null, blockers }
+  }
+  if (bounds.rotated) {
+    blockers.push({
+      code: 'E_MESH_MEASUREMENT_LIMITED',
+      message: 'a node carries a rotation, so an axis-aligned box would be wrong; refusing to write a declared height we cannot stand behind',
+      path: meshAbs,
+    })
+    return { finding: null, blockers }
+  }
+  // 落盘：mesh.glb + source.json（声明 = 实测）
+  // **上轴与单位必须显式给**（配置或参数）：它们**无法从文件推断** —— 包围盒对 ± 不敏感，
+  // 猜一个"最长轴就是上轴"在某些模型上正好错，而错的那次会让模型躺下且看不出原因。
+  const upAxis = typeof args?.up_axis === 'string' && args.up_axis.length > 0 ? args.up_axis.toUpperCase() : typeof config?.upAxis === 'string' ? config.upAxis.toUpperCase() : null
+  const unit = typeof args?.unit === 'string' && args.unit.length > 0 ? args.unit : typeof config?.unit === 'string' ? config.unit : null
+  if (upAxis === null || unit === null) {
+    blockers.push({
+      code: 'E_ARG_MISSING',
+      message: `${upAxis === null ? 'up_axis' : 'unit'} must be declared (argument or mesh-run.json): neither can be inferred from the produced file — a bounding box is blind to which end is up, and guessing it produces a model that lies down for reasons nobody can see.`,
+      template: meshRunTemplate(),
+    })
+    return { finding: null, blockers }
+  }
+  const axisIndex = upAxis.replace(/^[+-]/, '') === 'Y' ? 1 : upAxis.replace(/^[+-]/, '') === 'X' ? 0 : 2
+  const imageBytes = await fs.read(imageFile)
+  const imageBuf = Buffer.isBuffer(imageBytes) ? imageBytes : Buffer.from(imageBytes)
+  const sidecar = {
+    generator: config?.generator ?? 'unknown generator (from mesh-run.json)',
+    command: argv,
+    imageFile,
+    imageSha256: createHash('sha256').update(imageBuf).digest('hex'),
+    file: 'mesh.glb',
+    fileSha256: createHash('sha256').update(buf).digest('hex'),
+    fileBytes: buf.length,
+    unit: typeof config?.unit === 'string' ? config.unit : 'normalised',    upAxis,
+    declaredHeight: Number(bounds.size[axisIndex].toFixed(6)),
+    declaredHeightKind: 'measured',
+    measuredSizeInFile: bounds.size.map((v) => Number(v.toFixed(6))),
+    note: 'written by agh_ortho_mesh_run: the declarations above are MEASURED from the produced file, not copied from the generator. upAxis/unit come from mesh-run.json and are the caller\'s knowledge of that generator.',
+    producedAt: new Date().toISOString(),
+  }
+  const meshOut = `${meshDirRel}/mesh.glb`
+  const sidecarOut = `${ARTIFACT_ROOT_SEGMENTS[0]}/agh-ortho/meshes/${name}/source.json`
+  try {
+    await fs.write(meshOut, buf)
+    await fs.write(sidecarOut, JSON.stringify(sidecar, null, 2))
+  } catch (error) {
+    blockers.push({ code: 'E_WRITE_FAILED', message: `writing the mesh or its sidecar failed (${error?.message ?? error})`, path: meshOut })
+    return { finding: null, blockers }
+  }
+  // **可复现性要落成证据，不是某人的一句声明**（§9.29）：每次产出一律追加一条到**生成器层面的**历史
+  // （`.agnes/agh-ortho/mesh-run/history.json`）。为什么不放在 `meshes/<name>/`：同名重跑会被上面的闸门
+  // 拒掉 ⇒ 那份历史**永远长不到第二条**，也就永远证明不了"跑出过两次一样的东西"。
+  // 写不进去**不冒充成功、也不让整轮失败**：网格与 sidecar 已经在盘上，那件事本身是真的。
+  let history = { shape: 'agh-ortho/mesh-history/1', runs: [] }
+  let historyError = null
+  try {
+    const rawHistory = await fs.read(MESH_HISTORY_REL)
+    const parsedHistory = JSON.parse(Buffer.isBuffer(rawHistory) ? rawHistory.toString('utf8') : String(rawHistory))
+    if (Array.isArray(parsedHistory?.runs)) history = { shape: parsedHistory.shape ?? 'agh-ortho/mesh-history/1', runs: parsedHistory.runs }
+  } catch {
+    history = { shape: 'agh-ortho/mesh-history/1', runs: [] } // 第一次跑（或读坏了）⇒ 从这一条开始；不猜、不清空
+  }
+  history.runs.push({
+    producedAt: sidecar.producedAt,
+    name,
+    sha256: sidecar.fileSha256,
+    bytes: sidecar.fileBytes,
+    imageSha256: sidecar.imageSha256,
+    upAxis,
+    unit,
+    command: argv,
+  })
+  // 同一个 sha **且**同一张输入照片，跑出过几次 —— 这就是"可复现"这个词能被核对的形式。
+  const identicalRuns = history.runs.filter((r) => r && r.sha256 === sidecar.fileSha256 && r.imageSha256 === sidecar.imageSha256).length
+  try {
+    await fs.write(MESH_HISTORY_REL, JSON.stringify({ ...history, runs: history.runs }, null, 2))
+  } catch (error) {
+    historyError = `${error?.message ?? error}`
+  }
+
+  return {
+    finding: {
+      name,
+      mesh_path: meshOut,
+      sidecar_path: sidecarOut,
+      // "同一个 sha 跑出过几次"（含这一次）。**这是事实，不是声明**：数的是 history.json 里的条目。
+      reproduction: { identical_runs: identicalRuns, history_path: MESH_HISTORY_REL, error: historyError },
+      generator: config?.generator ?? null,
+      command: argv,
+      measured: { size_in_file: bounds.size, declared_height: sidecar.declaredHeight, up_axis: upAxis, nodes: bounds.nodes },
+      file: { sha256: sidecar.fileSha256, bytes: sidecar.fileBytes },
+      log: run.log,
     },
     blockers,
   }
@@ -2887,8 +3416,24 @@ export const runtime = {
     })
 
     registerTool({
+      name: 'agh_ortho_mesh_run',
+      description:
+        '一键生成段：把照片交给**外部生成器**（命令来自工作区配置 .agnes/agh-ortho/mesh-run.json；本插件**不内置任何机器的路径**），把产出的 .glb **按真实字节量**后落到 .agnes/agh-ortho/meshes/<name>/mesh.glb，并写一份"**声明 = 实测**"的 source.json。argv 先过 tctx.sandbox.confine()（拿不到该缝就拒绝，绝不无约束地起进程）；超时 / 退出码非零 / 没有 .glb / 量不出尺寸 各有明确错误码并附日志尾部。它只**生产输入**：登记与校验仍由 agh_ortho_fit 与 agh_ortho_save 走同一条路（于是"网格从哪来"和"网格是否可信"保持两件事）。meshes/<name>/ 里已经有东西时**拒绝覆盖**（那里可能是手工写过的 sidecar），而且这一判断在**起生成器之前**做；命令留下多个 .glb 而配置没声明 output 时也拒绝 —— "量的是哪一个"不许由文件名的字典序决定。',
+      parameters: MESH_RUN_INPUT,
+      meta: MESH_RUN_META,
+      async execute(args, tctx) {
+        // 与 tctx.fs / tctx.tools.invoke 同一种"显式缝"：测试可以注入一个假的 spawn，
+        // 于是**整条流程**（argv 替换 → 递归找产出 → 按字节量 → 写 mesh.glb + sidecar → 返回 measured）
+        // 都能在不起真进程的前提下被测到；真进程只由 spawnConfined 那一层负责（下游已验证过同一件事）。
+        const spawnImpl = typeof tctx?.meshRunSpawn === 'function' ? tctx.meshRunSpawn : spawnConfined
+        const { finding, blockers } = await meshRunFinding(tctx, args, spawnImpl)
+        return respond({ ok: blockers.length === 0, mesh_run: finding, blockers })
+      },
+    })
+
+    registerTool({
       name: 'agh_ortho_save',
-      // 这是本插件唯一的**变更型**工具。因此它必须遵守上游契约 §5.2：
+      // 这是本插件两个**变更型**工具之一（另一个是 agh_ortho_mesh_run）。因此它必须遵守上游契约 §5.2：
       // 先把 report.json 落到磁盘再返回 —— 变更型工具的结果一旦被判非法会被替换成
       // TOOL_OUTCOME_UNKNOWN，结果与失败原因会**一起永久丢失**；返回值只是"方便读的副本"。
       description:
