@@ -421,6 +421,8 @@ const SAVE_INPUT = {
     mesh_file: { type: 'string', minLength: 2 },
     // 剪影图（可选）：交付包里也记下"轮廓像不像"这一档的结论。
     silhouette: SILHOUETTE_INPUT,
+    // **多张**剪影：一份包就能同时带上 front 与 left（多轴的像素证据不再需要两个 run）。
+    silhouettes: { type: 'array', items: SILHOUETTE_INPUT },
     // 源照片的真实路径（可选）：登记进包，并核 `source.input_image_sha256` 的声明。
     image_file: { type: 'string', minLength: 2 },
     // **人有没有看过**（B 那一关）。不传 ⇒ 包里记 `performed: null` 并写明"没有记录" ——
@@ -1274,7 +1276,7 @@ async function assembleArtifacts(args, createdAt, tctx) {
   const outline = numericOutline(views)
   // 剪影那一档：**读不到就是 blocker**（不是"没给"）—— 它同时与 outline（几何自洽）
   // 和 photo_check（像不像照片）比，所以它必须和别的档一样影响 ok。
-  const silhouetteCheck = await silhouetteFinding(tctx, args.silhouette, outline, args.photo_check)
+  const silhouetteCheck = await silhouetteFindings(tctx, args, outline, args.photo_check)
   blockers.push(...silhouetteCheck.blockers)
   // 源图那一环：声明必须可核对（同时把源图登记进包，让"这张图 → 这个网格"可核）。
   const imageCheck = await imageFinding(tctx, args)
@@ -1652,6 +1654,8 @@ async function assembleArtifacts(args, createdAt, tctx) {
         // 读数量的**基准**（主体 / 整幅画面）：不声明就明写"未声明"，不替它猜。
         photo_basis: photoBasisFinding(args),
         silhouette: silhouetteCheck.finding,
+        // 多张时把每一张的结论都带上（`silhouette` 仍是第一条，向后兼容）。
+        ...(silhouetteCheck.findings && silhouetteCheck.findings.length > 1 ? { silhouettes: silhouetteCheck.findings } : {}),
         // 源图那一环的结论（声明 vs 真实字节的 sha256）。
         image: imageCheck.finding,
         overlaps: overlapFindings(boxes),
@@ -1929,6 +1933,24 @@ function photoRangeFor(photoCheck, view) {
  * 返回 `{ finding, blockers }`；**绝不抛错** —— 读不到/解不开/没有尺度都是**明确 blocker**，
  * 因为"没发生"必须和"通过了"分开说。
  */
+/**
+ * 剪影可以给**多张**（front / left / top…）。单张时语义完全是旧的：blocker 就是那一张的。
+ * 多张时 **blocker 取并集** —— 任何一张对不上都是 blocking；`finding` 仍是第一条（向后兼容），
+ * 全部各判一次的结论在 `findings[]` 里。
+ */
+async function silhouetteFindings(tctx, args, outline, photoCheck) {
+  const list = [...(Array.isArray(args?.silhouettes) ? args.silhouettes : []), ...(args?.silhouette ? [args.silhouette] : [])]
+  if (list.length === 0) return await silhouetteFinding(tctx, undefined, outline, photoCheck)
+  const findings = []
+  const blockers = []
+  for (const spec of list) {
+    const one = await silhouetteFinding(tctx, spec, outline, photoCheck)
+    if (one?.finding) findings.push(one.finding)
+    if (Array.isArray(one?.blockers)) blockers.push(...one.blockers)
+  }
+  return { finding: findings[0] ?? null, findings, blockers }
+}
+
 async function silhouetteFinding(tctx, spec, outline, photoCheck) {
   const blockers = []
   if (!spec) return { finding: null, blockers }
@@ -2500,6 +2522,10 @@ const FIT_INPUT = {
     against_scene: { type: 'boolean' },
     // 正交渲染出的剪影图（可选）：给了就多一档"轮廓像不像"的可判结论（SILHOUETTE-PLAN）。
     silhouette: SILHOUETTE_INPUT,
+    // **多张**剪影（可选）：front / left / top 各一张。一份包只带一张的话，多轴证据就得分成多个 run
+    // （toy1 那轮为 front 与 left 落了两份包）。多张时 blocker **取并集** —— 任何一张对不上就是 blocking，
+    // 与单张的语义完全一致；`silhouette`（单数）仍工作，并且是第一条。
+    silhouettes: { type: 'array', items: SILHOUETTE_INPUT },
     // 源照片的**真实路径**（可选但强烈建议）：给了才会去核 `source.input_image_sha256` 那些声明。
     image_file: { type: 'string', minLength: 2 },
   },
@@ -3502,7 +3528,7 @@ export const runtime = {
         // 剪影那一档（fit 侧）：与"几何自洽"和"照片读数"一起判 —— **读不到就是 blocker**，
         // 因为它必须与别的档一样影响 verdict，不能退化成"没提就不发生"的软选项。
         // 注意 fit 里**没有** `blockers` 数组（那是 verify/save 的）：结论走 verdict，所以这里直接进判定。
-        const silhouetteFit = await silhouetteFinding(tctx, args.silhouette, outline, args.photo_check)
+        const silhouetteFit = await silhouetteFindings(tctx, args, outline, args.photo_check)
         const imageFit = await imageFinding(tctx, args)
         const meshGeometry = await meshGeometryFor(tctx, args, emission.ops)
         const revise = reviseHints(args, emission, caps, { checked, aligned, fromParams, outline, overlaps, boxes, meshGeometry })
@@ -3567,6 +3593,8 @@ export const runtime = {
           // 剪影那一档的 blockers **单独列出**：读不到图时 finding 是 null，若只留 finding，
           // "没发生"就会变成载荷里看不见的东西 —— 那正是我们一直在防的。
           silhouette_blockers: silhouetteFit.blockers,
+          // 多张时把每一张的结论都带上（`silhouette` 仍是第一条，向后兼容）。
+          ...(silhouetteFit.findings && silhouetteFit.findings.length > 1 ? { silhouettes: silhouetteFit.findings } : {}),
           // 源图那一环：声明 vs 真实字节的 sha256。
           image: imageFit.finding,
           image_blockers: imageFit.blockers,

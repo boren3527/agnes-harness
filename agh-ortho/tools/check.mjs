@@ -1919,6 +1919,38 @@ check(
   missSil.silhouette === null && missSil.silhouette_blockers?.some((b) => b.code === 'E_SILHOUETTE_UNREADABLE') && missSil.verdict === 'revise',
   JSON.stringify(missSil.silhouette_blockers?.map((b) => b.code)),
 )
+// **一份包带多张剪影**（toy1 那轮为了 front 与 left 落了两份包）：两张各自判、结论都带上，
+// 而任何一张对不上仍然是 blocking（blocker 取并集，语义与单张一致）；`silhouette`（单数）仍是第一条。
+const multiSilFs = memoryFs()
+multiSilFs.files.set('D:/ws/out/a.png', blockPng(512, 40, 200))
+multiSilFs.files.set('D:/ws/out/b.png', blockPng(512, 40, 200))
+const multiSil = (
+  await fitTool.execute(
+    {
+      ...MCAP_ARGS,
+      against_scene: false,
+      silhouettes: [
+        { path: 'D:/ws/out/a.png', ortho_scale: 2, sensor_fit: 'VERTICAL' },
+        { path: 'D:/ws/out/b.png', ortho_scale: 2, sensor_fit: 'VERTICAL' },
+      ],
+    },
+    { fs: multiSilFs, session: { workspaceRoot: ws } },
+  )
+).structured
+check(
+  'silhouette: one package can carry several views - each is judged, and any bad one still blocks',
+  multiSil.verdict === 'revise' &&
+    Array.isArray(multiSil.silhouettes) &&
+    multiSil.silhouettes.length === 2 &&
+    multiSil.silhouette?.path === 'D:/ws/out/a.png' &&
+    (multiSil.revise_summary?.blocking_by_tier?.silhouette ?? 0) >= 1,
+  JSON.stringify({
+    verdict: multiSil.verdict,
+    n: multiSil.silhouettes?.length,
+    first: multiSil.silhouette?.path,
+    byTier: multiSil.revise_summary?.blocking_by_tier,
+  }),
+)
 const silSaveFs = meshFs(makeGlb([0.2, 1, 0.2]))
 silSaveFs.files.set('D:/ws/out/front.png', blockPng(512, 40, 200))
 const badSave = (
