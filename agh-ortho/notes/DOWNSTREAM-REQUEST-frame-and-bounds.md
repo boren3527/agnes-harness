@@ -52,6 +52,17 @@
 - （我们这侧不改：`silhouette` 的 `sensor_fit` 在顶层，`camera` 块装位姿三项 —— 请求原文那句
   "sensor_fit 放进 camera 里"是我写得含糊，以本节为准。）
 
+### 实现与落地状态（2026-10-10 20:04 核实）
+
+- **代码已写**：`agh_ops.py` +118 行（`_world_bounds` / `_world_box` / `_camera_pose`），
+  `describe_scene` 加 `'bounds'`、`render.still` 加 `'camera_pose'`；`package.json` → **0.7.0**。
+- **但尚未生效**：运行中的仍是 **0.6.0**，且两个文件**未提交**。⇒ 要**提交 + 重装**之后，P1/P2 才在运行时成立。
+- **顺带纠正一条文档事实**：上游文档声称 `render.still` 返回顶层 `location`，而 **0.6.0 实际根本没有**。
+  ⇒ 我们早先两轮（`toy1` / `firefly1`）那两份 `silhouette.camera` 里的位姿，是从 `object.look_at` 的回报与
+  场景读数**抄**来的 —— 当时没有别的来源。这正是"**文档声称 ≠ 装着的事实**"那一类，
+  也说明 P2 的价值不只是补一个字段，而是**去掉一次转抄**。
+- **装好后请照本文件顶部的验收值复核**（P1：`toy1` 的世界包围盒；P2：`camera_pose` 与 `camera.add` 发出的 1e-6 内一致）。
+
 ---
 
 ## P3. 取景 op：`view.frame { target }`（**先确认是否已有更省事的**）
