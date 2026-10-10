@@ -2213,7 +2213,7 @@ async function meshRunFinding(tctx, args, spawnImpl) {
       })
       return { finding: null, blockers }
     }
-    const preRun = await spawnConfined(preConfined, timeoutMs)
+    const preRun = await spawnImpl(preConfined, Number.isInteger(args?.timeout_ms) ? args.timeout_ms : 15 * 60 * 1000)
     if (preRun.code !== 0) {
       blockers.push({
         code: 'E_MESH_PREPROCESS_FAILED',

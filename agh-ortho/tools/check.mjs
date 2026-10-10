@@ -593,6 +593,46 @@ check(
   JSON.stringify({ runs: boxOutlines.front.length, aspect: fSpan[0] / fSpan[1] }),
 )
 
+const preFs = memoryFs()
+for (const d of ['.agnes', '.agnes/agh-ortho', '.agnes/agh-ortho/mesh-run', '.agnes/agh-ortho/meshes']) preFs.dirs.add(d)
+preFs.files.set('D:/ws/photo.png', Buffer.from('fake-jpeg-bytes', 'utf8'))
+preFs.files.set(
+  '.agnes/agh-ortho/mesh-run.json',
+  JSON.stringify({
+    preprocessCommand: ['/fake/python', 'cut.py', '--image', '{image}', '--out', '{out}'],
+    command: ['/fake/python', 'gen.py', '--image', '{prep}', '--out', '{out}'],
+    upAxis: 'X',
+    unit: 'normalised',
+    generator: 'fakegen',
+    output: '{out}/mesh.glb',
+  }),
+)
+const calls = []
+const twoSpawn = async (argv) => {
+  calls.push(argv)
+  const out = argv[argv.length - 1]
+  for (const d of ['.agnes/agh-ortho/mesh-run', out, `${out}/prep`]) preFs.dirs.add(d)
+  if (calls.length === 1) {
+    preFs.files.set(`${out}/prep/photo_cut.png`, Buffer.from('fake-png', 'utf8'))
+    return { code: 0, signal: null, timedOut: false, log: 'cut done' }
+  }
+  preFs.files.set(`${out}/mesh.glb`, inlineGlb([0.5, 0.5, 1]))
+  return { code: 0, signal: null, timedOut: false, log: 'mesh done' }
+}
+const preRun = (await meshRunTool.execute({ name: 'pre1', image_file: 'D:/ws/photo.png' }, { fs: preFs, sandbox: { confine: async (a) => a }, meshRunSpawn: twoSpawn })).structured
+check(
+  'mesh_run: a configured preprocess step runs FIRST, and the generator gets {prep} (its output), never the photograph',
+  preRun.ok === true &&
+    calls.length === 2 &&
+    calls[0].some((a) => String(a).includes('cut.py')) &&
+    calls[1].some((a) => String(a).includes('photo_cut.png')) &&
+    !calls[1].some((a) => a === 'D:/ws/photo.png'),
+  JSON.stringify({
+    ok: preRun.ok,
+    calls: calls.map((c) => c.map((x) => String(x).split('/').pop()).join(' ')),
+    codes: preRun.blockers?.map((b) => b.code),
+  }),
+)
 const glbForHist = makeGlb([0.2, 1, 0.2])
 const glbHistSha = createHash('sha256').update(glbForHist).digest('hex')
 const fsMeshHist = meshFs(glbForHist)
