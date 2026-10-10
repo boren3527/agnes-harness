@@ -2025,11 +2025,19 @@ function photoCheckFindings(params, outline) {
     const relHalf = mid === 0 ? Infinity : (hi - lo) / 2 / mid
     const mine = computed[view]
     const boundTol = declaredBoundTolerance(lo, hi)
+    // **读数的重复性**：实测（2026-10-10）同一次成像的两份独立读数相差 **5.6%**
+    // （alpha>8 的包围盒 301×753 ⇒ 0.3997；较严阈值 300×710 ⇒ 0.4225）。
+    // 于是"写了 3 位小数 ⇒ ±0.0005"这种边界容差是**虚构的精度**：比它更窄的区间里判出的对错，
+    // 由**读法**决定而不由几何决定 —— 这是最早那次"容差落在自己的噪声里"的同一条教训（第 10 次）。
+    // **只警告不挡**：区间本身仍然是判据（判据不能被放宽），但读者必须知道它的分辨极限。
+    const READING_REPEATABILITY = 0.056
     rows.push({
       view,
       declared_interval: [lo, hi],
       relative_half_width: Number.isFinite(relHalf) ? round6(relHalf) : null,
       interval_is_too_wide: relHalf > PHOTO_CHECK_MAX_RELATIVE_HALF_WIDTH,
+      interval_tighter_than_reading_repeatability: Number.isFinite(relHalf) ? relHalf < READING_REPEATABILITY : null,
+      reading_repeatability: READING_REPEATABILITY,
       computed: typeof mine === 'number' ? mine : null,
       // 按**申明的精度**判：写 0.78 就是 2 位小数 ⇒ 边界有 ±0.005 的写法误差。
       // 同时如实给出不含容差的严格判定，让"擦边"这件事看得见。
@@ -2043,7 +2051,7 @@ function photoCheckFindings(params, outline) {
     declared_views: rows.length,
     max_relative_half_width: PHOTO_CHECK_MAX_RELATIVE_HALF_WIDTH,
     rows,
-    note: 'declared_interval comes from the model reading the photograph; computed comes from this model\'s own projection of its own parameters. This tier can catch errors of magnitude, not certify agreement to within 10% - an eyeballed silhouette cannot support that.',
+    note: 'declared_interval comes from the model reading the photograph; computed comes from this model\'s own projection of its own parameters. This tier can catch errors of magnitude, not certify agreement to within 10% - an eyeballed silhouette cannot support that. And note what a reading IS: two independent readings of the same image differed by 5.6% on this project (0.3997 versus 0.4225), so an interval tighter than that measures the reading method, not the geometry - it is reported per row and never used to widen the criterion.',
   }
 }
 
