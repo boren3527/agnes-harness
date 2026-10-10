@@ -227,6 +227,32 @@ export function sceneToleranceFor(...values) {
   return Math.max(SCENE_ABSOLUTE_FLOOR, SCENE_RELATIVE_TOLERANCE * scale)
 }
 
+/** 一个声明写了几位小数？据此推出"它本来就不该比这更准"。 */
+export function decimalsOf(value) {
+  const text = String(value)
+  const dot = text.indexOf('.')
+  if (dot === -1) return 0
+  return Math.min(9, text.length - dot - 1)
+}
+
+/**
+ * **声明带精度**的容差：写了 d 位小数 ⇒ 舍入误差不超过 0.5×10^-d，相对容差就是它除以自身量级。
+ *
+ * 为什么必须有（实测第 8 次撞同一条规矩）：参数写 0.9638（4 位），文件真值 0.963763，差 0.01%，
+ * 而固定的 1e-5 把它判成"不符"，于是交付包被两条 blocker 挡住 —— 判据的精度超过了输入的精度。
+ * 写 4 位小数的人**不可能**比 5e-5 更准；拿它当罪证是判据的错，不是数据的错。
+ */
+export function declarationRelativeTolerance(declared, floor = SCENE_RELATIVE_TOLERANCE) {
+  const decimals = decimalsOf(declared)
+  // **整数写法不当作"舍入过的测量"**：写 `2` 的人是在陈述一个精确值，把它读成"±0.5"会得到 25% 的容差，
+  // 那就什么都挡不住了（自检抓到：一条 0.001 的不一致因此漏过）。只有带小数的写法才是舍入证据。
+  if (decimals === 0) return floor
+  const value = Math.abs(Number(declared))
+  const magnitude = value > 0 ? value : 1
+  const half = 0.5 * Math.pow(10, -decimals)
+  return Math.max(floor, half / magnitude)
+}
+
 /**
  * 每种基元在 `size = 1` 时的**单位尺寸**（还要再乘 `size` 与 `scale`）。
  *
@@ -299,7 +325,14 @@ export function compareScene(expected, scene) {
       Array.isArray(got.dimensions) && expectedSize && rotationIsZero ? axisDelta(expectedSize, got.dimensions) : null
     const sizeAsserted = dimensionsDelta !== null
     // 这一行用的容差随**这个对象多大**变化 —— 曲面基元的包围盒偏差是按比例缩放的。
-    const tol = sceneToleranceFor(...want.location, ...(want.scale ?? []), ...(expectedSize ?? []))
+    // 期望值来自我们的 ops，而 ops 里的数字**带着参数写入时的精度**（写 4 位小数就只准到 5e-5）。
+  // 所以容差取"几何相对容差"与"声明舍入误差"的较大者 —— 判据不能比输入更准（实测第 8 次）。
+  const rounding = Math.max(
+    0,
+    ...(expectedSize ?? []).map((v) => declarationRelativeTolerance(v) * Math.abs(Number(v) || 0)),
+    ...(want.location ?? []).map((v) => declarationRelativeTolerance(v) * Math.abs(Number(v) || 0)),
+  )
+  const tol = Math.max(sceneToleranceFor(...want.location, ...(want.scale ?? []), ...(expectedSize ?? [])), rounding)
     const scaleNotAssertedReason = scaleAsserted
       ? null
       : 'the imported mesh\u2019s scale comes from the file\u2019s own node transform, and the emit stage does not read files — so this line asserts presence, type and location, not scale'

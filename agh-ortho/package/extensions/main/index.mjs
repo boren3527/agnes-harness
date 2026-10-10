@@ -13,7 +13,7 @@
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
-import { SCENE_ABSOLUTE_FLOOR, SCENE_RELATIVE_TOLERANCE, boxesFromOps, compareScene, expectedObjectsFromOps, extentsFromBoxes, extentsFromParams, placementOf } from './geometry.mjs'
+import { SCENE_ABSOLUTE_FLOOR, SCENE_RELATIVE_TOLERANCE, declarationRelativeTolerance, boxesFromOps, compareScene, expectedObjectsFromOps, extentsFromBoxes, extentsFromParams, placementOf } from './geometry.mjs'
 import {
   ARTIFACT_ROOT_SEGMENTS,
   CONTRACT_VERSION,
@@ -92,7 +92,7 @@ function sceneCannotAssert(sizeAsserted) {
   //   ① 下游：camera.add 只有透视（没有 ORTHO/ortho_scale），且没有"用**场景相机**渲到文件"的 op
   //      （capture 渲的是**视口**）；
   //   ② 我们这侧：渲出来的像素**进不了模型** ⇒ 还要把剪影转成**数值**（比例数列）才能机器比对。
-  out.push('agreement with the original photograph: NOT connected yet. The downstream does expose camera.add / object.look_at / light.add, but camera.add is perspective only (no orthographic option) and nothing renders the scene camera to a file — capture renders the viewport. On our side a rendered picture would still have to be turned into numbers, because pixels never reach a model.')
+  out.push('agreement with the original photograph: the downstream can now render the scene camera (camera.add with type ORTHO plus render.still) and this plugin can compare such a render\u2019s silhouette against its own outline and against a photo_check range when you pass `silhouette` \u2014 what no tier does is judge *aesthetics*, because pixels never reach a model, and a picture is only ever evidence for a human or for a derived number.')
   return out
 }
 
@@ -685,7 +685,10 @@ function buildMesh(item, name, blockers) {
     })
     return []
   }
-  if (unit === null || !['m', 'cm', 'mm', 'normalised'].includes(unit)) {
+  // 对外宽容：两种拼写都收（美式 normalized / 英式 normalised），也收 unitless —— 别让一个拼写
+  // 把整轮挡住（实测踩过：sidecar 写 normalized，枚举只有 normalised ⇒ 参数校验先失败，
+  // 连带 lowering 没产出 op，于是又冒出"内部不一致"的第二条误导性 blocker）。
+  if (unit === null || !['m', 'cm', 'mm', 'normalised', 'normalized', 'unitless'].includes(unit)) {
     blockers.push({
       code: 'E_ARG_RANGE',
       message: `"${item.id}": source.unit must be one of m/cm/mm/normalised — a mesh file (esp. OBJ) carries no unit at all, so it has to be declared.`,
@@ -1421,12 +1424,15 @@ async function assembleArtifacts(args, createdAt, tctx) {
           const declared = up === 'Y' ? [w, h, d] : up === 'Z' ? [w, d, h] : [h, w, d]
           const rel = declared.map((v, i) => Math.abs(bounds.size[i] - v) / Math.max(Math.abs(v), 1e-9))
           const worst = Math.max(...rel)
+          // 容差按**声明的精度**推，而不是固定 1e-5：写 4 位小数的人不可能比 5e-5 更准（实测踩过）。
+          const sizeTol = Math.max(...declared.map((v) => declarationRelativeTolerance(v)))
           meshMeasured = {
             up_axis: up,
-            size_in_file: bounds.size.map((v) => Number(v.toFixed(6))),
+            size_in_file: bounds.size.map((v) => Number(v.toFixed(9))),
             size_declared: declared,
+            relative_tolerance: Number(sizeTol.toFixed(9)),
             nodes_measured: bounds.nodes,
-            worst_relative_difference: Number(worst.toFixed(6)),
+            worst_relative_difference: Number(worst.toFixed(9)),
           }
           // 第三道闸门：**文件自己的声明 vs 文件的实测**。
           // 前两道各管一半（sidecar vs 参数、参数 vs 实测），于是 sidecar 的 declaredHeight 被读进来、
@@ -1436,32 +1442,45 @@ async function assembleArtifacts(args, createdAt, tctx) {
             const axisIndex = up === 'Y' ? 1 : up === 'Z' ? 2 : 0
             const measuredAlongUp = bounds.size[axisIndex]
             const relUp = Math.abs(measuredAlongUp - declaredHeight) / Math.max(Math.abs(declaredHeight), 1e-9)
+            const tolUp = declarationRelativeTolerance(declaredHeight)
             meshMeasured.declared_height_from_file = declaredHeight
-            meshMeasured.measured_along_up_axis = Number(measuredAlongUp.toFixed(6))
-            meshMeasured.up_axis_relative_difference = Number(relUp.toFixed(6))
-            if (relUp > SCENE_RELATIVE_TOLERANCE) {
+            meshMeasured.measured_along_up_axis = Number(measuredAlongUp.toFixed(9))
+            meshMeasured.up_axis_relative_difference = Number(relUp.toFixed(9))
+            meshMeasured.up_axis_relative_tolerance = Number(tolUp.toFixed(9))
+            if (relUp > tolUp) {
               blockers.push({
                 code: 'E_MESH_DECLARED_HEIGHT_MISMATCH',
-                message: `the file's own source.json declares declaredHeight=${declaredHeight}, but the mesh measures ${measuredAlongUp.toFixed(4)} along the declared ${up} axis. A declaration that nothing compares is decoration, so this gate exists: either the declaration or the generator's output is wrong.`,
+                message: `the file's own source.json declares declaredHeight=${declaredHeight}, but the mesh measures ${measuredAlongUp.toFixed(9)} along the declared ${up} axis (relative difference ${relUp.toExponential(3)}, tolerance ${tolUp.toExponential(3)} — the tolerance follows the declaration's own precision). A declaration that nothing compares is decoration, so this gate exists: either the declaration or the generator's output is wrong.`,
                 path: sidecarPath,
               })
             }
           }
-          if (worst > SCENE_RELATIVE_TOLERANCE) {
+          if (worst > sizeTol) {
             blockers.push({
               code: 'E_MESH_SIZE_MISMATCH',
-              message: `declared ${declared.map((v) => v.toFixed(4)).join('×')} m (up=${up}) but the file measures ${bounds.size.map((v) => v.toFixed(4)).join('×')} — worst relative difference ${(worst * 100).toFixed(2)}%. A generated mesh is not reproducible, so this cannot be "fixed" by regenerating: either the declaration or the file is wrong.`,
+              message: `declared ${declared.map((v) => String(v)).join(' × ')} (up=${up}) but the file measures ${bounds.size.map((v) => v.toFixed(9)).join(' × ')} — worst relative difference ${worst.toExponential(3)}, tolerance ${sizeTol.toExponential(3)} (the tolerance follows the declaration's own precision). A generated mesh is not reproducible, so this cannot be "fixed" by regenerating: either the declaration or the file is wrong.`,
               path: meshPath,
             })
           }
         }
       }
     } catch (error) {
-      blockers.push({
-        code: 'E_MESH_UNMEASURABLE',
-        message: `the mesh could not be re-read for measurement (${error?.message ?? error}).`,
-        path: meshPath,
-      })
+      // **区分"文件读不了"和"我们自己的代码炸了"**：后者必须是响亮的 bug，不能伪装成数据问题。
+      // （实测：漏了一个 import，8 条断言全变成 E_MESH_UNMEASURABLE，一条线索都没有。）
+      const name = error?.name ?? ''
+      if (name === 'ReferenceError' || name === 'TypeError' || name === 'SyntaxError') {
+        blockers.push({
+          code: 'E_MESH_MEASUREMENT_BUG',
+          message: `measuring the mesh threw ${name} (${error?.message ?? error}) — that is a bug in this plugin, not something about the file.`,
+          path: meshPath ?? sidecarPath,
+        })
+      } else {
+        blockers.push({
+          code: 'E_MESH_UNMEASURABLE',
+          message: `the mesh could not be re-read for measurement (${error?.message ?? error}).`,
+          path: meshPath,
+        })
+      }
     }
   }
 
@@ -2261,9 +2280,21 @@ function reviseHints(params, emission, caps, { checked, aligned, fromParams, out
     }
   }
 
-  // 内部不一致 —— 这些是**代码的 bug**，不是参数的错。说清楚，免得有人靠调参数去凑。
+  // 内部不一致 —— 但**别重复报**：如果 lowering 已经报了 blocker（缺声明、单位不合法…），
+  // 那么"参数侧 N 个 vs ops 侧 0 条"正是**那些**造成的（被挡下的项不会产出 op），
+  // 再报一条 blocking 只会误导（实测：sidecar 里 unit 用美式拼写，就同时冒出 E_ARG_RANGE 和"内部不一致"）。
+  const explainedByEmissionBlocker = (emission.blockers ?? []).length > 0
   if (!aligned) {
-    add('blocking', 'assembly', `the parameter side sees ${fromParams.length} objects but the ops carry a different count`, 'this is an internal inconsistency: report it, do NOT tune the parameters to hide it')
+    if (explainedByEmissionBlocker) {
+      add(
+        'warning',
+        'assembly',
+        `the parameter side sees ${fromParams.length} objects but the ops carry ${emission.op_count ?? 0} — this follows from the blocker(s) above, it is not a second problem`,
+        'no separate action: fixing what that blocker names makes this disappear',
+      )
+    } else {
+      add('blocking', 'assembly', `the parameter side sees ${fromParams.length} objects but the ops carry a different count`, 'this is an internal inconsistency: report it, do NOT tune the parameters to hide it')
+    }
   }
   if (Number.isFinite(checked.max) && !checked.within_tolerance) {
     for (const row of (checked.rows ?? []).filter((r) => r.delta !== 0 && r.delta !== null)) {
@@ -2876,8 +2907,13 @@ export const runtime = {
           // 但它是**必须被看见**的一件事。
           const hadReadback = existing.report.scene_readback?.available === true
           const wantsReadback = args.against_scene === true
+          const reportOk = existing.report.ok === true
           return respond({
-            ok: true,
+            // **重放的 ok 必须来自磁盘上那份报告**，不是"重放这个动作成功了"。实测抓到过：
+            // 第一次尝试因漏传 image_file 被挡（报告 ok:false + 一条 blocker），补传后走重放，
+            // 工具回报 ok:true，而磁盘仍写着 ok:false —— 调用方会以为这单通过了，而权威副本说没有。
+            ok: reportOk,
+            blockers: existing.report.blockers ?? [],
             idempotent_replay: true,
             run_id: runId,
             report_path: absolute('report.json'),
@@ -2892,7 +2928,9 @@ export const runtime = {
                   ? 'you asked for against_scene but THIS RUN was written without a readback: a replay returns the old descriptors and your readback is NOT recorded. Use a fresh run_id.'
                   : 'no readback was requested for this run, and none is recorded',
             retention: await retentionPlan(fs, runId),
-            note: 'this run already exists on disk; descriptors returned unchanged and nothing was regenerated',
+            note: reportOk
+              ? 'this run already exists on disk; descriptors returned unchanged and nothing was regenerated'
+              : 'this run already exists on disk AND its report says ok:false \u2014 a replay returns that pack unchanged, so whatever you fixed since then is NOT recorded here. Use a fresh run_id to get a pack that reflects the current round.',
           })
         }
 

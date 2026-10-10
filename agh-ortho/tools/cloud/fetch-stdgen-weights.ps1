@@ -1,8 +1,37 @@
 ﻿# fetch-stdgen-weights.ps1 —— 从镜像直抓 StdGEN 权重（绕开 huggingface_hub 的元数据校验）
+#
 # 用法： powershell -ExecutionPolicy Bypass -File D:\agnes-harness\agh-ortho\tools\cloud\fetch-stdgen-weights.ps1
+#        （要指定代理： … -File <脚本> -Proxy http://127.0.0.1:7897）
 # 可反复重跑：已完整（字节数相符）的文件会跳过，残缺的用 curl -C - 续传。
+#
+# 为什么要**先探路**：这台机器上 hf-mirror 有时只有**走代理**才通、有时直连通（实测过两种状态），
+# 而 curl 的报错是 "Failed to connect ... after 21061 ms"——不探路的话，会白等半小时才发现连不上。
+param(
+  [string]$Proxy = $env:HTTPS_PROXY,
+  [string]$Mirror = 'https://hf-mirror.com'
+)
 $dest = 'D:\cod\StdGEN\ckpt'
-$base = 'https://hf-mirror.com/hyz317/StdGEN/resolve/main/'
+$base = "$Mirror/hyz317/StdGEN/resolve/main/"
+
+function Test-Route {
+  param([string]$Via)
+  $a = @('--max-time', '20', '-s', '-o', 'NUL', '-w', '%{http_code}')
+  if ($Via) { $a += @('--proxy', $Via) }
+  $a += "$Mirror/"
+  $code = & curl.exe @a 2>$null
+  return ("$code" -eq '200')
+}
+
+$curlProxy = @()
+if ($Proxy -and (Test-Route $Proxy)) {
+  Write-Host "→ 走代理：$Proxy" -ForegroundColor Green
+  $curlProxy = @('--proxy', $Proxy)
+} elseif (Test-Route $null) {
+  if ($Proxy) { Write-Host "→ 代理不通，改直连" -ForegroundColor Yellow } else { Write-Host "→ 直连可用" -ForegroundColor Green }
+} else {
+  Write-Host "直连与代理（$Proxy）都不通。检查网络/代理是否在跑，或稍后再试 —— 本脚本可续传。" -ForegroundColor Red
+  exit 1
+}
 
 $list = @'
 1389|README.md
@@ -65,7 +94,7 @@ foreach ($line in $list) {
   if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
   if ((Test-Path $target) -and ((Get-Item $target).Length -eq $size)) { $skip++; continue }
   Write-Host ("[{0}/{1}] {2}  ({3} MB)" -f $i, $list.Count, $name, [Math]::Round($size / 1MB, 1))
-  curl.exe -L -C - --retry 5 --retry-delay 3 --retry-all-errors -o "$target" "$base$name"
+  curl.exe -L -C - --retry 5 --retry-delay 3 --retry-all-errors @curlProxy -o "$target" "$base$name"
   if ((Test-Path $target) -and ((Get-Item $target).Length -eq $size)) { $new++ } else { $bad += $name }
 }
 

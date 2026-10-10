@@ -391,6 +391,34 @@ check(
 )
 check('the model file is registered, never copied into the run directory', ![...fsSceneReg.files.keys()].some((k) => k.includes('/runs/') && k.endsWith('.blend')))
 check('report.json records which scene file this pack points at', JSON.parse(fsSceneReg.files.get('.agnes/agh-ortho/runs/scene-a/report.json')).scene_file?.path === blendPath)
+
+// 幂等重放必须回报**磁盘上那份报告**的结论，而不是"重放这个动作成功了"。
+// 实测抓到过：第一次因漏传 image_file 被挡（报告 ok:false + E_IMAGE_NOT_VERIFIED），补传后走重放，
+// 工具回报 ok:true —— 调用方会以为这单通过了，而权威副本（磁盘）说的是没通过。
+const fsReplay = memoryFs()
+const replayImg = Buffer.from('fake-png-bytes-for-the-replay-check', 'utf8')
+const replaySha = createHash('sha256').update(replayImg).digest('hex')
+fsReplay.files.set('D:/ws/photo.png', replayImg)
+const replayArgs = {
+  ...SAMPLE,
+  run_id: 'replay-a',
+  assembly: SAMPLE.assembly.map((it, i) => (i === 0 ? { ...it, source: { ...(it.source ?? {}), input_image_sha256: replaySha } } : it)),
+}
+const replayFirst = (await save.execute(replayArgs, { fs: fsReplay, session: { workspaceRoot: ws } })).structured
+check(
+  'replay: a blocked pack is written with ok:false, so the disk copy is self-sufficient',
+  replayFirst.ok === false && replayFirst.blockers.some((b) => b.code === 'E_IMAGE_NOT_VERIFIED'),
+  JSON.stringify(replayFirst.blockers?.map((b) => b.code)),
+)
+const replaySecond = (await save.execute({ ...replayArgs, image_file: 'D:/ws/photo.png' }, { fs: fsReplay, session: { workspaceRoot: ws } })).structured
+check(
+  'replay: the second call is a replay and reports the DISK verdict (ok:false + its blockers), not "the replay worked"',
+  replaySecond.idempotent_replay === true &&
+    replaySecond.ok === false &&
+    replaySecond.blockers.some((b) => b.code === 'E_IMAGE_NOT_VERIFIED') &&
+    /fresh run_id/.test(String(replaySecond.note)),
+  JSON.stringify({ ok: replaySecond.ok, note: replaySecond.note }),
+)
 const fsSceneMiss = memoryFs()
 const missing = (await save.execute({ ...SAMPLE, run_id: 'scene-b', scene_file: 'D:\\ws\\outputs\\nope.blend' }, { fs: fsSceneMiss, session: { workspaceRoot: ws } })).structured
 check('a scene_file that cannot be read is a blocker, not a silent absence', missing.blockers.some((b) => b.code === 'E_SCENE_FILE_UNREADABLE') && missing.artifacts.length === 10, JSON.stringify(missing.blockers.map((b) => b.code)))
@@ -650,9 +678,11 @@ const sceneGood = (await verifyTool.execute({ ...SAMPLE, against_scene: true }, 
 check('scene: the tier is named honestly, not against_blender', sceneGood.tier === 'scene_readback' && sceneGood.needs_blender === true, sceneGood.tier)
 check('scene: objects match by exact name with location and scale', sceneGood.ok === true && sceneGood.scene.matched === 2 && sceneGood.scene.missing.length === 0 && sceneGood.scene.mismatched.length === 0, JSON.stringify(sceneGood.scene.rows.map((r) => r.verdict)))
 check('scene: factory objects are reported as extra, not treated as failure', sceneGood.scene.extra_objects.includes('Cube'))
-check('scene: the gaps are stated, not hidden (the primitive KIND and the photo gap)', sceneGood.scene.cannot_assert.some((t) => /kind/i.test(t)) && sceneGood.scene.cannot_assert.some((t) => /NOT connected yet/.test(t)), JSON.stringify(sceneGood.scene.cannot_assert))
+check('scene: the gaps are stated, not hidden (the primitive KIND and the photo gap)', sceneGood.scene.cannot_assert.some((t) => /kind/i.test(t)) && sceneGood.scene.cannot_assert.some((t) => /silhouette/.test(t)), JSON.stringify(sceneGood.scene.cannot_assert))
 check('scene: size is NOT asserted while the downstream publishes no dimensions', sceneGood.scene.size_asserted === false && sceneGood.scene.dimensions_published === false)
-check('scene: the photo gap is stated as "not connected yet", names the camera ops that DO exist, and is never called impossible', sceneGood.scene.cannot_assert.some((t) => /NOT connected yet/.test(t)) && sceneGood.scene.cannot_assert.some((t) => /camera\.add/.test(t)) && !sceneGood.scene.cannot_assert.some((t) => /has no camera op|can never/.test(t)), JSON.stringify(sceneGood.scene.cannot_assert))
+// 这条断言的**方向**要跟事实走：下游 0.4.0 起真的能渲场景相机（camera.add ORTHO + render.still），
+// 我们也有剪影档；所以正确的说法是"能渲、能数值化比对，只有审美判定留给人"，不是"永远不可能"。
+check('scene: the photo gap is stated truthfully — the camera ops exist, the silhouette tier exists, only aesthetics stay human', sceneGood.scene.cannot_assert.some((t) => /camera\.add/.test(t)) && sceneGood.scene.cannot_assert.some((t) => /render\.still/.test(t)) && sceneGood.scene.cannot_assert.some((t) => /silhouette/.test(t)) && !sceneGood.scene.cannot_assert.some((t) => /has no camera op|can never|no orthographic option/.test(t)), JSON.stringify(sceneGood.scene.cannot_assert))
 
 // 下游一旦发布 dimensions，同一份比对必须**自动**获得尺寸断言（这正是那份请求的接收端）
 const DIM_SCENE = {
@@ -666,7 +696,7 @@ const DIM_SCENE = {
 const sceneDims = (await verifyTool.execute({ ...SAMPLE, against_scene: true }, withScene(DIM_SCENE))).structured
 check('dimensions: the size assertion turns on by itself', sceneDims.scene.size_asserted === true && sceneDims.scene.dimensions_published === true && sceneDims.ok === true, JSON.stringify(sceneDims.scene.rows.map((r) => r.dimensions_delta)))
 check('dimensions: and the size gap leaves cannot_assert', !sceneDims.scene.cannot_assert.some((t) => /publishes no dimensions/.test(t)), JSON.stringify(sceneDims.scene.cannot_assert))
-check('dimensions: the photo gap still stays stated once dimensions are published — as "not connected yet", not as impossible', sceneDims.scene.cannot_assert.some((t) => /NOT connected yet/.test(t)) && !sceneDims.scene.cannot_assert.some((t) => /has no camera op/.test(t)), JSON.stringify(sceneDims.scene.cannot_assert))
+check('dimensions: the photo gap still stays stated once dimensions are published — with the ops that exist named, never as impossible', sceneDims.scene.cannot_assert.some((t) => /camera\.add/.test(t)) && sceneDims.scene.cannot_assert.some((t) => /silhouette/.test(t)) && !sceneDims.scene.cannot_assert.some((t) => /has no camera op|no orthographic option/.test(t)), JSON.stringify(sceneDims.scene.cannot_assert))
 
 // 载荷里的断言清单**不能写死容差**：容差是每行按相对规则算出来的（实测 rows 到 9.6e-6，
 // 而清单当时写着 "within 1e-6" —— 自相矛盾）。期望值从 geometry 的常量推出来，不是抄的字面量。
@@ -679,10 +709,20 @@ check(
     sceneDims.scene.asserts.filter((t) => /equals/.test(t)).every((t) => t.includes(relText) && t.includes(floorText)),
   JSON.stringify(sceneDims.scene.asserts),
 )
-// 尺寸不符必须被抓到 —— 这正是 size=1 语义错误的现场
-const BAD_DIM_SCENE = { ...DIM_SCENE, objects: DIM_SCENE.objects.map((o) => (o.name === 'body' ? { ...o, dimensions: [12.4, 8.6, 9.299] } : o)) }
+// 尺寸不符必须被抓到 —— 这正是 size=1 语义错误的现场。
+// 注意错误量要**超过声明的精度**：9.3 只写了一位小数 ⇒ 它自己只准到 ±0.05，拿 0.001 去判它不符
+// 是判据的错（第 8 次撞"判据精度不能超过输入精度"）。所以这里用 9.5（差 0.2）。
+const BAD_DIM_SCENE = { ...DIM_SCENE, objects: DIM_SCENE.objects.map((o) => (o.name === 'body' ? { ...o, dimensions: [12.4, 8.6, 9.5] } : o)) }
 const sceneBadDim = (await verifyTool.execute({ ...SAMPLE, against_scene: true }, withScene(BAD_DIM_SCENE))).structured
 check('dimensions: a size that disagrees with scale x size is a mismatch', sceneBadDim.ok === false && sceneBadDim.scene.mismatched.includes('body'), JSON.stringify(sceneBadDim.scene.rows.find((r) => r.object === 'body').dimensions_delta))
+// 反方向：**不超过声明精度**的差异不能被判不符 —— 否则等于要求输入比它写下的更准。
+const NEAR_DIM_SCENE = { ...DIM_SCENE, objects: DIM_SCENE.objects.map((o) => (o.name === 'body' ? { ...o, dimensions: [12.4, 8.6, 9.299] } : o)) }
+const sceneNearDim = (await verifyTool.execute({ ...SAMPLE, against_scene: true }, withScene(NEAR_DIM_SCENE))).structured
+check(
+  'dimensions: a difference within the declaration\u2019s own precision is NOT a mismatch (judging finer than the input is the criterion\u2019s fault)',
+  sceneNearDim.scene.mismatched.length === 0 && sceneNearDim.ok === true,
+  JSON.stringify(sceneNearDim.scene.rows.find((r) => r.object === 'body')),
+)
 
 // 单位尺寸必须**按种查表**：torus 在 size=8 时是 10 x 10 x 2，不是 8 x 8 x 8。
 // 这条分支走不到工具里（M1 不 lower `ring`），所以直接测纯函数 —— 但 M2 一上就会走工具。
