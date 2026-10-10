@@ -2178,7 +2178,80 @@ async function meshRunFinding(tctx, args, spawnImpl) {
     return { finding: null, blockers }
   }
   const outDir = `${ARTIFACT_ROOT_SEGMENTS[0]}/agh-ortho/mesh-run/${name}` // 工作区内的临时输出目录
-  const argv = argvTemplate.map((a) => a.split('{image}').join(imageFile).split('{out}').join(outDir))
+  // **先把主体抠出来**（可选的一步，声明在配置里）：`preprocessCommand` 拿到 `{image}`（原图）与 `{out}`，
+  // 必须往 `{out}/prep/` 里写出**恰好一张**图；生成器命令里可用 `{prep}` 指它（没有这一步时 `{prep}` 就是原图）。
+  // 为什么不内置：类别无关的分割模型属于**机器本地**的东西，而本插件不内置任何机器路径、也不替谁下权重
+  // （`rembg` 正是在"运行时去 GitHub 拿权重"上**静默挂死**过）。
+  let prepImage = imageFile
+  const preTemplate = config?.preprocessCommand
+  if (preTemplate !== undefined) {
+    if (!Array.isArray(preTemplate) || preTemplate.length === 0 || preTemplate.some((a) => typeof a !== 'string')) {
+      blockers.push({
+        code: 'E_MESH_RUN_CONFIG_INVALID',
+        message: 'preprocessCommand must be a non-empty array of strings (argv[0] is the executable)',
+        template: meshRunTemplate(),
+      })
+      return { finding: null, blockers }
+    }
+    const preArgv = preTemplate.map((a) => a.split('{image}').join(imageFile).split('{out}').join(outDir))
+    let preConfined = preArgv
+    if (typeof tctx?.sandbox?.confine === 'function') {
+      try {
+        preConfined = await tctx.sandbox.confine(preArgv)
+      } catch (error) {
+        blockers.push({
+          code: 'E_SANDBOX_REFUSED',
+          message: `sandbox.confine refused the preprocess command (${error?.message ?? error})`,
+          argv: preArgv,
+        })
+        return { finding: null, blockers }
+      }
+    } else {
+      blockers.push({
+        code: 'E_NO_SANDBOX_SEAM',
+        message: 'no tctx.sandbox.confine: the preprocess step would run unconfined, which is a silent bypass',
+      })
+      return { finding: null, blockers }
+    }
+    const preRun = await spawnConfined(preConfined, timeoutMs)
+    if (preRun.code !== 0) {
+      blockers.push({
+        code: 'E_MESH_PREPROCESS_FAILED',
+        message: `the preprocess step exited ${preRun.code}${preRun.timedOut ? ' (timed out)' : ''}. Without it the generator reconstructs whatever the photograph contained — background included — so this refuses rather than quietly skipping the step.`,
+        log: preRun.log,
+      })
+      return { finding: null, blockers }
+    }
+    // "能列出就是目录"，与 findMeshes 同一种判据。
+    const listImages = async (dir, depth) => {
+      if (depth > 3) return []
+      let entries
+      try {
+        entries = await fs.list(dir)
+      } catch {
+        return []
+      }
+      const found = []
+      for (const e of entries ?? []) {
+        const p = `${dir}/${e.name}`
+        if (e?.kind === 'dir') found.push(...(await listImages(p, depth + 1)))
+        else if (/\.(png|jpg|jpeg|webp)$/i.test(e.name)) found.push(p)
+      }
+      return found
+    }
+    const prepFound = (await listImages(`${outDir}/prep`, 0)).sort()
+    if (prepFound.length !== 1) {
+      blockers.push({
+        code: 'E_MESH_PREPROCESS_OUTPUT',
+        message: `the preprocess step must leave exactly ONE image under ${outDir}/prep (found ${prepFound.length}: ${prepFound.join(', ') || 'none'}). Falling back to the raw photograph would hand the generator a background to reconstruct, silently, so this refuses instead.`,
+        found: prepFound,
+        log: preRun.log,
+      })
+      return { finding: null, blockers }
+    }
+    prepImage = prepFound[0]
+  }
+  const argv = argvTemplate.map((a) => a.split('{image}').join(imageFile).split('{out}').join(outDir).split('{prep}').join(prepImage))
   // ② argv 先过沙箱：不 confine 就是静默绕过沙箱。
   let confined = argv
   if (typeof tctx?.sandbox?.confine === 'function') {
