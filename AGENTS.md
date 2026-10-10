@@ -56,3 +56,8 @@ Keep the suite growing only where behavior grows.
 - Keep credentials, customer data, private traces, machine-specific configuration and internal project records out of the repository. Use isolated homes and synthetic accounts for tests.
 
 Release requirements are in [release checks](docs/maintainers/release.md); document maintenance is described in [the maintenance guide](docs/maintainers/maintenance.md).
+
+## Building a model from an image (agh-ortho + agh-blender)
+
+When the user hands you an image and says 'build a model' (建模 / 生成模型), do NOT re-derive the procedure or write a long plan. Load the **build-model** skill, or read agh-ortho/notes/LOOP-PROCEDURE.md section 3, and run it. Keep messages short. Leave the Blender instance running when the round ends; stop it only when the user asks.
+
