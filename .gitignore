@@ -45,3 +45,17 @@ __pycache__/
 
 # Deliverables: the packs' scene_file points at these root-level .blend files (do not delete or move them - the pointer would dangle), but 10 MB binaries do not belong in the repo.
 /*.blend
+
+# Delivery artifacts for the 2026-10-13 modeling hand-off (independent-completion declaration, project note, runnable page, evidence docx, model renders, packaged folder and zip). They stay on disk next to the checkout but are not source, and the two local helper scripts below generate them.
+/build-docx.ps1
+/export-pdf.cmd
+/independent-completion-declaration.pdf
+/model-front.png
+/model-preview.png
+/独立完成声明.html
+/项目说明.html
+/可运行作品.html
+/运行与验证证据.docx
+/运行与验证证据-含实跑记录.docx
+/交付-观物取像/
+/交付-观物取像.zip
