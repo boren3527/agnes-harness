@@ -146,7 +146,7 @@ export class DemoWorkflows {
     this.scenarios.set(ctx.session.key, { turn: turn as number, goal })
     return turn as number
   }
-  async surround(ctx: ToolContext, scans: ScanTasks) {
+  async surround(ctx: ToolContext, scans: ScanTasks): Promise<ToolResult> {
     let selected = false
     try {
       const scope = await this.scope(ctx)
