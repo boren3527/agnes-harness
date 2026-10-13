@@ -59,5 +59,27 @@ Release requirements are in [release checks](docs/maintainers/release.md); docum
 
 ## Building a model from an image (agh-ortho + agh-blender)
 
-When the user hands you an image and says 'build a model' (建模 / 生成模型), do NOT re-derive the procedure or write a long plan. Load the **build-model** skill, or read agh-ortho/notes/LOOP-PROCEDURE.md section 3, and run it. Keep messages short. Leave the Blender instance running when the round ends; stop it only when the user asks.
+When the user hands you an image and says "build a model", do NOT spend turns hunting for a
+procedure and do NOT write a plan. The `build-model` skill may not be in your tool set - the six
+steps below are enough. Keep messages short.
 
+1. `agh_ortho_mesh_run { "name": "<new>", "image_file": "<path>" }` and approve it. Prefer a PATH:
+   a pasted image costs minutes while its bytes are copied out of the session ledger. The name must
+   be unused under `.agnes/agh-ortho/meshes/` (an existing one is refused, by design).
+2. Get the photo reading from the CUT that step 1 produced - measure it, do not eyeball it:
+   `node .agnes/work/alpha-bbox.mjs .agnes/agh-ortho/mesh-run/<name>/prep/<stem>_cut.png`
+   take `aspect_px`, and make the interval that plus/minus 10%. It is a criterion: never adjust it
+   after seeing a result.
+3. `agh_ortho_fit` with the measured sizes (for `up_axis: "X"`: w = file Y, d = file Z, h = file X),
+   `source.subject: "cutout"`, that interval in `photo_check.front`, and `image_file`.
+4. `agh_ortho_save` with `run_id: "<name>-candidate"`; then the human looks at `sheet.svg`.
+5. `agh_blender_start { "empty": true }` then `agh_blender_apply_ops` (the 2 ops) then, in ONE batch:
+   `camera.add` (ORTHO, ortho_scale 1.2, location [0, -8, h/2]) + `object.look_at` (target [0,0,h/2])
+   + `render.still` (transparent, path `outputs/<name>-front.png`); then `agh_ortho_fit` with
+   `silhouette` (sha256 + bytes + camera, taken from the render's own reply) and `against_scene: true`.
+6. `agh_blender_export`, then `agh_ortho_save` with a NEW run id (plus `human_review`). LEAVE BLENDER
+   RUNNING afterwards; stop it only when the user asks.
+
+Never cancel a step to hurry it - a cancel kills the step in flight and leaves nothing on disk.
+Never tune a size or a tolerance to make a check pass: attribute the failure instead. No tier proves
+shape - say so, and hand the sheet and the render to the user's eye.
