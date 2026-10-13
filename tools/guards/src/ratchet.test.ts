@@ -1,5 +1,5 @@
 // Reviewed image preview projection, configuration identity, and scoped image-generation ports.
-// Exact measured caps: web-ui 6816, core 26610, host/assemble 4242, extension-api 1122, web 17843, host 40903.
+// Exact measured caps: web-ui 6816, core 26611, host/assemble 4242, extension-api 1122, web 17881, host 40903.
 // No extra headroom or new exclusions. Behavioral regressions are covered by their package tests.
 // Reviewed fixed recognition-only Host network policy, separate from OS sandbox enforcement.
 // Reviewed age-anchor placement after original persistence (+2 Host lines), cached inventory
@@ -1138,7 +1138,9 @@ const INITIAL_CEILING: Record<string, number> = {
   // with countLines() after the merge: 26102, exact, no spare.
   // 2026-10-06: reject oversized inbox records before durable append; 26424, exact.
   // Reviewed: bound multi-view selection by existing image/block caps; originals remain in the ledger.
-  'packages/core/src': 26610,
+  // 2026-10-13 snapshot import: image-generation ports, device media surface, tool images.
+  // Re-measured with countLines(): 26611, exact.
+  'packages/core/src': 26611,
   // 2026-09-15: DeepSeek V4 Pro/Flash ship a known-thinking-corrections table (new file) so the
   // product corrects pi-ai's verified-wrong reasoning_effort data out of the box, instead of
   // requiring every deployment to hand-edit thinkingEfforts once they notice. Measured 3347.
@@ -2258,7 +2260,9 @@ const INITIAL_CEILING: Record<string, number> = {
   // Re-measured with countLines() after the review fixes on that work: 16947, exact, no spare.
   // 2026-10-09 merge with main: main's own increments in this scope land on top of that 16947, so
   // neither side's number holds. Re-measured with countLines() on the merged tree: 16967, exact.
-  'packages/web/src': 17843, // Reviewed old-session rebind with readback/epoch guards and parallel JS/CSS preparation; exact +94.
+  // 2026-10-13 snapshot import: device workbench, artifact image preview, image-model settings,
+  // device locale and command-policy modules. Re-measured with countLines(): 17881, exact.
+  'packages/web/src': 17881, // Reviewed old-session rebind with readback/epoch guards and parallel JS/CSS preparation; exact +94.
   // 2026-09-17 web-client-modules frontend track (rebased onto L0/permission-picker main): re-measured exact value below.
   // 2026-09-14: Task 7 orphaned-pin-cleanup adds the orphan-pins section to PluginAdminPage — the
   // #orphanPins/#orphanPinsList/#orphanPinsStatus/#orphanPinsReleaseAll element bindings, the
