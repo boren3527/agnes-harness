@@ -1,0 +1,137 @@
+{
+  "agh": {
+    "version": "0.0.0"
+  },
+  "runtime": {
+    "platform": "win32",
+    "arch": "x64",
+    "osRelease": "10.0.26200",
+    "node": "24.14.0",
+    "pid": 20720,
+    "uptimeMs": 505109
+  },
+  "profile": {
+    "name": "local-dev",
+    "resolvedProfileHash": "sha256-cbecfd0da96531758ee4ccf353a1532590e8a0d0a39c7be8ddd93bcd3c9d1432",
+    "presets": {
+      "default": "standard-windows",
+      "allowed": [
+        "standard-windows"
+      ]
+    },
+    "models": [
+      {
+        "route": "account-acct-ebaa42a7-4d5e-43ec-b773-d66d2e1f4c4d",
+        "id": "deepseek-flash",
+        "input": [
+          "text",
+          "image"
+        ],
+        "inputLimits": {
+          "images": {
+            "resize": {
+              "maxWidth": 2000,
+              "maxHeight": 2000,
+              "maxBytes": 4718592,
+              "jpegQuality": 80
+            }
+          }
+        },
+        "reasoning": true,
+        "thinkingLevelMap": {
+          "off": "off",
+          "low": "low",
+          "high": "high",
+          "max": "max"
+        },
+        "contextWindow": 1000000,
+        "defaultSettings": {
+          "thinking": "low",
+          "contextWindow": 1000000
+        }
+      },
+      {
+        "route": "account-acct-ebaa42a7-4d5e-43ec-b773-d66d2e1f4c4d",
+        "id": "deepseek-v4-pro",
+        "input": [
+          "text"
+        ],
+        "reasoning": true,
+        "thinkingLevelMap": {
+          "low": "low",
+          "high": "high",
+          "max": "max"
+        },
+        "contextWindow": 1000000
+      }
+    ]
+  },
+  "config": {
+    "profile": "local-dev",
+    "revision": 7,
+    "configured": true,
+    "accounts": [
+      {
+        "accountId": "acct-ebaa42a7-4d5e-43ec-b773-d66d2e1f4c4d",
+        "label": "迪普",
+        "providerId": "deepseek",
+        "route": "account-acct-ebaa42a7-4d5e-43ec-b773-d66d2e1f4c4d",
+        "baseUrl": "https://api.deepseek.com/",
+        "model": "deepseek-flash",
+        "models": [
+          {
+            "id": "deepseek-flash",
+            "name": "DeepSeek V4.1 Flash",
+            "reasoning": true,
+            "thinkingLevelMap": {
+              "off": "off",
+              "low": "low",
+              "high": "high",
+              "max": "max"
+            },
+            "contextWindow": 1000000,
+            "defaultSettings": {
+              "thinking": "low",
+              "contextWindow": 1000000
+            }
+          },
+          {
+            "id": "deepseek-v4-pro",
+            "name": "DeepSeek V4 Pro",
+            "reasoning": true,
+            "thinkingLevelMap": {
+              "low": "low",
+              "high": "high",
+              "max": "max"
+            },
+            "contextWindow": 1000000
+          }
+        ],
+        "enabled": true,
+        "authType": "api-key",
+        "credentialConfigured": true
+      }
+    ],
+    "defaultAccountId": "acct-ebaa42a7-4d5e-43ec-b773-d66d2e1f4c4d",
+    "effect": "new-sessions",
+    "provider": {
+      "id": "deepseek",
+      "route": "account-acct-ebaa42a7-4d5e-43ec-b773-d66d2e1f4c4d",
+      "baseUrl": "https://api.deepseek.com/",
+      "model": "deepseek-flash",
+      "credentialConfigured": true
+    }
+  },
+  "browser": {
+    "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+    "language": "zh-CN",
+    "platform": "Win32",
+    "timeZone": "Asia/Shanghai",
+    "screen": {
+      "width": 2048,
+      "height": 1280,
+      "dpr": 1.25
+    },
+    "origin": "http://127.0.0.1:4180"
+  }
+}
