@@ -221,6 +221,8 @@ const MASK_PROPERTIES = new Set(['mask', '-webkit-mask'])
  */
 const DYNAMIC_CUSTOM_PROPERTIES = new Set([
   '--usage-pct', // packages/web/src/usage.ts 的用量环，var() 自带 0% 回退
+  '--device-chat-share', // device-workbench.ts writes the bounded conversation width.
+  '--device-panel-share', // device-workbench.ts writes the complementary device width.
 ])
 
 beforeAll(async () => {

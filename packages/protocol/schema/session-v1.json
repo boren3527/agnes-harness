@@ -95,6 +95,7 @@
           "properties": {
             "type": { "const": "resource_link" },
             "uri": { "type": "string", "maxLength": 4096 },
+            "size": { "type": "integer", "minimum": 0 },
             "name": { "type": "string", "maxLength": 256 },
             "mimeType": { "type": "string", "maxLength": 128 }
           }
@@ -378,6 +379,7 @@
         "isDestructive": { "type": "boolean" },
         "isConcurrencySafe": { "type": "boolean" },
         "isOpenWorld": { "type": "boolean" },
+        "returnsImages": { "const": true },
         "replay": { "enum": ["safe", "never", "idempotent"] },
         "requiresApproval": { "enum": ["never", "destructive", "always"] },
         "approvalScopes": {

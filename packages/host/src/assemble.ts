@@ -121,6 +121,7 @@ import {
 import { HostError, type HostErrorCode } from './errors.js'
 import { createExtensionActivationBarrier } from './ext-host/activation-barrier.js'
 import { type BuiltinRowHandle, createBuiltinRowHost } from './ext-host/builtin-row-host.js'
+import { createDeviceCapturePublisher } from './ext-host/device-capture-publisher.js'
 import {
   createExtensionFactorySelector,
   validateExtensionIsolation,
@@ -136,6 +137,7 @@ import { serviceContext } from './ext-host/service-context.js'
 import { serviceInvoker } from './ext-host/service-invocation.js'
 import { ServiceRegistry } from './ext-host/services.js'
 import { ExtensionSessions } from './ext-host/session-bindings.js'
+import { createImageGenerationService } from './image-generation.js'
 import { Rollback } from './lifecycle.js'
 import { ownStateRoots } from './paths.js'
 import { resolvePreset } from './presets/resolve.js'
@@ -253,6 +255,7 @@ export type OrdinaryReconciliationLifecycle = Readonly<{
 /** Where this host lives on disk. Every one is required: none of them has a safe default. */
 export type { AssembleDeps, HostPaths } from './assembly-deps.js'
 export type Assembled = {
+  deviceMediaEndpoint: ReturnType<typeof createRowExtensionHost>['deviceMediaEndpoint']
   activationBarrier: ReturnType<typeof createExtensionActivationBarrier>
   approvalGrants: ApprovalGrantManagement
   callService: ReturnType<typeof serviceInvoker>['call']
@@ -433,8 +436,16 @@ export async function assemble(profile: ResolvedProfile, deps: AssembleDeps): Pr
           })
         }
         packageIds.add(source.snapshot.packageId)
-        const loaded = await loadRuntimeModule(source)
-        if (loaded) selected.set(source.snapshot.packageId, loaded)
+      }
+      // Validate the selection first; importing independent immutable packages does not activate
+      // their rows. Bound parallel imports and preserve source order for the later dependency graph.
+      for (let offset = 0; offset < sources.length; offset += 4) {
+        const batch = sources.slice(offset, offset + 4)
+        const loaded = await Promise.allSettled(batch.map((source) => loadRuntimeModule(source)))
+        for (const [index, result] of loaded.entries()) {
+          if (result.status === 'rejected') throw result.reason
+          if (result.value) selected.set(batch[index]!.snapshot.packageId, result.value)
+        }
       }
       return selected
     }
@@ -810,7 +821,22 @@ export async function assemble(profile: ResolvedProfile, deps: AssembleDeps): Pr
     // Registrations made by third-party plugin rows through ctx.extension(). It exists before the
     // first tree so that tree can hand rows the service; it stays dormant until the kernel is up.
     const requestSkillInstall = deps.skillInstall
+    const imageGeneration = createImageGenerationService({
+      home: dirname(dirname(deps.profileDir)),
+      profile: profile.name,
+    })
     const rowExtensions = createRowExtensionHost({
+      imageGeneration: imageGeneration.subject,
+      imageGenerationConfiguration: async () => {
+        const settings = await imageGeneration.get()
+        return {
+          revision: settings.revision,
+          model: settings.model,
+          size: settings.size,
+          enabled: settings.enabled,
+        }
+      },
+      ...(deps.deviceSession ? { deviceSession: deps.deviceSession } : {}),
       ...(deps.mcpManage ? { mcpManage: deps.mcpManage } : {}),
       ...(deps.pluginManage ? { pluginManage: deps.pluginManage } : {}),
       ...(requestSkillInstall
@@ -2334,7 +2360,18 @@ export async function assemble(profile: ResolvedProfile, deps: AssembleDeps): Pr
       signal: ac.signal,
       context: serviceContext({
         seams,
-        networkAllow: Object.freeze([...adapters.fs.fence().networkAllow]),
+        ...(deps.deviceRecognitionBudget ? { deviceRecognitionBudget: deps.deviceRecognitionBudget } : {}),
+        ...(deps.deviceRecognitionExecute ? { deviceRecognitionExecute: deps.deviceRecognitionExecute } : {}),
+        ...(deps.deviceRecognitionAuthorization
+          ? { deviceRecognitionAuthorization: deps.deviceRecognitionAuthorization }
+          : {}),
+        ...(deps.deviceCaptureSelection ? { deviceCaptureSelection: deps.deviceCaptureSelection } : {}),
+        capturePublisher: createDeviceCapturePublisher((key) => kernel.get(key)),
+        ...(deps.deviceSession ? { deviceSession: deps.deviceSession } : {}),
+        ...(deps.deviceSessionRetain ? { deviceSessionRetain: deps.deviceSessionRetain } : {}),
+        // The bootstrap file fence is closed; service networking uses the resolved Host policy.
+        networkAllow: Object.freeze([...normalizeSandboxStaticConfig(defaultPreset.doc).networkAllow]),
+        recognitionNetworkAllow: Object.freeze([...(profile.policy.recognitionNetworkAllow ?? [])]),
         log: deps.log,
       }),
     })
@@ -2372,6 +2409,7 @@ export async function assemble(profile: ResolvedProfile, deps: AssembleDeps): Pr
       pluginTree,
       extHost: managed,
       extensionStatus,
+      deviceMediaEndpoint: rowExtensions.deviceMediaEndpoint,
       rollback,
       defaultPreset: { view, hash: defaultPreset.hash },
       openWorkspaceRuntime,

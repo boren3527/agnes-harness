@@ -1,0 +1,8 @@
+AKA-00 Agnes Harness integration
+Copyright 2026 Agnes Harness contributors
+
+runtime.cjs includes ws 8.21.3, distributed under the MIT license.
+Copyright (c) 2011 Einar Otto Stangvik
+Copyright (c) 2013 Arnout Kazemier and contributors
+Copyright (c) 2016 Luigi Pinca and contributors
+See LICENSE-ws for the complete license and copyright notices.

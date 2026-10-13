@@ -73,6 +73,8 @@ export type CredentialKind = 'local' | 'jwt' | 'portal-identity' | 'sso' | 'chan
 
 export type AgnesContext = LocalContext & {
   configuration?: boolean
+  /** True only when persistent workspace/device association storage is fitted. */
+  deviceBindings?: boolean
   profileHashForSession?: (key: string) => Promise<string | null>
   limits: Limits
   journal: CommandJournal
@@ -382,6 +384,19 @@ async function serializeSessionMutation<T>(session: object, key: string, work: (
 
 const FAMILIES: Array<Family & { when?: (cx: AgnesContext) => boolean }> = [
   {
+    name: 'device',
+    methods: [
+      '_agnes/v1/device.bindings.list',
+      '_agnes/v1/device.connection.get',
+      '_agnes/v1/device.connection.save',
+      '_agnes/v1/device.session.get',
+      '_agnes/v1/device.session.bind',
+      '_agnes/v1/device.session.detach',
+    ],
+    guidance: 'local owner associations and endpoint metadata only; these methods never command a device',
+    when: (cx) => cx.deviceBindings === true && cx.authKind === 'local' && cx.credentialKind === 'local',
+  },
+  {
     name: 'computer-use',
     methods: ['_agnes/v1/computerUse.status'],
     guidance: 'read-only admission status; blocked reports never start or repair a driver',
@@ -408,7 +423,15 @@ const FAMILIES: Array<Family & { when?: (cx: AgnesContext) => boolean }> = [
   },
   {
     name: 'config',
-    methods: ['config.get', 'config.providers', 'config.test', 'config.save', 'config.oauth'],
+    methods: [
+      'config.get',
+      'config.providers',
+      'config.test',
+      'config.save',
+      'config.oauth',
+      'config.imageGeneration.get',
+      'config.imageGeneration.save',
+    ],
     guidance:
       'Local profile configuration; credentials are never returned. Check save effect before opening a session.',
     when: (cx) => cx.configuration === true && cx.authKind === 'local' && cx.credentialKind === 'local',

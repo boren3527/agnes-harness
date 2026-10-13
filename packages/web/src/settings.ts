@@ -19,6 +19,7 @@ import {
   unmountRegion,
 } from '@agnes/web-ui'
 import { createElement } from 'react'
+import { imageModelSettings } from './image-model-settings.js'
 import { tr } from './locale-bridge.js'
 import { oauthControls } from './oauth-controls.js'
 import { createAccountPickers } from './provider-picker.js'
@@ -46,6 +47,10 @@ const CONFIGURATION_REASON_KEYS: Readonly<Record<string, string>> = {
   CONFIG_UNKNOWN_PROVIDER: 'settings.config.unknownProvider',
   CONFIG_ENDPOINT_OVERRIDE_UNSUPPORTED: 'settings.config.endpointUnsupported',
   CONFIG_CREDENTIAL_REQUIRED: 'settings.config.credentialRequired',
+  CONFIG_CREDENTIAL_PERMISSIONS: 'settings.config.credentialPermissions',
+  CONFIG_CREDENTIAL_NO_SPACE: 'settings.config.credentialNoSpace',
+  CONFIG_CREDENTIAL_READ_ONLY: 'settings.config.credentialReadOnly',
+  CONFIG_CREDENTIAL_INVALID: 'settings.config.credentialInvalid',
   CONFIG_CREDENTIAL_STORE: 'settings.config.credentialStore',
   CONFIG_PROVIDER_UNAVAILABLE: 'settings.config.providerUnavailable',
   CONFIG_TEST_FAILED: 'settings.config.testFailed',
@@ -150,6 +155,7 @@ function focusable(value: Element | null): value is HTMLElement {
  */
 export function createSettingsController(options: SettingsControllerOptions): SettingsController {
   const ui = readElements()
+  const imageSettings = imageModelSettings(options.client, ui.dialog)
   const providerPicker = createAccountPickers(ui)
   let connected = true
   let configuration: ConfigSnapshot | undefined
@@ -496,6 +502,7 @@ export function createSettingsController(options: SettingsControllerOptions): Se
   }
 
   const close = (): void => {
+    imageSettings.close()
     oauth.clear()
     testPending = false
     closeAccountDialog()
@@ -919,6 +926,7 @@ export function createSettingsController(options: SettingsControllerOptions): Se
     tested = undefined
     renderModels()
     show()
+    void imageSettings.refresh()
     setLoadPhase('loading')
     const work = connected
       ? load(token)
@@ -936,6 +944,7 @@ export function createSettingsController(options: SettingsControllerOptions): Se
   }
 
   const setConnected = (value: boolean): void => {
+    imageSettings.setConnected(value)
     if (connected === value) {
       updateButtons()
       return
@@ -959,5 +968,13 @@ export function createSettingsController(options: SettingsControllerOptions): Se
     if (connected && ui.dialog.open && !opening) void open()
   }
 
-  return { open, close, refreshLocale: renderAccounts, setConnected }
+  return {
+    open,
+    close,
+    refreshLocale: () => {
+      renderAccounts()
+      imageSettings.render()
+    },
+    setConnected,
+  }
 }

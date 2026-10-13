@@ -103,6 +103,7 @@ describe('Web command launch contract', () => {
       expect(options.skinAsset).toBeTypeOf('function')
       // Same for the `/plugins/*` client module asset route (design WC3).
       expect(options.clientModuleAsset).toBeTypeOf('function')
+      expect(options.deviceMedia).toBeTypeOf('function')
       // Cross-process Surface reachability (task-15): the launcher must hand createWebServer a real
       // mount proxy built from the daemon's own `_agnes/v1/surfaces.mounts` answer, not omit the
       // option and silently fall back to "no Surface is ever reachable".

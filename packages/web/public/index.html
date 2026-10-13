@@ -41,6 +41,8 @@
       <header class="topbar" data-agnes-region="topbar">
       </header>
 
+      <div id="session-workbench" class="session-workbench">
+      <div class="session-workbench-chat">
       <p id="notice" role="alert"></p>
       <div class="workbench-split">
       <div class="session-tabs-bar">
@@ -58,6 +60,9 @@
 
       <section id="approval" data-agnes-region="approval" hidden aria-live="polite"></section>
       <div id="composer-mount"></div>
+      </div>
+      <aside id="device-workbench" class="device-workbench" hidden aria-label="Device" data-i18n-aria="index-shell.devicePanel"></aside>
+      </div>
     </main>
 
     <dialog data-agnes-region="dialog" id="new-session" aria-labelledby="new-session-title">
@@ -69,6 +74,8 @@
           </div>
         </div>
         <p class="dialog-intro" data-i18n="index-shell.pickWorkspaceIntro">Pick the directory Agnes works in. Existing files are never moved or copied.</p>
+        <label class="form-field" for="new-session-mode"><span data-i18n="index-shell.sessionMode">Session mode</span><select id="new-session-mode" aria-describedby="new-session-mode-hint"><option value="auto" data-i18n="index-shell.sessionModeAuto">Follow workspace</option><option value="chat" data-i18n="index-shell.sessionModeChat">Ordinary conversation</option><option value="device" data-i18n="index-shell.sessionModeDevice">Device conversation</option></select></label>
+        <p id="new-session-mode-hint" class="field-hint" data-i18n="index-shell.sessionModeHint">Follow workspace creates a device conversation in a device workspace. Ordinary conversations do not control its device.</p>
         <fieldset id="workspace-options" class="workspace-options">
           <legend class="visually-hidden" data-i18n="index-shell.recentLegend">Recent workspaces</legend>
           <div id="workspace-option-items" class="workspace-option-items"></div>

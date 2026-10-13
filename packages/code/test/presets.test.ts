@@ -308,7 +308,18 @@ describe('standard.yaml', () => {
   })
 
   it('is reachable through the named export the host reads', () => {
-    expect(PRESET_NAMES).toEqual(['standard', 'claw', 'channel', 'minimal-rl', 'standard-windows'])
+    expect(PRESET_NAMES).toEqual([
+      'standard',
+      'claw',
+      'channel',
+      'minimal-rl',
+      'standard-windows',
+      'aka-standard-windows',
+    ])
+    expect(loadPreset('aka-standard-windows')).toEqual({
+      name: 'aka-standard-windows',
+      extends: 'standard-windows',
+    })
     expect(presets.standard).toEqual(doc)
     expect(Object.keys(presets)).toEqual([...PRESET_NAMES])
   })

@@ -1,0 +1,541 @@
+/* Equipment console: existing AGH theme, opaque dialogs, compact controls. */
+.aka-device-panel {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  color: var(--agnes-text-primary);
+  font-size: var(--font-size-sm, 14px);
+  line-height: 1.5;
+}
+.aka-device-panel h3,
+.aka-device-panel p {
+  margin: 0;
+}
+.aka-device-panel h3 {
+  font-size: 16px;
+  font-weight: 650;
+}
+.aka-device-panel p {
+  color: var(--agnes-text-secondary);
+}
+.aka-device-panel .aka-notice,
+.aka-recognition-dialog [role="alert"] {
+  color: var(--agnes-status-danger-text);
+}
+.aka-device-panel [role="alert"] {
+  font-weight: 600;
+}
+.aka-device-panel form,
+.aka-device-panel label,
+.aka-pairing-confirmation {
+  display: grid;
+  gap: 8px;
+}
+.aka-device-panel input,
+.aka-recognition-dialog input,
+.aka-recognition-dialog textarea,
+.aka-recognition-dialog select {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid var(--agnes-line-primary);
+  border-radius: 8px;
+  font: inherit;
+  color: var(--agnes-text-primary);
+  background: var(--agnes-bg-surface);
+}
+.aka-device-panel button,
+.aka-recognition-dialog button {
+  width: auto;
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid var(--agnes-line-primary);
+  border-radius: 8px;
+  font: inherit;
+  font-weight: 500;
+  color: var(--agnes-text-primary);
+  background: var(--agnes-bg-popover);
+  cursor: pointer;
+}
+.aka-device-panel button:hover:not(:disabled),
+.aka-recognition-dialog button:hover:not(:disabled) {
+  border-color: var(--agnes-brand-primary);
+  background: var(--agnes-bg-hover);
+}
+.aka-device-panel button:disabled,
+.aka-recognition-dialog button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.aka-device-panel :focus-visible,
+.aka-recognition-dialog :focus-visible {
+  outline: 2px solid var(--agnes-brand-primary);
+  outline-offset: 3px;
+}
+.aka-device-panel button.aka-primary,
+.aka-recognition-dialog button.aka-primary {
+  color: white;
+  background: var(--agnes-brand-primary);
+  border-color: var(--agnes-brand-primary);
+}
+.aka-device-panel button.aka-primary:hover:not(:disabled),
+.aka-recognition-dialog button.aka-primary:hover:not(:disabled) {
+  filter: brightness(0.95);
+}
+.aka-onboarding {
+  min-height: 60dvh;
+  align-content: center;
+}
+.aka-connection-card {
+  display: grid;
+  gap: 18px;
+  max-width: 380px;
+  width: 100%;
+  box-sizing: border-box;
+  margin-inline: auto;
+  padding: 28px;
+  border: 1px solid var(--agnes-line-primary);
+  border-radius: 16px;
+  background: var(--agnes-bg-popover);
+}
+.aka-connection-card h3 {
+  font-size: 22px;
+  letter-spacing: -0.03em;
+}
+.aka-connection-card form {
+  gap: 16px;
+}
+.aka-eyebrow {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  color: var(--agnes-text-secondary);
+}
+.aka-console-body {
+  display: grid;
+  gap: 12px;
+}
+.aka-console-header,
+.aka-console-header-actions,
+.aka-control-tools {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.aka-console-header h3 {
+  font-variant-numeric: tabular-nums;
+}
+.aka-console-header-actions {
+  gap: 8px;
+}
+.aka-connection-status {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--agnes-text-secondary);
+}
+.aka-connection-status::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--agnes-text-secondary);
+}
+.aka-connection-status.is-connected {
+  color: var(--agnes-status-success-text);
+}
+.aka-connection-status.is-connected::before {
+  background: currentColor;
+}
+.aka-live-video {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--agnes-line-primary);
+  border-radius: 12px;
+  background: #151b24;
+  color: #f0f4fa;
+}
+.aka-live-video canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.aka-live-video canvas[hidden] {
+  display: none;
+}
+.aka-video-placeholder {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  text-align: center;
+  padding: 24px;
+  box-sizing: border-box;
+}
+.aka-video-placeholder span:not(.aka-video-mark) {
+  font-size: 12px;
+  color: #b9c4d3;
+}
+.aka-video-mark {
+  padding: 8px 12px;
+  border: 1px solid #4b596c;
+  border-radius: 6px;
+  color: #b9c4d3;
+  font-size: 12px;
+  letter-spacing: 0.16em;
+}
+.aka-video-caption {
+  position: absolute;
+  inset: auto 0 0;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  background: #151b24;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+}
+.aka-live-video > button {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+}
+.aka-camera-toolbar,
+.aka-recognition-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.aka-device-panel label.aka-switch-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+.aka-device-panel button.aka-toggle {
+  flex: 0 0 auto;
+  position: relative;
+  width: 42px;
+  height: 24px;
+  min-height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: #c93b43;
+  transition: background-color 180ms ease;
+}
+.aka-device-panel button.aka-toggle[aria-checked="true"] {
+  background: #168449;
+}
+.aka-device-panel button.aka-toggle:hover:not(:disabled) {
+  background: #c93b43;
+}
+.aka-device-panel button.aka-toggle[aria-checked="true"]:hover:not(:disabled) {
+  background: #168449;
+}
+.aka-toggle > span:first-child {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: white;
+  transition: transform 180ms ease;
+}
+.aka-toggle[aria-checked="true"] > span:first-child {
+  transform: translateX(18px);
+}
+.aka-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+.aka-device-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.aka-control-tools {
+  padding-top: 12px;
+  border-top: 1px solid var(--agnes-line-primary);
+}
+.aka-control-tools button {
+  font-size: 12px;
+  min-height: 32px;
+}
+.aka-manual-control {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+.aka-manual-control > h3 {
+  display: none;
+}
+.aka-device-panel dl {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: 8px;
+  margin: 0;
+}
+.aka-device-panel dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+.aka-device-panel .aka-telemetry {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  padding: 14px 16px;
+  border: 1px solid var(--agnes-line-primary);
+  border-radius: 10px;
+  background: var(--agnes-bg-surface);
+  column-gap: 12px;
+  row-gap: 4px;
+}
+.aka-telemetry dt {
+  grid-row: 1;
+  color: var(--agnes-text-secondary);
+  font-size: 12px;
+}
+.aka-telemetry dd {
+  grid-row: 2;
+  font-size: 16px;
+  font-weight: 600;
+}
+.aka-manual-settings {
+  font-size: 12px;
+}
+.aka-manual-settings[open] {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.aka-manual-settings summary {
+  grid-column: 1 / -1;
+  cursor: pointer;
+  color: var(--agnes-text-secondary);
+}
+.aka-direction-pad {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  max-width: 360px;
+  width: 100%;
+  margin-inline: auto;
+}
+.aka-direction-pad button {
+  min-height: 44px;
+  background: var(--agnes-bg-surface);
+}
+.aka-direction-pad button:first-child {
+  grid-column: 2;
+}
+.aka-direction-pad button:nth-child(2) {
+  grid-column: 1;
+}
+.aka-direction-pad button:last-child {
+  grid-column: 2;
+}
+.aka-direction-pad button.aka-stop {
+  color: var(--agnes-status-danger-text);
+  background: var(--agnes-status-danger-bg);
+  border-color: var(--agnes-status-danger-text);
+  font-weight: 700;
+}
+.aka-manual-control > .aka-device-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.aka-manual-control > .aka-device-actions button:first-child {
+  background: var(--agnes-brand-primary);
+  border-color: var(--agnes-brand-primary);
+  color: white;
+}
+.aka-advanced {
+  font-size: 12px;
+  color: var(--agnes-text-secondary);
+}
+.aka-advanced summary {
+  cursor: pointer;
+  padding-block: 6px;
+}
+.aka-advanced[open] > :not(summary) {
+  margin-top: 8px;
+}
+.aka-progress {
+  font-size: 12px;
+}
+.aka-recognition-dialog {
+  width: min(560px, calc(100% - 32px));
+  max-height: 85dvh;
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 24px;
+  border: 1px solid var(--agnes-line-primary);
+  border-radius: 16px;
+  color: var(--agnes-text-primary);
+  background: var(--agnes-bg-popover, #fff);
+  box-shadow: 0 18px 60px #0003;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.aka-recognition-dialog::backdrop {
+  background: #0007;
+}
+.aka-recognition-dialog form,
+.aka-recognition-dialog label,
+.aka-recognition-dialog form > div {
+  display: grid;
+  gap: 8px;
+}
+.aka-recognition-dialog form {
+  gap: 16px;
+}
+.aka-recognition-dialog h3 {
+  margin: 0 0 8px;
+  font-size: 20px;
+}
+.aka-recognition-dialog p {
+  color: var(--agnes-text-secondary);
+}
+.aka-recognition-dialog select {
+  max-width: 100%;
+}
+.aka-recognition-dialog textarea {
+  resize: vertical;
+}
+.aka-recognition-dialog .aka-device-actions {
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+.aka-saved-state {
+  display: grid;
+  gap: 4px;
+  margin-block: 12px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: var(--agnes-status-success-bg);
+  color: var(--agnes-status-success-text);
+  font-variant-numeric: tabular-nums;
+}
+.aka-saved-state span {
+  font-size: 12px;
+}
+.aka-recognition-control,
+.aka-recognition-result {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+}
+.aka-budget-details {
+  order: 4;
+}
+.aka-recognition-image {
+  position: relative;
+  overflow: hidden;
+  border-radius: 8px;
+}
+.aka-recognition-image img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.aka-recognition-image svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.aka-recognition-image rect {
+  fill: none;
+  stroke: var(--agnes-brand-primary);
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+.aka-recognition-result ol {
+  max-height: 160px;
+  overflow: auto;
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+.aka-recognition-control > p,
+.aka-recognition-result > p {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.aka-ground-dialog table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.aka-ground-dialog td {
+  padding: 2px;
+}
+.aka-ground-dialog td input {
+  width: 100%;
+  min-width: 0;
+}
+.aka-ground-dialog fieldset {
+  margin-block: 12px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .aka-toggle,
+  .aka-toggle > span:first-child {
+    transition: none !important;
+  }
+}
+@media (max-width: 480px) {
+  .aka-console-header-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .aka-connection-card {
+    padding: 20px;
+  }
+}
+
+.aka-recognition-result {
+  grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+  align-items: start;
+  padding: 12px;
+  border: 1px solid var(--agnes-line-primary);
+  border-radius: 10px;
+  background: var(--agnes-bg-surface);
+}
+.aka-recognition-result figcaption {
+  grid-column: 1 / -1;
+  font-size: 12px;
+  font-weight: 600;
+}
+.aka-recognition-result .aka-recognition-image {
+  grid-column: 1;
+  grid-row: 2;
+}
+.aka-recognition-result ol {
+  grid-column: 2;
+  grid-row: 2;
+  padding-left: 18px;
+  font-size: 12px;
+}
+.aka-result-meta {
+  grid-column: 1 / -1;
+  grid-row: 3;
+}

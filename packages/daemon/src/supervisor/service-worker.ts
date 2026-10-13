@@ -49,6 +49,7 @@ async function callWorker(
         call: params,
         credential,
         ...(admission ? { effectCommandId: admission.commandId } : {}),
+        ...(admission?.recoverOnly ? { effectRecoverOnly: true } : {}),
       },
       // Public capabilities cap their own deadline at 30s. This outer bound catches a wedged
       // worker event loop and still leaves the journal row uncertain for effects.

@@ -47,6 +47,8 @@ export type MethodName =
   | '_agnes/v1/extension.ack'
   | '_agnes/v1/extension.call'
   | '_agnes/v1/config.get'
+  | '_agnes/v1/config.imageGeneration.get'
+  | '_agnes/v1/config.imageGeneration.save'
   | '_agnes/v1/config.oauth'
   | '_agnes/v1/config.providers'
   | '_agnes/v1/config.test'
@@ -85,6 +87,14 @@ export type MethodName =
   | '_agnes/v1/session.list'
   | '_agnes/v1/workspace.list'
   | '_agnes/v1/workspace.add'
+  | '_agnes/v1/device.bindings.list'
+  | '_agnes/v1/device.recognition.save'
+  | '_agnes/v1/device.recognition.get'
+  | '_agnes/v1/device.connection.get'
+  | '_agnes/v1/device.connection.save'
+  | '_agnes/v1/device.session.get'
+  | '_agnes/v1/device.session.bind'
+  | '_agnes/v1/device.session.detach'
   | '_agnes/v1/session.setPreset'
   | '_agnes/v1/session.setModel'
   | '_agnes/v1/session.setYolo'
@@ -117,6 +127,11 @@ export const METHODS: Record<MethodName, MethodSpec> = {
   '_agnes/v1/extension.ack': clientRequest(A.ExtensionAckParams, A.Empty),
   '_agnes/v1/extension.call': clientRequest(A.ExtensionCallParams, A.ExtensionCallResult),
   '_agnes/v1/config.get': clientRequest(A.ConfigEmptyParams, A.ConfigSnapshot),
+  '_agnes/v1/config.imageGeneration.get': clientRequest(A.ConfigEmptyParams, A.ImageGenerationSettings),
+  '_agnes/v1/config.imageGeneration.save': clientRequest(
+    A.ImageGenerationSaveInput,
+    A.ImageGenerationSettings,
+  ),
   '_agnes/v1/config.oauth': clientRequest(A.ConfigOAuthInput, A.ConfigOAuthResult),
   '_agnes/v1/config.providers': clientRequest(A.ConfigEmptyParams, A.ConfigProvidersResult),
   '_agnes/v1/config.test': clientRequest(A.ConfigTestInput, A.ConfigTestResult),
@@ -237,6 +252,17 @@ export const METHODS: Record<MethodName, MethodSpec> = {
   },
   '_agnes/v1/workspace.list': clientRequest(A.WorkspaceListParams, A.WorkspaceListResult),
   '_agnes/v1/workspace.add': clientRequest(A.WorkspaceAddParams, A.WorkspaceAddResult),
+  '_agnes/v1/device.bindings.list': clientRequest(A.WorkspaceListParams, A.DeviceBindingsListResult),
+  '_agnes/v1/device.recognition.save': clientRequest(
+    A.DeviceRecognitionSaveParams,
+    A.DeviceRecognitionResult,
+  ),
+  '_agnes/v1/device.recognition.get': clientRequest(A.DeviceSessionGetParams, A.DeviceRecognitionResult),
+  '_agnes/v1/device.connection.get': clientRequest(A.DeviceSessionGetParams, A.DeviceConnectionResult),
+  '_agnes/v1/device.connection.save': clientRequest(A.DeviceConnectionSaveParams, A.DeviceConnectionResult),
+  '_agnes/v1/device.session.get': clientRequest(A.DeviceSessionGetParams, A.DeviceSessionResult),
+  '_agnes/v1/device.session.bind': clientRequest(A.DeviceSessionBindParams, A.DeviceSessionResult),
+  '_agnes/v1/device.session.detach': clientRequest(A.DeviceSessionDetachParams, A.DeviceSessionResult),
   '_agnes/v1/session.setPreset': {
     kind: 'request',
     direction: 'c2s',

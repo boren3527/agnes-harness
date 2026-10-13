@@ -43,7 +43,7 @@ const COUNTS = {
   sequences: 4,
   workerRuntimeTarget: 8,
 } as const
-const ALL_FIXTURE_COUNT = 1395
+const ALL_FIXTURE_COUNT = 1413
 
 describe('conformance fixtures', () => {
   it('all checked-in fixtures across the complete fixture tree pass', () => {

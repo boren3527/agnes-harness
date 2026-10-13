@@ -25,6 +25,13 @@ import type { KernelPorts } from './ports.js'
 import { buildRowExtensionAPI, OBSERVE_HOOK_EVENTS } from './row-extension-api.js'
 
 export type RowExtensionHostOptions = Readonly<{
+  imageGenerationConfiguration?: import('./row-extension-api.js').RowExtensionApiInput['imageGenerationConfiguration']
+  imageGeneration?: import('./row-extension-api.js').RowExtensionApiInput['imageGeneration']
+  deviceSession?: (
+    sessionKey: string,
+    signal: AbortSignal,
+    view?: 'connection' | 'recognition',
+  ) => Promise<unknown>
   mcpManage?: import('../resources/mcp-manage-port.js').McpManageBridge
   pluginManage?: import('../resources/plugin-manage-port.js').PluginManageBridge
   skillInstall?: import('../resources/skill-install-port.js').SkillInstallBridge
@@ -66,6 +73,13 @@ type Pending = {
 }
 
 type RowRecord = {
+  media?: Readonly<{
+    port: number
+    authorization: string
+    rowRevision: string
+    registrationId: string
+    revoked: AbortSignal
+  }>
   rowId: string
   source: string
   packageId: string
@@ -292,6 +306,58 @@ export function createRowExtensionHost(options: RowExtensionHostOptions) {
     const requestMcpManage = options.mcpManage
     const requestPluginManage = options.pluginManage
     record.api = buildRowExtensionAPI({
+      deviceMedia: Object.freeze({
+        register(endpoint: Readonly<{ port: number; authorization: string }>) {
+          lease.assertAlive('execute')
+          ac.signal.throwIfAborted()
+          if (
+            !endpoint ||
+            typeof endpoint !== 'object' ||
+            Array.isArray(endpoint) ||
+            Reflect.ownKeys(endpoint).length !== 2 ||
+            Reflect.ownKeys(endpoint).some(
+              (key) =>
+                typeof key !== 'string' ||
+                !['port', 'authorization'].includes(key) ||
+                !Object.hasOwn(Object.getOwnPropertyDescriptor(endpoint, key) ?? {}, 'value'),
+            ) ||
+            !Number.isSafeInteger(endpoint.port) ||
+            endpoint.port < 1 ||
+            endpoint.port > 65535 ||
+            typeof endpoint.authorization !== 'string' ||
+            !/^Bearer [A-Za-z0-9_-]{43}$/.test(endpoint.authorization) ||
+            record.media ||
+            [...records.values()].some((other) => other !== record && other.media?.port === endpoint.port)
+          )
+            throw new HostError('E_EXT_LOAD', 'invalid or conflicting private media endpoint')
+          const revoked = new AbortController()
+          const entry = Object.freeze({
+            port: endpoint.port,
+            authorization: endpoint.authorization,
+            rowRevision: record.snapshotId,
+            registrationId: randomUUID(),
+            revoked: revoked.signal,
+          })
+          const release = () => {
+            ac.signal.removeEventListener('abort', release)
+            revoked.abort()
+            if (record.media === entry) delete record.media
+          }
+          record.media = entry
+          ac.signal.addEventListener('abort', release, { once: true })
+          return Object.freeze({
+            rowRevision: entry.rowRevision,
+            registrationId: entry.registrationId,
+            revoked: entry.revoked,
+            release,
+          })
+        },
+      }),
+      ...(options.deviceSession ? { deviceSession: options.deviceSession } : {}),
+      ...(options.imageGeneration ? { imageGeneration: options.imageGeneration } : {}),
+      ...(options.imageGenerationConfiguration
+        ? { imageGenerationConfiguration: options.imageGenerationConfiguration }
+        : {}),
       ...(requestMcpManage
         ? {
             mcpManage: (invocation, signal) =>
@@ -428,6 +494,13 @@ export function createRowExtensionHost(options: RowExtensionHostOptions) {
   }
 
   return Object.freeze({
+    /** Host-private coordination only. Credentials must never be projected into browser JSON. */
+    deviceMediaEndpoint(rowId: string) {
+      const record = records.get(rowId)
+      if (record?.state !== 'live' || !record.loaded || record.ac.signal.aborted) return null
+      record.lease.assertAlive('execute')
+      return record.media?.revoked.aborted === false ? record.media : null
+    },
     /** Provides the `extension` service on one tree's root. Called once per root. */
     installRoot(root: Context, origins: RowOriginLookup): void {
       class ExtensionFacade extends Service {

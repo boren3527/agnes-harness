@@ -90,6 +90,11 @@ describe('the Host binds compiled sandbox policy to each session workspace', () 
     try {
       opened = await fixture(sandbox)
     } catch (error) {
+      // Default-workspace compilation can refuse this before Host assembly finishes.
+      if (_name === 'an unsupported level' && (error as { code?: string }).code === 'E_SEAM_INIT') {
+        expect(String(error)).toMatch(/E_SANDBOX_WORKSPACE: sandbox\.level is not L0 or L1/)
+        return
+      }
       expect(error).toMatchObject({ code: 'E_PRESET_UNSUPPORTED' })
       return
     }

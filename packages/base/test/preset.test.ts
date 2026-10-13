@@ -145,7 +145,23 @@ describe('every key the kernel reads is spelled the way the kernel spells it', (
       isolation: 'worktree',
       tools: {
         ...fromNothing.tools,
-        timeouts: { web_fetch: 30000, skill_helper_import: 240000, shell: 600000 },
+        timeouts: {
+          web_fetch: 30000,
+          skill_helper_import: 240000,
+          shell: 600000,
+          aka_approach: 200000,
+          aka_transport: 200000,
+          aka_patrol: 200000,
+          aka_patrol_saved: 200000,
+          aka_mission: 200000,
+          aka_mission_saved: 200000,
+          aka_orbit_capture: 200000,
+          aka_prepare_subject: 200000,
+          aka_generate_reference_view: 200000,
+          aka_generate_reference_views: 400000,
+          agh_ortho_mesh_run: 600000,
+          aka_build_model: 900000,
+        },
       },
     })
   })

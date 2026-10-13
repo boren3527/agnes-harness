@@ -1,4 +1,4 @@
-import { presets as basePresets, seams } from '@agnes/base'
+import { presets as basePresets, sandboxWorkspaceProbe, seams } from '@agnes/base'
 import { fakeSeamInit } from '@agnes/base/testkit'
 import { type ApprovalRequest, readPreset } from '@agnes/core'
 import { resolvePreset } from '@agnes/host'
@@ -38,6 +38,35 @@ const request = (path: string): ApprovalRequest => ({
 })
 
 describe('standard-windows through the real approval seam', () => {
+  it.each(['standard-windows', 'aka-standard-windows'])(
+    'opens the real Windows sandbox for %s',
+    async (name) => {
+      const sandbox = resolvePreset(name, docs).doc.sandbox as {
+        level: 'L0' | 'L1'
+        required: boolean
+        on_unavailable: 'allow' | 'deny'
+        network_allow: string[]
+      }
+      const probe = await sandboxWorkspaceProbe({
+        level: sandbox.level,
+        required: sandbox.required,
+        onUnavailable: sandbox.on_unavailable,
+        shell: 'powershell',
+        options: {
+          cwd: 'D:/dev',
+          allowPaths: ['D:/dev'],
+          denyPaths: [],
+          networkAllow: sandbox.network_allow,
+        },
+        probeExec: async () => {
+          throw new Error('L0 must not spawn a process')
+        },
+        log: { debug() {}, info() {}, warn() {}, error() {} },
+      })
+      expect(probe.name).toBe('none')
+      expect(sandbox.network_allow).toEqual([])
+    },
+  )
   it('gives Skill import enough time for bounded GitHub reads and source approval', () => {
     const tools = readPreset(preset, 'standard-windows').tools
     expect(tools.timeoutMs).toBe(120_000)

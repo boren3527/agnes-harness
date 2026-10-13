@@ -480,13 +480,14 @@ async function windowCandidates(input: WindowCandidateInput): Promise<readonly R
   const found = scanNewestSegment([...input.surface], scan, input.onScanTruncated)
   const newestFirst = [...found].sort((a, b) => b.node.seq - a.node.seq)
   const maxEntries = Math.min(scan.maxManifestEntries, media.maxManifestEntries)
+  const selectionCap = Math.max(1, Math.min(media.maxSelectedImages, Math.floor(media.maxSelectedBlocks / 2)))
   const used = { bytes: 0, pixels: 0 }
   const out: RequestMediaCandidate[] = []
   const imagesIn = (nodes: typeof newestFirst) =>
     nodes.reduce((total, { images }) => total + images.length, 0)
   let batch = newestFirst.slice(0, REQUEST_MEDIA_NODE_WINDOW)
   // A manifest limit below the window's image count keeps the newest whole nodes that fit.
-  while (batch.length > 1 && imagesIn(batch) > maxEntries) batch = batch.slice(0, -1)
+  while (batch.length > 1 && imagesIn(batch) > Math.min(maxEntries, selectionCap)) batch = batch.slice(0, -1)
   let next = batch.length
   let extensions = 0
   // A window node whose images were all reclaimed is replaced by the next older image node, for a
@@ -497,6 +498,17 @@ async function windowCandidates(input: WindowCandidateInput): Promise<readonly R
       if (extensions > 0) break
       fail('MANIFEST_LIMIT', 'window image candidates exceed maxManifestEntries')
     }
+    // Multi-view results can contain more images than one inference admits. Keep their first
+    // views within the newest-node window; originals stay in the ledger for explicit batch reads.
+    let remaining = selectionCap - out.length
+    if (remaining <= 0) break
+    batch = batch
+      .map(({ node, images }) => {
+        const selected = images.slice(0, remaining)
+        remaining -= selected.length
+        return { node, images: selected }
+      })
+      .filter(({ images }) => images.length > 0)
     const references = await windowReferences(batch, lookupToolCalls, scan)
     for (const ref of references) {
       const image = await readDecoded(ref, readArtifact, authority, media, scan, used)

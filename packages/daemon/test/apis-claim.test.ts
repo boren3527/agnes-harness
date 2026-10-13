@@ -35,6 +35,24 @@ const methodsOf = (fams: Array<{ name: string; methods: string[] }>): string[] =
 
 describe('apisFamilies visibility', () => {
   it.each([
+    [{ deviceBindings: true }, true],
+    [{ deviceBindings: false }, false],
+    [{}, false],
+    [{ deviceBindings: true, authKind: 'jwt', credentialKind: 'jwt' }, false],
+    [{ deviceBindings: true, credentialKind: 'sso' }, false],
+  ] as const)('lists device associations only for fitted local owner storage: %s', (over, listed) => {
+    const methods = methodsOf(apisFamilies(ctx(over)))
+    for (const method of [
+      'bindings.list',
+      'session.get',
+      'session.bind',
+      'session.detach',
+      'connection.get',
+      'connection.save',
+    ])
+      expect(methods.includes(`_agnes/v1/device.${method}`)).toBe(listed)
+  })
+  it.each([
     ['local with a jobs service', { authKind: 'local', jobs: {} }, true],
     ['local without one', { authKind: 'local' }, true],
     // The || in the original made this row true, advertising the protected enqueue to every remote

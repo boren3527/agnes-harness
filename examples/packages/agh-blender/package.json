@@ -1,0 +1,30 @@
+{
+  "name": "agh-blender",
+  "version": "0.7.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "description": "Drive a local Blender from Agnes Harness: start it, edit the scene through a whitelisted opcode protocol, render the viewport, checkpoint and export.",
+  "exports": "./extensions/main/index.mjs",
+  "agnes": {
+    "plugins": [
+      {
+        "export": "runtime",
+        "id": "ext:agh-blender/runtime",
+        "runtime": "in-process",
+        "inject": [
+          "extension"
+        ],
+        "services": [
+          "blender.status"
+        ]
+      }
+    ],
+    "clientDescriptors": [
+      {
+        "rowId": "ext:agh-blender/runtime",
+        "path": "./extensions/main/agnes.client.json"
+      }
+    ]
+  }
+}

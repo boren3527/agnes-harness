@@ -1,0 +1,69 @@
+{
+  "name": "@agnes-examples/aka-robot-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": "./runtime.cjs",
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc -b",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@agnes/extension-api": "workspace:*",
+    "ws": "8.21.3",
+    "@agnes/host": "workspace:*",
+    "@sinclair/typebox": "0.34.33"
+  },
+  "devDependencies": {
+    "@types/ws": "8.18.1",
+    "react": "18.3.1",
+    "@alicloud/objectdet20191230": "2.0.10",
+    "@alicloud/openapi-client": "0.4.15",
+    "@alicloud/openplatform20191219": "2.0.0",
+    "@alicloud/tea-util": "1.4.11"
+  },
+  "peerDependencies": {
+    "react": "18.3.1"
+  },
+  "agnes": {
+    "plugins": [
+      {
+        "id": "ext:agnes-examples/aka-robot",
+        "export": "runtime",
+        "inject": [
+          "extension"
+        ],
+        "services": [
+          "aka.status",
+          "aka.media.ticket",
+          "aka.probe",
+          "aka.connect",
+          "aka.disconnect",
+          "aka.camera.set",
+          "aka.control.action",
+          "aka.control.stop",
+          "aka.settings.read",
+          "aka.settings.save",
+          "aka.task.cancel",
+          "aka.geometry.read",
+          "aka.geometry.save",
+          "aka.geometry.estimate",
+          "aka.modeling.settings.read",
+          "aka.modeling.settings.save",
+          "aka.recognition.round.read",
+          "aka.recognition.round.start",
+          "aka.recognition.test",
+          "aka.capture"
+        ]
+      }
+    ],
+    "clientDescriptors": [
+      {
+        "rowId": "ext:agnes-examples/aka-robot",
+        "path": "./client/agnes.client.json"
+      }
+    ]
+  },
+  "license": "Apache-2.0"
+}

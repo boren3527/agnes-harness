@@ -57,6 +57,7 @@ function browserControlPlaneMethod(method: string): boolean {
     method.startsWith('_agnes/v1/packages.') ||
     method.startsWith('_agnes/v1/extension.') ||
     method === '_agnes/v1/clientModules.callService' ||
+    method === '_agnes/v1/clientModules.resolveMedia' ||
     method === '_agnes/v1/clientModules.callEffect' ||
     isResourceControlMethod(method)
   )

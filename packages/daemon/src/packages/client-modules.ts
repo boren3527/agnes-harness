@@ -146,6 +146,10 @@ export function runtimeArtifactsFromStore(
 }
 
 export type ClientModuleRegistry = Readonly<{
+  /** Private validated mapping; never part of the browser roster. */
+  mediaOwner?(
+    input: Parameters<ClientModuleRegistry['list']>[0] & { rowId: string },
+  ): Promise<Readonly<{ backendRowId: string; revision: string; rosterRevision: string }> | null>
   list(input: {
     profile: string
     profileDirectory: string
@@ -627,11 +631,30 @@ async function readState(root: string, profile: string): Promise<ProfileState> {
   }
 }
 
+type VerifiedSnapshot = { bytes: number; manifest: SnapshotManifest }
+type SnapshotVerificationCache = Map<string, { stamp: string; snapshot: VerifiedSnapshot }>
+
+/** Compare filesystem identity and change times, without rereading unchanged bundle bytes. */
+async function snapshotStamp(directory: string, manifest: SnapshotManifest): Promise<string> {
+  const stamps = await Promise.all(
+    [SNAPSHOT_FILE, ...manifest.files.map((file) => file.path)].map(async (path) => {
+      const target = await realpath(resolve(directory, path))
+      const rel = relative(directory, target)
+      if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`)) throw new Error('Invalid snapshot path')
+      const info = await stat(target, { bigint: true })
+      if (!info.isFile()) throw new Error('Invalid snapshot file')
+      return `${target}:${info.dev}:${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`
+    }),
+  )
+  return jcs(stamps)
+}
+
 async function verifySnapshot(
   root: string,
   packageId: string,
   revision: string,
-): Promise<{ bytes: number; manifest: SnapshotManifest } | null> {
+  cache?: SnapshotVerificationCache,
+): Promise<VerifiedSnapshot | null> {
   const directory = snapshotDirectory(root, packageId, revision)
   let canonicalRoot: string
   let canonicalDirectory: string
@@ -647,6 +670,10 @@ async function verifySnapshot(
       resolve(canonicalRoot, directoryRel) !== canonicalDirectory
     )
       return null
+    const cached = cache?.get(canonicalDirectory)
+    if (cached && cached.stamp === (await snapshotStamp(canonicalDirectory, cached.snapshot.manifest)))
+      return cached.snapshot
+    cache?.delete(canonicalDirectory)
     const manifestPath = join(canonicalDirectory, SNAPSHOT_FILE)
     if ((await stat(manifestPath)).size > MAX_METADATA_BYTES) return null
     parsed = JSON.parse(await readFile(manifestPath, 'utf8'))
@@ -666,6 +693,12 @@ async function verifySnapshot(
     )
   )
     return null
+  let stamp: string
+  try {
+    stamp = await snapshotStamp(canonicalDirectory, parsed)
+  } catch {
+    return null
+  }
   let total = 0
   for (const file of parsed.files) {
     let target: string
@@ -685,7 +718,17 @@ async function verifySnapshot(
       return null
     }
   }
-  return { bytes: total, manifest: parsed }
+  try {
+    if (stamp !== (await snapshotStamp(canonicalDirectory, parsed))) return null
+  } catch {
+    return null
+  }
+  const snapshot = { bytes: total, manifest: parsed }
+  if (cache) {
+    if (cache.size >= 128) cache.clear()
+    cache.set(canonicalDirectory, { stamp, snapshot })
+  }
+  return snapshot
 }
 
 async function removeSnapshot(root: string, packageId: string, revision: string): Promise<void> {
@@ -909,6 +952,7 @@ export function createClientModuleRegistry(options: ClientModuleRegistryOptions)
   const inputs = new Map<string, Parameters<ClientModuleRegistry['list']>[0]>()
   const timers = new Map<string, ReturnType<typeof setTimeout>>()
   const resourceFailures = new Map<string, boolean>()
+  const verifiedSnapshots: SnapshotVerificationCache = new Map()
 
   const emit = (event: ClientModulesChanged): void => {
     for (const listener of listeners) {
@@ -985,6 +1029,7 @@ export function createClientModuleRegistry(options: ClientModuleRegistryOptions)
     const now = clock()
     const nowMs = now.getTime()
     let state = await readState(root, input.profile)
+    const originalState = jcs(state)
     let resourcesChanged = await pruneUntracked(root, state)
     let resourceFailure = false
     const packages: Record<string, PackageState> = {}
@@ -1034,7 +1079,10 @@ export function createClientModuleRegistry(options: ClientModuleRegistryOptions)
       const retained: Retained[] = []
       for (const itemRetained of item.retained) {
         const referenced = truth.referenced.get(packageId)?.has(itemRetained.revision) ?? false
-        if (referenced && (await verifySnapshot(root, packageId, itemRetained.revision)) !== null) {
+        if (
+          referenced &&
+          (await verifySnapshot(root, packageId, itemRetained.revision, verifiedSnapshots)) !== null
+        ) {
           retained.push({ revision: itemRetained.revision, protected: true })
         } else if (itemRetained.expiresAt !== undefined && Date.parse(itemRetained.expiresAt) <= nowMs) {
           await removeSnapshot(root, packageId, itemRetained.revision)
@@ -1044,12 +1092,12 @@ export function createClientModuleRegistry(options: ClientModuleRegistryOptions)
             revision: itemRetained.revision,
             expiresAt: new Date(nowMs + retentionMs).toISOString(),
           })
-        } else if ((await verifySnapshot(root, packageId, itemRetained.revision)) !== null)
+        } else if ((await verifySnapshot(root, packageId, itemRetained.revision, verifiedSnapshots)) !== null)
           retained.push(itemRetained)
         else resourcesChanged = true
       }
       const current =
-        item.current && (await verifySnapshot(root, packageId, item.current)) !== null
+        item.current && (await verifySnapshot(root, packageId, item.current, verifiedSnapshots)) !== null
           ? item.current
           : undefined
       if (item.current && !current) resourcesChanged = true
@@ -1082,7 +1130,31 @@ export function createClientModuleRegistry(options: ClientModuleRegistryOptions)
     const rows: NonNullable<ClientModuleListResult['rows']> = []
     const statuses: ClientModuleListResult['statuses'] = []
     const rowAliases: Record<string, string> = {}
-    for (const row of [...eligible.values()].sort((left, right) => left.id.localeCompare(right.id))) {
+    const selectedRows = [...eligible.values()]
+      .filter((row) =>
+        truth.useArtifact
+          ? new Set(
+              [...truth.active.values()]
+                .filter((entry) => entry.packageId === row.id)
+                .map((entry) => entry.revision),
+            ).size === 1
+          : row.enabled,
+      )
+      .sort((left, right) => left.id.localeCompare(right.id))
+    const observations = new Map<string, PackageActivationObservation | undefined>()
+    // Independent live reads may overlap; snapshot publication and retirement stay serialized.
+    for (let offset = 0; offset < selectedRows.length; offset += 4) {
+      await Promise.all(
+        selectedRows.slice(offset, offset + 4).map(async (row) => {
+          try {
+            observations.set(row.id, await input.actual(row.id))
+          } catch {
+            observations.set(row.id, undefined)
+          }
+        }),
+      )
+    }
+    for (const row of selectedRows) {
       const installedRevision = row.entry.integrity
       const liveDeclarations = declarations(row)
       const activeRows = [...truth.active.values()].filter((entry) => entry.packageId === row.id)
@@ -1134,12 +1206,7 @@ export function createClientModuleRegistry(options: ClientModuleRegistryOptions)
         activeDeclarations,
         current.rowAliases,
       )
-      let observation: PackageActivationObservation | undefined
-      try {
-        observation = await input.actual(row.id)
-      } catch {
-        observation = undefined
-      }
+      const observation = observations.get(row.id)
       const requiresBackend = activeDeclarations.some((item) => item.requiresBackend)
       const backendRevision = requiresBackend ? (observation?.actualIntegrity ?? null) : null
       const retained = current.retained.filter((item) => item.revision !== selectedRevision)
@@ -1192,7 +1259,7 @@ export function createClientModuleRegistry(options: ClientModuleRegistryOptions)
       if (current.current !== selectedRevision) {
         if (
           selectedRevision !== installedRevision &&
-          (await verifySnapshot(root, row.id, selectedRevision)) === null
+          (await verifySnapshot(root, row.id, selectedRevision, verifiedSnapshots)) === null
         ) {
           statuses.push({ ...baseStatus, state: 'blocked', reason: 'resources-invalid' })
           resourceFailure = true
@@ -1232,7 +1299,7 @@ export function createClientModuleRegistry(options: ClientModuleRegistryOptions)
         resourceFailure = true
         continue
       }
-      const verifiedSnapshot = await verifySnapshot(root, row.id, selectedRevision)
+      const verifiedSnapshot = await verifySnapshot(root, row.id, selectedRevision, verifiedSnapshots)
       if (verifiedSnapshot === null) {
         statuses.push({ ...baseStatus, state: 'blocked', reason: 'resources-invalid' })
         resourceFailure = true
@@ -1299,7 +1366,7 @@ export function createClientModuleRegistry(options: ClientModuleRegistryOptions)
         })
       }
     }
-    await writeAtomic(join(root, STATE_FILE), state)
+    if (jcs(state) !== originalState) await writeAtomic(join(root, STATE_FILE), state)
     resourceFailures.set(input.profile, resourceFailure)
     scheduleExpiry(input.profile, state)
     const result: ClientModuleListResult = {
@@ -1335,6 +1402,36 @@ export function createClientModuleRegistry(options: ClientModuleRegistryOptions)
         throw error
       })
     },
+    mediaOwner: (input) =>
+      serialize(input.profile, async () => {
+        const roster = await reconcile(input, true)
+        const row = roster.rows?.find(
+          (candidate) =>
+            candidate.rowId === input.rowId &&
+            candidate.enabled &&
+            candidate.phase === 'ready' &&
+            candidate.services?.includes('aka.media.ticket'),
+        )
+        if (!row?.packageId || !row.revision || !row.extIds?.includes(row.moduleName)) return null
+        const root = options.snapshotDirectory(input.profile, input.profileDirectory)
+        const state = await readState(root, input.profile)
+        const pkg = state.packages[row.packageId]
+        if (pkg?.current !== row.revision) return null
+        const declaration = pkg.declarations?.[row.revision]?.[row.rowId]
+        if (
+          !declaration?.backendRowId ||
+          declaration.moduleName !== row.moduleName ||
+          !declaration.extIds.includes(row.moduleName)
+        )
+          return null
+        return Object.freeze({
+          backendRowId: declaration.backendRowId,
+          revision: row.revision,
+          rosterRevision: `sha256-${createHash('sha256')
+            .update(jcs({ ...row, backendRowId: declaration.backendRowId }))
+            .digest('hex')}`,
+        })
+      }),
     refresh: (input, reason, packageId) =>
       serialize(input.profile, async () => {
         inputs.set(input.profile, input)
@@ -1362,7 +1459,7 @@ export function createClientModuleRegistry(options: ClientModuleRegistryOptions)
             ...(item.current ? [item.current] : []),
             ...item.retained.map((retained) => retained.revision),
           ]) {
-            const snapshot = await verifySnapshot(root, packageId, revision)
+            const snapshot = await verifySnapshot(root, packageId, revision, verifiedSnapshots)
             const file = snapshot?.manifest.files.find(
               (candidate) => route(packageId, revision, candidate.path) === input.path,
             )
@@ -1398,6 +1495,7 @@ export function createClientModuleRegistry(options: ClientModuleRegistryOptions)
       timers.clear()
       inputs.clear()
       resourceFailures.clear()
+      verifiedSnapshots.clear()
       listeners.clear()
     },
   }

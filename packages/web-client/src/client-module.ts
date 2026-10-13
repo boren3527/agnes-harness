@@ -1,5 +1,6 @@
 /** Client-module adapter: plugin registrations are owned by their Cordis fiber. */
 import type { Context } from '@agnes/cordis'
+import { CaptureOperationStore } from './capture-operation.js'
 import {
   DSH_SLOT_CATALOG_VERSION,
   getDshSlotDefinition,
@@ -31,6 +32,8 @@ export interface ClientContext extends Context {
   commands: {
     register(command: ClientCommand): () => void
     registerEffect(command: ClientEffectCommand): () => void
+    pendingEffect(id: string): Readonly<Record<string, unknown>> | null
+    completeEffect(id: string, input: unknown): void
     execute(id: string, input: unknown): Promise<unknown>
   }
   module: ModuleIdentity
@@ -101,33 +104,180 @@ export function clientModule(mod: ClientModule): {
       if (!(locale instanceof LocaleService)) {
         throw new Error('clientModule requires the host-provided locale service')
       }
+      let effectScope = Symbol('session')
+      const stopEffectScope = session.subscribe(() => {
+        effectScope = Symbol('session')
+      })
+      ctx.effect(() => () => {
+        effectScope = Symbol('disposed')
+        stopEffectScope()
+      })
+      const completedEffects = new Map<string, (input: unknown) => void>()
+      const pendingEffects = new Map<string, () => Record<string, unknown> | null>()
       const boundCommands = {
-        register(command: ClientCommand) {
-          const off = commands.register(config.rowId ?? config.packageId, command)
+        register(command: ClientCommand, scope?: () => unknown) {
+          const off = commands.register(config.rowId ?? config.packageId, command, scope)
           ctx.effect(() => off)
           return off
         },
         registerEffect(command: ClientEffectCommand) {
-          if (!agnes.effectCaller || !config.services?.includes(command.service))
+          const effectCaller = agnes.effectCaller
+          if (!effectCaller || !config.services?.includes(command.service))
             throw new Error(`client effect service is unavailable: ${command.service}`)
-          return this.register({
-            id: command.id,
-            ...(command.title ? { title: command.title } : {}),
-            effectService: command.service,
-            execute: async (input: unknown) => {
-              if (!input || typeof input !== 'object' || Array.isArray(input))
-                throw new TypeError('client effect input must be an object')
-              const sessionId = session.sessionId
-              if (!sessionId) throw new Error('client effect requires an active session')
-              return await agnes.effectCaller!(
-                config,
-                sessionId,
-                command.service,
-                crypto.randomUUID(),
-                input as Record<string, unknown>,
+          if (
+            command.persistCapture &&
+            (!command.retainOperation ||
+              !['aka.capture', 'aka.recognition.test'].includes(command.service) ||
+              config.packageId !== '@agnes-examples/aka-robot-plugin')
+          )
+            throw new Error('persistent capture is unavailable for this command')
+          const captureStore = command.persistCapture
+            ? new CaptureOperationStore(
+                config.rowId ?? config.packageId,
+                config.packageId,
+                command.service as 'aka.capture' | 'aka.recognition.test',
               )
+            : undefined
+          const operations = new WeakMap<
+            object,
+            {
+              sessionId: string
+              commandId: string
+              input: Record<string, unknown>
+              signature: string
+              pending: boolean
+              completed?: boolean
+            }
+          >()
+          const activeOperations = new Map<string, NonNullable<ReturnType<typeof operations.get>>>()
+          const off = this.register(
+            {
+              id: command.id,
+              ...(command.title ? { title: command.title } : {}),
+              effectService: command.service,
+              execute: async (input: unknown) => {
+                if (!input || typeof input !== 'object' || Array.isArray(input))
+                  throw new TypeError('client effect input must be an object')
+                const sessionId = session.sessionId
+                if (!sessionId) throw new Error('client effect requires an active session')
+                if (command.retainOperation) {
+                  const descriptors = Object.getOwnPropertyDescriptors(input)
+                  if (
+                    (Object.getPrototypeOf(input) !== Object.prototype &&
+                      Object.getPrototypeOf(input) !== null) ||
+                    Reflect.ownKeys(descriptors).length > 128 ||
+                    Reflect.ownKeys(descriptors).some((key) => typeof key !== 'string') ||
+                    Object.values(descriptors).some(
+                      (field) =>
+                        !('value' in field) ||
+                        !field.enumerable ||
+                        !(
+                          field.value === null ||
+                          typeof field.value === 'string' ||
+                          typeof field.value === 'boolean' ||
+                          (typeof field.value === 'number' && Number.isFinite(field.value))
+                        ),
+                    )
+                  )
+                    throw new TypeError('retained effect input must be flat JSON data')
+                  const snapshot = Object.fromEntries(
+                    Object.entries(descriptors).map(([key, field]) => [key, field.value]),
+                  )
+                  const signature = JSON.stringify(snapshot)
+                  if (signature.length > 65536) throw new TypeError('retained effect input is too large')
+                  let operation = operations.get(input)
+                  if (operation && (operation.sessionId !== sessionId || operation.signature !== signature))
+                    throw new Error('retained effect identity changed')
+                  operation ??= {
+                    sessionId,
+                    commandId: crypto.randomUUID(),
+                    input: Object.freeze(snapshot),
+                    signature,
+                    pending: false,
+                  }
+                  if (operation.pending) throw new Error('retained effect is still pending')
+                  operations.set(input, operation)
+                  const stored = captureStore?.read(sessionId)
+                  if (stored && stored.commandId !== operation.commandId)
+                    throw new Error('original capture requires readback')
+                  captureStore?.write(sessionId, operation.commandId, operation.input)
+                  operation.pending = true
+                  operation.completed = false
+                  activeOperations.set(operation.commandId, operation)
+                  try {
+                    const result = await effectCaller(
+                      config,
+                      sessionId,
+                      command.service,
+                      operation.commandId,
+                      operation.input,
+                      stored ? { readbackOnly: true } : undefined,
+                    )
+                    operation.completed = true
+                    return result
+                  } finally {
+                    activeOperations.delete(operation.commandId)
+                    operation.pending = false
+                  }
+                }
+                return await effectCaller(
+                  config,
+                  sessionId,
+                  command.service,
+                  crypto.randomUUID(),
+                  input as Record<string, unknown>,
+                )
+              },
             },
-          })
+            () => effectScope,
+          )
+          let clearRecovery = () => {}
+          if (captureStore) {
+            const complete = (input: unknown) => {
+              const operation = input && typeof input === 'object' ? operations.get(input) : undefined
+              if (!operation?.completed || operation.pending || operation.sessionId !== session.sessionId)
+                throw new Error('capture completion is unavailable')
+              captureStore.clear(operation.sessionId, operation.commandId)
+            }
+            const read = () => {
+              const sessionId = session.sessionId
+              if (!sessionId) return null
+              const record = captureStore.read(sessionId)
+              if (!record) return null
+              if (!operations.has(record.input))
+                operations.set(
+                  record.input,
+                  activeOperations.get(record.commandId) ?? {
+                    sessionId,
+                    commandId: record.commandId,
+                    input: record.input,
+                    signature: JSON.stringify(record.input),
+                    pending: false,
+                  },
+                )
+              return record.input
+            }
+            completedEffects.set(command.id, complete)
+            pendingEffects.set(command.id, read)
+            clearRecovery = () => {
+              if (completedEffects.get(command.id) === complete) completedEffects.delete(command.id)
+              if (pendingEffects.get(command.id) === read) pendingEffects.delete(command.id)
+            }
+          }
+          const stop = () => {
+            off()
+            clearRecovery()
+          }
+          ctx.effect(() => stop)
+          return stop
+        },
+        completeEffect(id: string, input: unknown) {
+          const complete = completedEffects.get(id)
+          if (!complete) throw new Error('capture completion is unavailable')
+          complete(input)
+        },
+        pendingEffect(id: string) {
+          return pendingEffects.get(id)?.() ?? null
         },
         execute(id: string, input: unknown) {
           return commands.executeOwned(config.rowId ?? config.packageId, id, input)

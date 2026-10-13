@@ -8,6 +8,16 @@ export {
   scanAll,
   scanPages,
 } from '@agnes/core'
+// Backend-only cloud transport building blocks; no plugin service or model credential route.
+export { createAliRecognitionPipeline } from './adapters/ali-recognition.js'
+export {
+  type Detection,
+  parseAliDetections,
+  type RecognitionFrame,
+  type RecognitionPipeline,
+  RecognitionProtocolError,
+  RecognitionServiceError,
+} from './adapters/cloud-recognition.js'
 export {
   type CredentialFileEnforcement,
   type CredentialKind,
@@ -55,6 +65,7 @@ export {
 export { resolveConfiguredPowerShell } from './adapters/powershell.js'
 export type { ProcessIdentity } from './adapters/process-identity.js'
 export { defaultProcessIdentity } from './adapters/process-identity-default.js'
+export { copyRecognitionFrame } from './adapters/recognition-frame.js'
 export {
   composeSecrets,
   createSecretsEnv,
@@ -281,6 +292,14 @@ export {
 } from './configuration.js'
 export type { DeploymentPolicy, ResolvedDeployment } from './deploy/index.js'
 export { resolveDeployment } from './deploy/index.js'
+export {
+  DeviceRecognitionCredentialError,
+  discardDeviceRecognitionCredential,
+  readDeviceRecognitionCredential,
+  readDeviceRecognitionToken,
+  stageDeviceRecognitionCredential,
+  stageDeviceRecognitionToken,
+} from './device-recognition-credentials.js'
 export * from './errors.js'
 export {
   type ActivationBarrierSnapshot,
@@ -313,6 +332,7 @@ export {
   type ToolAuthority,
   type ToolPort,
 } from './ext-host/index.js'
+export { pluginRowSource } from './ext-host/row-extension-host.js'
 export {
   isServicePreDispatchFailure,
   type ServiceAuthority,

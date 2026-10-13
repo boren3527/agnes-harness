@@ -476,6 +476,16 @@ it('listRuntimePins enumerates every pin regardless of purpose', async () => {
   expect(byId.get('active-v1')).toEqual(active)
   expect(byId.get('turn-v1')).toEqual(turn)
 
+  // Sharing one snapshot across pins must not cache verification across separate reads.
+  const tampered = join(active.snapshot.directory, 'changed-after-list')
+  writeFileSync(tampered, 'changed')
+  await expect(m.listRuntimePins(profile)).rejects.toMatchObject({
+    code: 'E_PACKAGE_INTEGRITY',
+    detail: { reason: 'runtime-tree-mismatch' },
+  })
+  rmSync(tampered)
+  expect(await m.listRuntimePins(profile)).toEqual(all)
+
   await m.releaseRuntimePin(profile, {
     pinId: 'turn-v1',
     expectedSnapshotId: turn.snapshot.snapshotId,

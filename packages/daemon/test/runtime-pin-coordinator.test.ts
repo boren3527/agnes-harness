@@ -41,6 +41,7 @@ function fixture() {
   let trusted = true
   let hash = 'initial'
   const manager = {
+    runtimeInventory: vi.fn(async () => manager.inventory('/profile')),
     inventory: vi.fn(
       async () =>
         ({
@@ -110,6 +111,13 @@ describe('runtime active pin coordinator', () => {
     expect(f.store.desired()).toEqual(value)
     expect(f.store.pins()).toEqual([])
     expect(f.active.size).toBe(1)
+    await f.coordinator.publish(artifact(true), async () => {})
+    await f.coordinator.recover()
+    expect(f.store.desired()).toEqual(artifact(true))
+    expect(f.active.size).toBe(1)
+    f.setTrusted(false)
+    await f.coordinator.recover()
+    expect(f.active.size).toBe(0)
   })
 
   it('releases a new pin after a failed probe without publishing the target', async () => {
@@ -123,6 +131,27 @@ describe('runtime active pin coordinator', () => {
     expect(f.active.size).toBe(0)
     expect(f.store.pins()).toEqual([])
   })
+
+  it.each(['runtime-inventory-stale', 'integrity-mismatch'] as const)(
+    'only recovers a cache invalidation, preserving %s verification failures',
+    async (reason) => {
+      const f = fixture()
+      const read = f.manager.runtimeInventory
+      if (!read) throw new Error('Missing runtime inventory fixture')
+      vi.mocked(read).mockRejectedValue({ detail: { reason } })
+      if (reason === 'runtime-inventory-stale') {
+        await f.coordinator.publish(artifact(), async () => {})
+        expect(f.store.desired()).toEqual(artifact())
+        expect(f.active.size).toBe(1)
+      } else {
+        await expect(f.coordinator.publish(artifact(), async () => {})).rejects.toEqual({
+          detail: { reason },
+        })
+        expect(f.store.desired()).toBeUndefined()
+        expect(f.active.size).toBe(0)
+      }
+    },
+  )
 
   it('rejects trust revocation or inventory replacement during a slow probe', async () => {
     for (const change of ['trust', 'inventory'] as const) {

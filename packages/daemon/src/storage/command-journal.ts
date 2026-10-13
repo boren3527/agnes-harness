@@ -78,10 +78,11 @@ export class PersistentCommandJournal implements CommandJournal {
     ensure(table, 'CREATE INDEX IF NOT EXISTS command_journal_acked_at ON command_journal (acked_at)')
   }
 
-  async begin(identity: JournalIdentity, binding: JournalBinding): Promise<JournalState> {
+  async begin(identity: JournalIdentity, binding: JournalBinding, readOnly?: true): Promise<JournalState> {
     return this.table.transaction(() => {
       const existing = this.read(identity)
       if (!existing) {
+        if (readOnly) return { state: 'new' }
         this.table.exec(
           `INSERT INTO command_journal
            (principal_id, client_id, session_id, command_id, binding_algorithm, binding_digest,

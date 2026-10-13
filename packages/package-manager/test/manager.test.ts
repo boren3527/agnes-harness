@@ -59,6 +59,40 @@ describe('PackageManager lifecycle', () => {
 
   afterEach(() => rmSync(dataDir, { recursive: true, force: true }))
 
+  it('shares an overlapping inventory scan but verifies fresh bytes and trust on the next read', async () => {
+    const manager = createPackageManager({ dataDir, agnesVersion: '0.1.0', cwd: fixtures })
+    const source = { type: 'file' as const, ref: 'file:./pkg-a' }
+    const preview = await manager.inspect(profileDir, source)
+    await manager.install(profileDir, source, { expectedIntegrity: preview.integrity })
+    const row = (await manager.inventory(profileDir)).packages[0]
+    if (!row) throw new Error('Missing installed package')
+    await manager.trust(profileDir, row.id, {
+      integrity: row.entry.integrity,
+      capabilityHash: row.capabilityHash,
+    })
+    const [first, concurrent] = await Promise.all([
+      manager.inventory(profileDir),
+      manager.inventory(profileDir),
+    ])
+    expect(concurrent).toBe(first)
+    const runtime = await manager.runtimeInventory?.(profileDir)
+    expect(runtime?.packages[0]?.trusted).toBe(true)
+    expect(await manager.runtimeInventory?.(profileDir)).toBe(runtime)
+    await manager.untrust(profileDir, row.id, {
+      integrity: row.entry.integrity,
+      capabilityHash: row.capabilityHash,
+    })
+    expect((await manager.inventory(profileDir)).packages[0]?.trusted).toBe(false)
+    expect((await manager.runtimeInventory?.(profileDir))?.packages[0]?.trusted).toBe(false)
+    writeFileSync(join(packageDir(dataDir, 'local-dev', 'acme/pkg-a'), 'tampered'), 'changed')
+    await expect(manager.inventory(profileDir)).rejects.toMatchObject({ code: 'E_PACKAGE_INTEGRITY' })
+    await expect(manager.runtimeInventory?.(profileDir)).rejects.toMatchObject({
+      code: 'E_PACKAGE_INTEGRITY',
+    })
+    await expect(manager.inventory(profileDir)).rejects.toMatchObject({ code: 'E_PACKAGE_INTEGRITY' })
+    manager.closeRuntimeInventory?.()
+  })
+
   it('installs, verifies, trusts and enables a pinned package through the three states', async () => {
     const manager = createPackageManager({
       dataDir,

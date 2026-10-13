@@ -6,9 +6,11 @@ import {
   type ServiceDef,
 } from '@agnes/extension-api'
 import { inspectJsonData, type JsonValue, jcs, type ServiceCapability } from '@agnes/protocol'
+import { recognitionNetworkHosts } from './device-recognition-authorization.js'
 import { frozenJson } from './frozen-json.js'
 import { compileExtensionSchema } from './json-schema.js'
 import type { Lease } from './lease.js'
+import { pluginRowSource } from './row-extension-host.js'
 
 export type ServiceRegistration = Readonly<{
   owner: string
@@ -38,11 +40,20 @@ export class ServiceRegistry {
       assertAlive(): void
       assertRunning(): void
       consume(): void
+      artifacts?: true
+      recognitionNetwork?: true
     }>,
   ) {
     if (!checkServiceDef(def).ok) throw new ExtensionError('E_SERVICE_DEF', 'invalid service definition')
     if (!/^plugin\/[0-9a-f]{16}$/.test(authority.owner) || !/^\d+\.\d+\.\d+/.test(authority.version))
       throw new ExtensionError('E_SERVICE_DEF', 'invalid row service identity')
+    if (
+      authority.recognitionNetwork &&
+      (authority.owner !== pluginRowSource('ext:agnes-examples/aka-robot') ||
+        def.kind !== 'effect' ||
+        !['aka.recognition.test', 'aka.recognition.enable'].includes(def.name))
+    )
+      throw new ExtensionError('E_SERVICE_DEF', 'invalid recognition network authority')
     const { handler, ...metadata } = def
     const snapshot = inspectJsonData(metadata)
     if (!snapshot.ok) throw new ExtensionError('E_SERVICE_DEF', 'invalid service capability')
@@ -52,7 +63,13 @@ export class ServiceRegistry {
       version: authority.version,
       apiRange: '*',
       entry: './index.js',
-      capabilities: Object.freeze({ services: Object.freeze([capability]) }),
+      capabilities: Object.freeze({
+        services: Object.freeze([capability]),
+        ...(authority.artifacts ? { artifacts: true } : {}),
+        ...(authority.recognitionNetwork
+          ? { network: Object.freeze({ hosts: recognitionNetworkHosts }) }
+          : {}),
+      }),
     }) as ExtensionManifest
     const assertAlive = () => {
       authority.assertAlive()

@@ -26,7 +26,9 @@ export type ClientImageResource = Readonly<{
 }>
 
 export type ClientImageLoader = Readonly<{
-  load(input: Readonly<{ laneId: string; artifact: ClientImageArtifact }>): Promise<ClientImageResource>
+  load(
+    input: Readonly<{ laneId: string; artifact: ClientImageArtifact; signal?: AbortSignal }>,
+  ): Promise<ClientImageResource>
 }>
 
 export type ClientDocumentResource = Readonly<{
@@ -43,6 +45,7 @@ export type ClientDocumentLoader = Readonly<{
       laneId: string
       kind: ClientDocumentKind
       artifact: ClientImageArtifact
+      signal?: AbortSignal
     }>,
   ): Promise<ClientDocumentResource>
 }>
@@ -60,6 +63,7 @@ export type ClientEffectCaller = (
   name: string,
   commandId: string,
   input: Record<string, unknown>,
+  mode?: Readonly<{ readbackOnly: true }>,
 ) => Promise<unknown>
 
 /** Host-owned service that supplies the already-authenticated SDK client to browser modules. */
@@ -115,6 +119,13 @@ export type ClientEffectCommand = Readonly<{
   id: string
   title?: string
   service: string
+  /** Reusing the same unchanged flat JSON input object retains its host-owned operation ID.
+   * Each attempt is authorized again. A new object starts a new operation; no automatic retry.
+   * This does not grant recovery or persistence across a browser/module restart. */
+  retainOperation?: true
+  /** AKA capture/test only: retain unresolved photo-backed identity across a tab reload.
+   * Recovery is readback-only; an uncertain recognition test cannot re-enter inference. */
+  persistCapture?: true
 }>
 
 export type CommandAuthorizer = (
@@ -131,7 +142,10 @@ export type CommandAuthorizer = (
  * still useful because the host can render or audit the current command set.
  */
 export class CommandService extends Service {
-  private readonly entries = new Map<string, Readonly<{ owner: string; command: ClientCommand }>>()
+  private readonly entries = new Map<
+    string,
+    Readonly<{ owner: string; command: ClientCommand; scope?: () => unknown }>
+  >()
 
   constructor(
     ctx: Context,
@@ -140,14 +154,18 @@ export class CommandService extends Service {
     super(ctx, 'commands')
   }
 
-  register(owner: string, command: ClientCommand): () => void {
+  register(owner: string, command: ClientCommand, scope?: () => unknown): () => void {
     if (typeof command.id !== 'string' || !/^[a-z][a-z0-9.-]{0,127}$/.test(command.id))
       throw new TypeError('client command id must be a stable lowercase identifier')
     if (typeof command.execute !== 'function')
       throw new TypeError('client command execute must be a function')
     const current = this.entries.get(command.id)
     if (current) throw new Error(`client command already registered: ${command.id}`)
-    const entry = Object.freeze({ owner, command: Object.freeze({ ...command }) })
+    const entry = Object.freeze({
+      owner,
+      command: Object.freeze({ ...command }),
+      ...(scope ? { scope } : {}),
+    })
     this.entries.set(command.id, entry)
     return () => {
       if (this.entries.get(command.id) === entry) this.entries.delete(command.id)
@@ -167,8 +185,11 @@ export class CommandService extends Service {
   async execute(id: string, input: unknown): Promise<unknown> {
     const entry = this.entries.get(id)
     if (!entry) throw new Error(`client command is not registered: ${id}`)
+    const scope = entry.scope?.()
     if (!(await this.authorize({ owner: entry.owner, command: entry.command, input })))
       throw new Error(`client command is not authorized: ${id}`)
+    if (this.entries.get(id) !== entry || entry.scope?.() !== scope)
+      throw new Error(`client command scope changed: ${id}`)
     return await entry.command.execute(input)
   }
 
@@ -301,6 +322,8 @@ export class SessionService extends Service {
 
 const IMAGE_MIMES = new Set(['image/png', 'image/jpeg'])
 const SHA256 = /^[0-9a-f]{64}$/
+const RESOURCE_CHUNK_BYTES = 1024 * 1024
+const IMAGE_RESOURCE_MAX_BYTES = 4 * RESOURCE_CHUNK_BYTES
 
 function isImageArtifact(value: unknown): value is ClientImageArtifact {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
@@ -311,13 +334,13 @@ function isImageArtifact(value: unknown): value is ClientImageArtifact {
     typeof artifact.size === 'number' &&
     Number.isSafeInteger(artifact.size) &&
     artifact.size >= 0 &&
-    artifact.size <= 1024 * 1024 &&
+    artifact.size <= IMAGE_RESOURCE_MAX_BYTES &&
     typeof artifact.mime === 'string' &&
     IMAGE_MIMES.has(artifact.mime)
   )
 }
 
-function isArtifact(value: unknown): value is ClientImageArtifact {
+function isArtifact(value: unknown, maximum = RESOURCE_CHUNK_BYTES): value is ClientImageArtifact {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false
   const artifact = value as Record<string, unknown>
   return (
@@ -326,7 +349,7 @@ function isArtifact(value: unknown): value is ClientImageArtifact {
     typeof artifact.size === 'number' &&
     Number.isSafeInteger(artifact.size) &&
     artifact.size >= 0 &&
-    artifact.size <= 1024 * 1024 &&
+    artifact.size <= maximum &&
     typeof artifact.mime === 'string' &&
     artifact.mime.length > 0 &&
     artifact.mime.length <= 128
@@ -375,6 +398,7 @@ export class ClientResourceReclaimedError extends Error {
 
 export class ClientResourceService extends Service {
   private readonly objectUrls = new Set<string>()
+  private disposed = false
 
   readonly images: ClientImageLoader = Object.freeze({
     load: (input) => this.loadImage(input),
@@ -394,7 +418,7 @@ export class ClientResourceService extends Service {
   }
 
   private async loadImage(
-    input: Readonly<{ laneId: string; artifact: ClientImageArtifact }>,
+    input: Readonly<{ laneId: string; artifact: ClientImageArtifact; signal?: AbortSignal }>,
   ): Promise<ClientImageResource> {
     const sessionId = this.session.sessionId
     if (!sessionId) throw new Error('image resource requires an active session')
@@ -407,38 +431,76 @@ export class ClientResourceService extends Service {
   }
 
   private async loadDocument(
-    input: Readonly<{ laneId: string; kind: ClientDocumentKind; artifact: ClientImageArtifact }>,
+    input: Readonly<{
+      laneId: string
+      kind: ClientDocumentKind
+      artifact: ClientImageArtifact
+      signal?: AbortSignal
+    }>,
   ): Promise<ClientDocumentResource> {
     const sessionId = this.session.sessionId
     if (!sessionId) throw new Error('document resource requires an active session')
     if (
       !isBoundedText(input.laneId) ||
-      !isArtifact(input.artifact) ||
+      !isArtifact(input.artifact, input.kind === 'image' ? IMAGE_RESOURCE_MAX_BYTES : RESOURCE_CHUNK_BYTES) ||
       !acceptsDocumentMime(input.kind, input.artifact.mime)
     )
       throw new TypeError('document resource reference is invalid')
 
-    const result = await this.client.call<ArtifactReadResult>('_agnes/v1/artifact.read', {
-      sessionId,
-      laneId: input.laneId,
-      artifact: input.artifact,
-    })
-    if (this.session.sessionId !== sessionId) throw new Error('document resource session changed')
-    if (!result.ok && result.status === 410 && result.code === 'artifact_reclaimed')
-      throw new ClientResourceReclaimedError()
-    if (!result.ok) throw new Error(`document resource is unavailable: ${result.code}`)
-    if (!sameImageArtifact(result.artifact, input.artifact) || result.contentLength !== input.artifact.size)
-      throw new Error('document resource identity mismatch')
-
-    const bytes = decodeBase64(result.base64)
-    if (bytes.byteLength !== result.contentLength) throw new Error('document resource length mismatch')
-    const needsUrl = input.kind === 'image' || input.kind === 'pdf'
-    const url = needsUrl ? this.createObjectUrl(bytes, result.artifact.mime) : undefined
+    const artifact = Object.freeze({ ...input.artifact })
+    const laneId = input.laneId
+    const kind = input.kind
+    const signal = input.signal
+    const handle = this.session.handle
+    const current = () => {
+      signal?.throwIfAborted()
+      if (this.disposed || this.session.sessionId !== sessionId || this.session.handle !== handle)
+        throw new Error('document resource session changed')
+    }
+    current()
+    const assembled = new Uint8Array(artifact.size)
+    const ranged = artifact.size > RESOURCE_CHUNK_BYTES
+    // Each range receives fresh backend authorization; no partial image URL is published.
+    for (let start = 0; start < artifact.size || start === 0; start += RESOURCE_CHUNK_BYTES) {
+      current()
+      const end = Math.min(start + RESOURCE_CHUNK_BYTES, artifact.size)
+      const result = await this.client.call<ArtifactReadResult>('_agnes/v1/artifact.read', {
+        sessionId,
+        laneId,
+        artifact,
+        ...(ranged ? { range: `bytes=${start}-${end - 1}` } : {}),
+      })
+      current()
+      if (!result.ok && result.status === 410 && result.code === 'artifact_reclaimed')
+        throw new ClientResourceReclaimedError()
+      if (!result.ok) throw new Error(`document resource is unavailable: ${result.code}`)
+      if (
+        !sameImageArtifact(result.artifact, artifact) ||
+        result.contentLength !== end - start ||
+        (ranged &&
+          (result.status !== 206 ||
+            result.etag !== `"${artifact.sha256}"` ||
+            result.contentRange !== `bytes ${start}-${end - 1}/${artifact.size}`)) ||
+        (!ranged && result.status !== 200)
+      )
+        throw new Error('document resource identity mismatch')
+      if (
+        typeof result.base64 !== 'string' ||
+        result.base64.length !== 4 * Math.ceil(result.contentLength / 3)
+      )
+        throw new Error('document resource length mismatch')
+      const chunk = decodeBase64(result.base64)
+      if (chunk.byteLength !== result.contentLength) throw new Error('document resource length mismatch')
+      assembled.set(new Uint8Array(chunk), start)
+    }
+    const bytes = assembled.buffer
+    const needsUrl = kind === 'image' || kind === 'pdf'
+    const url = needsUrl ? this.createObjectUrl(bytes, artifact.mime) : undefined
     const content = needsUrl ? undefined : new TextDecoder().decode(bytes)
     let released = false
     return Object.freeze({
-      artifact: result.artifact,
-      kind: input.kind,
+      artifact,
+      kind,
       ...(content === undefined ? {} : { content }),
       ...(url === undefined ? {} : { url }),
       release: () => {
@@ -461,6 +523,7 @@ export class ClientResourceService extends Service {
   }
 
   private releaseAll(): void {
+    this.disposed = true
     for (const url of this.objectUrls) globalThis.URL.revokeObjectURL(url)
     this.objectUrls.clear()
   }

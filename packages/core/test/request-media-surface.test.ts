@@ -744,6 +744,57 @@ async function legacy(
 }
 
 describe('request media node window', () => {
+  it.each([
+    [2, 16, 2],
+    [8, 4, 2],
+    [8, 2, 1],
+  ])(
+    'bounds a multi-view result by image=%i and block=%i caps',
+    async (maxSelectedImages, maxSelectedBlocks, count) => {
+      const images = Array.from({ length: 7 }, (_, i) => png(8, 8, 400 + i))
+      const artifacts = artifactStore(images)
+      const first = images[0]
+      if (!first) throw new Error('Missing image fixture')
+      const surface = [
+        node(1, [ref(first)]),
+        node(
+          2,
+          images.slice(1).map((bytes) => ref(bytes)),
+        ),
+      ]
+      const reads: string[] = []
+      const prepared = await prepareRequestMediaFromSurface({
+        sessionKey: 'session-a',
+        lane: 'main',
+        signal: new AbortController().signal,
+        surface,
+        lookupToolCalls: toolCallLookup(ledgerEvents(surface)),
+        readArtifact: ({ sha256 }) => {
+          reads.push(sha256)
+          return artifacts.get(sha256)
+        },
+        surfaceLimits: wideSurfaceLimits,
+        mediaLimits: { ...wideMediaLimits, maxSelectedImages, maxSelectedBlocks },
+        mainModelInput: ['text', 'image'],
+        auxiliaryVisionAvailable: false,
+      })
+      expect(prepared.selected.map((image) => [image.nodeSeq, image.blockIndex])).toEqual(
+        Array.from({ length: count }, (_, i) => [1002, i]),
+      )
+      expect(reads).toEqual(images.slice(1, 1 + count).map((bytes) => sha256Hex(bytes)))
+      const restored = await restoreRequestMediaFromLedger({
+        sessionKey: 'session-a',
+        lane: 'main',
+        signal: new AbortController().signal,
+        header: prepared.header,
+        ledgerEvents: ledgerEvents(surface),
+        readArtifact: ({ sha256 }) => artifacts.get(sha256),
+        surfaceLimits: wideSurfaceLimits,
+        mediaLimits: { ...wideMediaLimits, maxSelectedImages, maxSelectedBlocks },
+      })
+      expect(restored.hashMaterial).toEqual(prepared.hashMaterial)
+    },
+  )
   it.each([20, 50, 100, 150])(
     'reads and looks up only the window over ten sliding steps with %i image nodes',
     async (count) => {

@@ -791,16 +791,26 @@ function Turn({
   const finalNode = members.find((node) => node.id === turn.finalAssistantId)
   const finalText = finalNode?.kind === 'assistant' ? finalNode.text : ''
   const finalThinking = finalNode?.kind === 'assistant' ? finalNode.thinking?.trim() : undefined
+  const latestImageId = others.findLast(
+    (node) => node.kind === 'artifact' && ['image/png', 'image/jpeg'].includes(node.ref.mime),
+  )?.id
   const processCount =
     others.filter(
       (node) =>
         node.id !== turn.finalAssistantId &&
+        node.id !== latestImageId &&
         !isEmptyStreamingAssistant(node) &&
         !(node.kind === 'approval' && node.state === 'pending'),
     ).length + (finalThinking ? 1 : 0)
   const ordered = [...others].sort((a, b) => {
     const rank = (node: UINode) =>
-      node.id === turn.finalAssistantId ? 2 : node.kind === 'approval' && node.state === 'pending' ? 1 : 0
+      node.id === turn.finalAssistantId
+        ? 3
+        : node.id === latestImageId
+          ? 2
+          : node.kind === 'approval' && node.state === 'pending'
+            ? 1
+            : 0
     return rank(a) - rank(b)
   })
   const settled = !processActive && Boolean(turn.finalAssistantId)
@@ -874,7 +884,7 @@ function Turn({
         )}
         <div className="turn-node-flow">
           {ordered.map((node) => {
-            const final = node.id === turn.finalAssistantId
+            const final = node.id === turn.finalAssistantId || node.id === latestImageId
             const attention = node.kind === 'approval' && node.state === 'pending'
             return (
               <div

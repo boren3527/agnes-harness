@@ -24,6 +24,10 @@ describe('PersistentCommandJournal', () => {
     try {
       const journal = new PersistentCommandJournal(tables.table('command_journal'), () => 10)
       const bound = commandBinding('followUp', identity().sessionId, 1, { content: ['same'] })
+      expect(await journal.begin(identity(), bound, true)).toEqual({ state: 'new' })
+      expect(
+        tables.table('command_journal').get<{ n: number }>('SELECT COUNT(*) AS n FROM command_journal')?.n,
+      ).toBe(0)
       const states = await Promise.all([journal.begin(identity(), bound), journal.begin(identity(), bound)])
       expect(states).toEqual([{ state: 'new' }, { state: 'uncertain' }])
     } finally {

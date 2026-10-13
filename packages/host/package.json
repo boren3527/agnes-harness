@@ -32,7 +32,11 @@
     "ipaddr.js": "2.5.0",
     "jiti": "2.7.0",
     "undici": "8.10.2",
-    "yaml": "2.9.0"
+    "yaml": "2.9.0",
+    "@alicloud/objectdet20191230": "2.0.10",
+    "@alicloud/openapi-client": "0.4.15",
+    "@alicloud/openplatform20191219": "2.0.0",
+    "@alicloud/tea-util": "1.4.11"
   },
   "devDependencies": {
     "@agnes/base": "workspace:*",

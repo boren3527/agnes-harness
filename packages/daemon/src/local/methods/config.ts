@@ -5,6 +5,7 @@ import {
   type ConfigSaveInput,
   type ConfigSnapshot,
   type ConfigTestInput,
+  type ImageGenerationSaveInput,
   rpcError,
 } from '@agnes/protocol'
 import type { CallContext, LocalEndpoint } from '../endpoint.js'
@@ -42,6 +43,18 @@ export function registerConfiguration(
   }
   endpoint.register('_agnes/v1/config.get', (_params, context) =>
     invoke(context, async (s) => status(await s.get())),
+  )
+  endpoint.register('_agnes/v1/config.imageGeneration.get', (_params, context) =>
+    invoke(context, (s) => {
+      if (!s.imageGeneration) throw Object.assign(new Error('CONFIG_FAILED'), { code: 'CONFIG_FAILED' })
+      return s.imageGeneration.get()
+    }),
+  )
+  endpoint.register('_agnes/v1/config.imageGeneration.save', (params, context) =>
+    invoke(context, (s) => {
+      if (!s.imageGeneration) throw Object.assign(new Error('CONFIG_FAILED'), { code: 'CONFIG_FAILED' })
+      return s.imageGeneration.save(params as ImageGenerationSaveInput)
+    }),
   )
   endpoint.register('_agnes/v1/config.providers', (_params, context) => invoke(context, (s) => s.providers()))
   endpoint.register('_agnes/v1/config.test', (params, context) =>

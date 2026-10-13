@@ -89,6 +89,7 @@ describe('methods (I1 set)', () => {
       '_agnes/v1/clientModules.callService',
       '_agnes/v1/clientModules.list',
       '_agnes/v1/clientModules.read',
+      '_agnes/v1/clientModules.resolveMedia',
       '_agnes/v1/computerUse.doctor',
       '_agnes/v1/computerUse.operation.cancel',
       '_agnes/v1/computerUse.operation.start',
@@ -98,11 +99,21 @@ describe('methods (I1 set)', () => {
       '_agnes/v1/computerUse.status',
       '_agnes/v1/config.account',
       '_agnes/v1/config.get',
+      '_agnes/v1/config.imageGeneration.get',
+      '_agnes/v1/config.imageGeneration.save',
       '_agnes/v1/config.oauth',
       '_agnes/v1/config.providers',
       '_agnes/v1/config.save',
       '_agnes/v1/config.test',
       '_agnes/v1/daemon.notice',
+      '_agnes/v1/device.bindings.list',
+      '_agnes/v1/device.connection.get',
+      '_agnes/v1/device.connection.save',
+      '_agnes/v1/device.recognition.get',
+      '_agnes/v1/device.recognition.save',
+      '_agnes/v1/device.session.bind',
+      '_agnes/v1/device.session.detach',
+      '_agnes/v1/device.session.get',
       '_agnes/v1/diagnostics.collect',
       '_agnes/v1/diagnostics.events',
       '_agnes/v1/directory.upsert',
@@ -195,7 +206,7 @@ describe('methods (I1 set)', () => {
       'session/set_mode',
       'session/update',
     ])
-    expect(Object.keys(METHODS)).toHaveLength(116)
+    expect(Object.keys(METHODS)).toHaveLength(127)
     expect(METHODS['session/cancel']).toMatchObject({ kind: 'notification', direction: 'c2s' })
     expect(METHODS['session/request_permission']).toMatchObject({ kind: 'request', direction: 's2c' })
   })

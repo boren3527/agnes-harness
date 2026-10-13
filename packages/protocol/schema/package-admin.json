@@ -2117,6 +2117,64 @@
         }
       ]
     },
+    "ClientModuleMediaResolveParams": {
+      "description": "Private launcher-only lookup of an admitted device-session browser row's loopback media registration. Never a browser endpoint or caller-supplied port.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile", "rowId", "sessionId"],
+      "properties": {
+        "profile": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-z][a-z0-9.-]{0,63}$"
+        },
+        "rowId": { "type": "string", "minLength": 5, "maxLength": 256, "pattern": "^web:[^\\x00]{1,251}$" },
+        "sessionId": { "type": "string", "minLength": 1, "maxLength": 512 }
+      }
+    },
+    "ClientModuleMediaResolveResult": {
+      "description": "Private launcher response. Internal credentials must never be returned by browser service or HTTP routes. Continuity stamps are compared throughout playback.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["found"],
+          "properties": { "found": { "const": false } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "found",
+            "port",
+            "authorization",
+            "rowRevision",
+            "registrationId",
+            "workerGeneration",
+            "deviceId",
+            "bindingRevision",
+            "configRevision",
+            "rosterRevision"
+          ],
+          "properties": {
+            "found": { "const": true },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "authorization": { "type": "string", "pattern": "^Bearer [A-Za-z0-9_-]{43}$" },
+            "rowRevision": { "type": "string", "minLength": 1, "maxLength": 256 },
+            "registrationId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            },
+            "workerGeneration": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+            "deviceId": { "type": "string", "minLength": 1, "maxLength": 256 },
+            "bindingRevision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+            "configRevision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+            "rosterRevision": { "type": "string", "minLength": 1, "maxLength": 256 }
+          }
+        }
+      ]
+    },
     "ClientModuleServiceCallParams": {
       "description": "Private launcher-to-daemon request for one ready browser row's declared query service. Browser identity, extension identity and credentials are deliberately not parameters.",
       "type": "object",
@@ -2186,6 +2244,10 @@
           "minLength": 1,
           "maxLength": 128,
           "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+        },
+        "readbackOnly": {
+          "const": true,
+          "description": "Only verify the original AKA capture operation. Missing journal identity refuses dispatch; this flag grants no additional authority."
         },
         "input": {
           "type": "object",

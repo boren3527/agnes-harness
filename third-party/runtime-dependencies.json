@@ -45,6 +45,8 @@
       "purpose": "UI runtime for the web workbench, resource administration and in-page client module host; bundled into /vendor/* shared-singleton chunks.",
       "rationale": "Pinned to 18.3.1 per the web client modules design (WC5); a single split build keeps exactly one React copy on the page.",
       "consumers": [
+        "examples/packages/aka-robot-plugin",
+        "packages/mhs",
         "packages/resource-control-web",
         "packages/web",
         "packages/web-client",
@@ -96,6 +98,7 @@
       "purpose": "Runtime JSON-schema construction and static TypeScript schema inference.",
       "rationale": "Keeps runtime validation schemas and compile-time protocol types derived from one definition.",
       "consumers": [
+        "examples/packages/aka-robot-plugin",
         "packages/ai",
         "packages/base",
         "packages/cli",
@@ -103,6 +106,7 @@
         "packages/core",
         "packages/extension-api",
         "packages/host",
+        "packages/mhs",
         "packages/plugin-runtime",
         "packages/protocol",
         "packages/protocol-validation",
@@ -206,7 +210,13 @@
       "source": "https://github.com/websockets/ws",
       "purpose": "WebSocket client transport and authenticated daemon listener.",
       "rationale": "Supplies the Node WebSocket implementation needed where the browser-native API is unavailable.",
-      "consumers": ["packages/daemon", "packages/sdk"]
+      "consumers": [
+        "examples/packages/aka-robot-plugin",
+        "packages/daemon",
+        "packages/mhs",
+        "packages/sdk",
+        "packages/web-server"
+      ]
     },
     {
       "name": "yaml",
@@ -231,7 +241,52 @@
       "source": "https://github.com/ajv-validator/ajv",
       "purpose": "Compile Extension and MCP tool schemas at runtime and independently verify protocol conformance.",
       "rationale": "Reuse the established schema implementation; reject invalid or external references before callbacks run.",
-      "consumers": ["packages/base", "packages/host", "packages/protocol"]
+      "consumers": ["packages/base", "packages/host", "packages/mhs", "packages/protocol"]
+    },
+    {
+      "name": "three",
+      "version": "0.186.1",
+      "license": "MIT",
+      "source": "https://github.com/mrdoob/three.js",
+      "purpose": "Render the 3D demo world of Agnes MHS in the browser.",
+      "rationale": "The standard WebGL scene graph, with the loaders and post-processing the demo needs.",
+      "consumers": ["examples/mars-world"]
+    },
+    {
+      "name": "@alicloud/objectdet20191230",
+      "version": "2.0.10",
+      "license": "Apache-2.0",
+      "source": "https://github.com/aliyun/alibabacloud-typescript-sdk/tree/master/objectdet-20191230",
+      "purpose": "Official signed DetectObject calls; staged upload is separately admitted.",
+      "rationale": "Pins the compatible Tea-based official SDK family for separately gated upload and detection; does not mix openapi-core SDK model types.",
+      "consumers": ["examples/packages/aka-robot-plugin", "packages/host"]
+    },
+    {
+      "name": "@alicloud/openplatform20191219",
+      "version": "2.0.0",
+      "license": "Apache-2.0",
+      "source": "https://github.com/aliyun/alibabacloud-typescript-sdk/tree/master/openplatform-20191219",
+      "purpose": "Official short-lived file upload authorization for the objectdet product.",
+      "rationale": "Pins the compatible Tea-based official SDK family for separately gated upload and detection; does not mix openapi-core SDK model types.",
+      "consumers": ["examples/packages/aka-robot-plugin", "packages/host"]
+    },
+    {
+      "name": "@alicloud/openapi-client",
+      "version": "0.4.15",
+      "license": "ISC",
+      "source": "https://github.com/aliyun/darabonba-openapi",
+      "purpose": "Compatible official SDK configuration and signing implementation.",
+      "rationale": "Pins the compatible Tea-based official SDK family for separately gated upload and detection; does not mix openapi-core SDK model types.",
+      "consumers": ["examples/packages/aka-robot-plugin", "packages/host"]
+    },
+    {
+      "name": "@alicloud/tea-util",
+      "version": "1.4.11",
+      "license": "Apache-2.0",
+      "source": "https://github.com/aliyun/tea-util",
+      "purpose": "Compatible bounded runtime options with automatic SDK retries disabled.",
+      "rationale": "Pins the compatible Tea-based official SDK family for separately gated upload and detection; does not mix openapi-core SDK model types.",
+      "consumers": ["examples/packages/aka-robot-plugin", "packages/host"]
     }
   ]
 }

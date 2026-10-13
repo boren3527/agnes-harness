@@ -108,17 +108,23 @@ describe('packaged host wiring', () => {
       proposalId: 'fixture',
       state: 'prepared',
     })
+    const deviceRecognitionAuthorization = vi.fn()
+    const deviceRecognitionExecute = vi.fn(async () => undefined)
     await createPackagedHost(profile, prompter, {
       home,
       cwd: home,
       entryFile,
       skillResources,
       skillInstall,
+      deviceRecognitionAuthorization,
+      deviceRecognitionExecute,
     })
     expect(createHost).toHaveBeenCalledOnce()
     const options = createHost.mock.calls[0]?.[1]
     expect(options?.skillResources).toBe(skillResources)
     expect(options?.skillInstall).toBe(skillInstall)
+    expect(options?.deviceRecognitionAuthorization).toBe(deviceRecognitionAuthorization)
+    expect(options?.deviceRecognitionExecute).toBe(deviceRecognitionExecute)
   })
 
   it('assembles a packaged Host when no Skill runtime is present', async () => {

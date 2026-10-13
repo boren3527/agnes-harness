@@ -230,8 +230,9 @@ export class HostedSessions {
    * hibernated. A key this worker does not know is passed through, so the command reports it.
    */
   withSession<T>(sessionKey: string, method: string, fn: () => T | Promise<T>): Promise<T> {
-    if (!this.sessions.has(sessionKey) && !this.dormant(sessionKey)) return Promise.resolve().then(fn)
-    return this.enter(sessionKey, method, fn)
+    const scoped = () => this.options.channel.run(sessionKey, fn)
+    if (!this.sessions.has(sessionKey) && !this.dormant(sessionKey)) return Promise.resolve().then(scoped)
+    return this.enter(sessionKey, method, scoped)
   }
 
   /** Runs `fn` on the open session, waking it if needed and keeping it open until `fn` settles. */

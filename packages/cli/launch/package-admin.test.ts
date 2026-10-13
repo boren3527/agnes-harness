@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => {
   const treeList = vi.fn(async () => ({ desired: null }))
   const clientModuleCallService = vi.fn(async () => ({ output: { ok: true } }))
   const clientModuleCallEffect = vi.fn(async () => ({ output: { changed: true } }))
+  const clientModuleResolveMedia = vi.fn(async () => ({ found: false }))
   const surfaceMounts = vi.fn(async () => ({
     mounts: [
       {
@@ -41,6 +42,7 @@ const mocks = vi.hoisted(() => {
     treeList,
     clientModuleCallService,
     clientModuleCallEffect,
+    clientModuleResolveMedia,
     surfaceMounts,
   }
 })
@@ -70,6 +72,7 @@ vi.mock('@agnes/sdk', () => ({
     clientModules: {
       callService: mocks.clientModuleCallService,
       callEffect: mocks.clientModuleCallEffect,
+      resolveMedia: mocks.clientModuleResolveMedia,
     },
   })),
 }))
@@ -92,6 +95,17 @@ it('advertises exactly the frozen hot-update features and forwards catalog reads
   } as LocalBackend
 
   const admin = localPackageAdmin(backend, backend.web?.origin ?? '')
+  await expect(
+    admin.resolveDeviceMedia(
+      { rowId: 'web:robot', sessionId: 'session', ticket: 'one-use-test-ticket' },
+      new AbortController().signal,
+    ),
+  ).resolves.toBeNull()
+  expect(mocks.clientModuleResolveMedia).toHaveBeenCalledWith({
+    profile: 'local-dev',
+    rowId: 'web:robot',
+    sessionId: 'session',
+  })
   const options = mocks.createAdminSurface.mock.calls[0]?.[0] as
     | {
         features: string[]
@@ -261,6 +275,7 @@ it('relays effect commands only through the separate same-origin route', async (
         sessionId: 'session-a',
         service: 'panel.write',
         commandId: 'effect-1',
+        readbackOnly: true,
         input: { value: 1, credential: 'drop-me' },
       }),
     })
@@ -271,6 +286,7 @@ it('relays effect commands only through the separate same-origin route', async (
       sessionId: 'session-a',
       service: 'panel.write',
       commandId: 'effect-1',
+      readbackOnly: true,
       input: { value: 1 },
     })
     await admin.close()

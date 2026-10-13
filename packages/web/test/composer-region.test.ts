@@ -9,7 +9,6 @@ import { mountRenderedIndex, resetWebDom } from './web-dom-fixture.js'
 
 const imagePngData =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
-const imagePngBytes = Uint8Array.from(atob(imagePngData), (character) => character.charCodeAt(0))
 
 const usage: UsageView = {
   totals: { input: 12, output: 8, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
@@ -109,17 +108,7 @@ describe('rendered composer region', () => {
     })
     Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
     runtime = await mountRenderedIndex()
-    const prompt = document.querySelector<HTMLTextAreaElement>('#prompt')
-    if (!prompt) throw new Error('composer input is missing')
-    const pasted = new Event('paste', { bubbles: true, cancelable: true })
-    Object.defineProperty(pasted, 'clipboardData', {
-      value: {
-        files: [new File([imagePngBytes], 'one.png', { type: 'image/png' })],
-        items: [],
-        getData: () => '',
-      },
-    })
-    prompt.dispatchEvent(pasted)
+    runtime.composer?.restoreImageBlocks([{ type: 'image', data: imagePngData, mimeType: 'image/png' }])
     await vi.waitFor(() => expect(runtime?.composer?.getImageBlocks()).toHaveLength(1), slotRender)
 
     runtime.session.setSession('another-session')

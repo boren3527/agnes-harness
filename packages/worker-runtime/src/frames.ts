@@ -1,4 +1,7 @@
 import type {
+  DeviceConnectionResult,
+  DeviceRecognitionResult,
+  DeviceWorkspaceBinding,
   EventEnvelope,
   McpStatus,
   RpcError,
@@ -35,6 +38,8 @@ export type SessionMethod =
 
 /** Process-wide methods available before C2 runtime-target delivery exists. */
 export type WorkerMethod =
+  | 'deviceMedia.endpoint'
+  | 'deviceRecognition.authorize'
   | 'ping'
   | 'configuration.apply'
   | 'inspectService'
@@ -154,6 +159,10 @@ export type RequestFrame = {
     | 'permission'
     | 'notice'
     | 'artifact-media-read'
+    | 'device-session-read'
+    | 'device-recognition-budget'
+    | 'device-recognition-execute'
+    | 'device-capture-selection'
     | 'skill-install'
     | 'skill-install-abort'
     | 'plugin-manage'
@@ -203,6 +212,15 @@ export type CommandFrame = WorkerCommandFrame | SessionCommandFrame
 /** @deprecated Prefer WorkerReplyFrame or SessionReplyFrame at the wire boundary. */
 export type ReplyFrame = WorkerReplyFrame | SessionReplyFrame
 export type CloseFrame = { kind: 'close'; reason: string }
+export type DeviceBindingChangedFrame = { kind: 'device.binding.changed'; binding: DeviceWorkspaceBinding }
+export type DeviceConnectionChangedFrame = {
+  kind: 'device.connection.changed'
+  connection: DeviceConnectionResult
+}
+export type DeviceRecognitionChangedFrame = {
+  kind: 'device.recognition.changed'
+  recognition: DeviceRecognitionResult
+}
 export type WorkerToSupervisor =
   | WorkerHello
   | EventFrame
@@ -214,6 +232,9 @@ export type WorkerToSupervisor =
   | SessionReplyFrame
   | RequestFrame
 export type SupervisorToWorker =
+  | DeviceBindingChangedFrame
+  | DeviceConnectionChangedFrame
+  | DeviceRecognitionChangedFrame
   | RuntimeStaleFrame
   | WorkerCommandFrame
   | SessionOpenFrame

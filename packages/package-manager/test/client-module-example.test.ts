@@ -1,8 +1,10 @@
 import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { copyPackageTreeSync } from '../src/copy-tree.js'
 import {
   createPackageManager,
   emptyLock,
@@ -72,6 +74,30 @@ it('archives a client module bound to the package plugin row without an executab
 })
 
 afterEach(() => rmSync(root, { recursive: true, force: true }))
+
+it.each(['aka-robot-plugin', 'agh-blender', 'agh-ortho'])(
+  'previews the actual %s package through the installation inspector',
+  async (name) => {
+    const source = join(dirname(fileURLToPath(import.meta.url)), '../../../examples/packages', name)
+    copyPackageTreeSync(
+      source,
+      join(root, name),
+      (path) => !['node_modules', '.git'].includes(basename(path)),
+    )
+    const manager = createPackageManager({ dataDir: root, cwd: root, agnesVersion: '0.1.0' })
+    const preview = await manager.inspect(profile, parseSource(`file:./${name}`))
+    expect(preview.blockers).toEqual([])
+    if (name !== 'agh-ortho')
+      expect(preview.contributions).toContainEqual(expect.objectContaining({ kind: 'client' }))
+    if (name === 'aka-robot-plugin') {
+      // Match the installed location: no workspace node_modules or TypeScript resolver.
+      const load = createRequire(join(root, name, 'package.json'))
+      const manifest = load('./package.json') as { exports: string }
+      const module = load(manifest.exports) as { runtime: { apply: unknown } }
+      expect(typeof module.runtime.apply).toBe('function')
+    }
+  },
+)
 
 it.each([
   ['v1', 'Agnes client module demo · v1'],

@@ -3,16 +3,40 @@ import type { Logger, ServiceContext } from '@agnes/extension-api'
 import { type Decision, inspectJsonData, validateAgainst } from '@agnes/protocol'
 import { Action, Decision as DecisionSchema, Target } from '@agnes/protocol/gen/authz'
 import { createNetFetch } from '../adapters/net.js'
+import { deviceCaptureArtifactsPort } from './device-capture-artifacts-port.js'
+import {
+  type DeviceRecognitionAuthorizationRegistrar,
+  recognitionIOAuthorization,
+} from './device-recognition-authorization.js'
+import {
+  type DeviceRecognitionBudgetBridge,
+  deviceRecognitionBudgetPort,
+} from './device-recognition-budget-port.js'
+import { deviceRecognitionPort } from './device-recognition-port.js'
+import { deviceSessionPort } from './device-session-port.js'
 import { frozenJson } from './frozen-json.js'
+import { pluginRowSource } from './row-extension-host.js'
 import type { ServiceInvocationDeps } from './service-invocation.js'
 
 /** Queries cannot open a side-effect path around the deferred durable effect executor. */
 export function serviceContext(deps: {
   seams: SeamImplementations
   networkAllow: readonly string[]
+  recognitionNetworkAllow?: readonly string[]
   log: Logger
+  deviceSession?: (
+    sessionKey: string,
+    signal: AbortSignal,
+    view?: 'connection' | 'recognition',
+  ) => Promise<unknown>
+  deviceRecognitionBudget?: DeviceRecognitionBudgetBridge
+  deviceRecognitionAuthorization?: DeviceRecognitionAuthorizationRegistrar
+  deviceRecognitionExecute?: import('../assembly-deps.js').AssembleDeps['deviceRecognitionExecute']
+  deviceCaptureSelection?: import('../assembly-deps.js').AssembleDeps['deviceCaptureSelection']
+  deviceSessionRetain?: import('./device-session-port.js').DeviceSessionRetainer
+  capturePublisher?: import('./device-capture-publisher.js').DeviceCapturePublisher
 }): ServiceInvocationDeps['context'] {
-  return (entry, identity, alive, workspace) => {
+  return (entry, identity, alive, workspace, admission, authorization) => {
     const refuse = (): never => {
       throw new Error('service operation unavailable')
     }
@@ -27,9 +51,105 @@ export function serviceContext(deps: {
       if (entry.manifest.capabilities.artifacts !== true) refuse()
       return deps.seams.artifacts
     }
+    const device =
+      identity.session && deps.deviceSession
+        ? deviceSessionPort(
+            identity.session.key,
+            deps.deviceSession,
+            identity.signal,
+            alive,
+            deps.deviceSessionRetain
+              ? { retain: deps.deviceSessionRetain, lifetime: entry.signal }
+              : undefined,
+          )
+        : undefined
+    if (authorization && identity.session && admission?.callId && deps.deviceRecognitionAuthorization) {
+      deps.deviceRecognitionAuthorization(
+        identity.session.key,
+        admission.callId,
+        recognitionIOAuthorization(authorization, entry, deps.recognitionNetworkAllow ?? [], alive),
+      )
+    }
+    const recognitionBudget =
+      device &&
+      identity.session &&
+      deps.deviceRecognitionBudget &&
+      entry.capability.kind === 'effect' &&
+      entry.owner === pluginRowSource('ext:agnes-examples/aka-robot') &&
+      [
+        'aka.recognition.round.read',
+        'aka.recognition.round.start',
+        'aka.recognition.test',
+        'aka.recognition.enable',
+      ].includes(entry.capability.name) &&
+      admission?.callId &&
+      /^[a-f0-9]{32}$/.test(admission.callId)
+        ? deviceRecognitionBudgetPort(
+            identity.session.key,
+            admission.callId,
+            entry.capability.name,
+            deps.deviceRecognitionBudget,
+            device,
+            identity.signal,
+            alive,
+          )
+        : undefined
+    const recognition =
+      device?.retainRecognition &&
+      identity.session &&
+      deps.deviceRecognitionExecute &&
+      authorization &&
+      entry.owner === pluginRowSource('ext:agnes-examples/aka-robot') &&
+      entry.capability.kind === 'effect' &&
+      ['aka.recognition.test', 'aka.recognition.enable'].includes(entry.capability.name) &&
+      admission?.callId &&
+      /^[a-f0-9]{32}$/.test(admission.callId) &&
+      !admission.recoverOnly
+        ? deviceRecognitionPort(
+            identity.session.key,
+            admission.callId,
+            deps.deviceRecognitionExecute,
+            device,
+            authorization,
+            identity.signal,
+            alive,
+          )
+        : undefined
+    const captureArtifacts =
+      device &&
+      identity.session &&
+      deps.deviceCaptureSelection &&
+      entry.capability.kind === 'effect' &&
+      ['aka.capture', 'aka.recognition.test'].includes(entry.capability.name) &&
+      (!admission?.recoverOnly || entry.capability.name === 'aka.capture') &&
+      entry.owner === pluginRowSource('ext:agnes-examples/aka-robot') &&
+      entry.manifest.capabilities.artifacts === true &&
+      admission?.callId &&
+      /^[a-f0-9]{32}$/.test(admission.callId)
+        ? deviceCaptureArtifactsPort({
+            sessionKey: identity.session.key,
+            callId: admission.callId,
+            ...(entry.capability.name === 'aka.recognition.test' ? { purpose: 'recognition' as const } : {}),
+            ...(admission.recoverOnly ? { recoverOnly: true as const } : {}),
+            bridge: deps.deviceCaptureSelection,
+            device,
+            actor: identity.actor,
+            seams: deps.seams,
+            signal: identity.signal,
+            alive,
+            ...(deps.capturePublisher ? { publish: deps.capturePublisher } : {}),
+          })
+        : undefined
     return Object.freeze({
       ...identity,
+      ...(recognitionBudget ? { recognitionBudget } : {}),
+      ...(recognition ? { recognition } : {}),
+      ...(captureArtifacts ? { captureArtifacts } : {}),
       actor: Object.freeze(identity.actor),
+      ...(identity.session
+        ? { session: Object.freeze({ key: identity.session.key, workspaceRoot: workspace.root }) }
+        : {}),
+      ...(device ? { device } : {}),
       cwd: workspace.root,
       // Facts at call time, probe live; services never get sandbox (spec 2026-09-15 §5.1).
       platform: platformView(deps.seams.platform),

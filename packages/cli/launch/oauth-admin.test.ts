@@ -43,6 +43,7 @@ vi.mock('@agnes/sdk', () => ({
 vi.mock('@agnes/resource-control-runtime', () => ({ createOAuthHttpHandler: mocks.createOAuthHttpHandler }))
 
 vi.mock('@agnes/host', () => ({ createCredentialStore: vi.fn(() => ({ putOAuth: vi.fn() })) }))
+vi.mock('@agnes/daemon', () => ({ readDaemonDiscovery: vi.fn() }))
 
 import { localOAuthAdmin } from './oauth-admin.js'
 

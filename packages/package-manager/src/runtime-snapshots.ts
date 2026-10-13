@@ -339,16 +339,22 @@ function verifyRecord(s: RuntimeSnapshotStore, record: SnapshotRecord, directory
   }
   if (!contained(root, actual) || actual === root || basename(actual) !== checkedRecord.snapshotId)
     integrityFailure('runtime-path-escape')
-  if (hashDirectory(actual, { exclude: [] }) !== checkedRecord.treeIntegrity)
-    integrityFailure('runtime-tree-mismatch')
   const source = parseSource(checkedRecord.source.ref)
   if (canonical(source) !== canonical(checkedRecord.source)) integrityFailure('runtime-source-mismatch')
-  verifyPackageDirectory(
-    checkedRecord.packageId,
-    recordEntry(checkedRecord),
-    actual,
-    contributionCeiling(checkedRecord),
-  )
+  try {
+    // Inspection verifies the complete tree itself; successful reads need one hash pass.
+    verifyPackageDirectory(
+      checkedRecord.packageId,
+      recordEntry(checkedRecord),
+      actual,
+      contributionCeiling(checkedRecord),
+    )
+  } catch (error) {
+    // Preserve the tree-integrity refusal even when changed metadata fails inspection first.
+    if (hashDirectory(actual, { exclude: [] }) !== checkedRecord.treeIntegrity)
+      integrityFailure('runtime-tree-mismatch')
+    throw error
+  }
   return freezeData({
     snapshotId: checkedRecord.snapshotId,
     profile: s.profile,
@@ -383,14 +389,19 @@ function recordEntry(record: SnapshotRecord): LockEntry {
     ...(record.releasedAt ? { releasedAt: record.releasedAt } : {}),
   } as LockEntry
 }
-function pinView(s: RuntimeSnapshotStore, state: RuntimeState, pin: PinRecord): RuntimePin {
+function pinView(
+  s: RuntimeSnapshotStore,
+  state: RuntimeState,
+  pin: PinRecord,
+  verified?: ReadonlyMap<string, RuntimeSnapshot>,
+): RuntimePin {
   const record = state.snapshots[pin.snapshotId]
   if (!record) integrityFailure('pin-snapshot-missing')
   return freezeData({
     pinId: pin.pinId,
     operationId: pin.operationId,
     purpose: pin.purpose,
-    snapshot: verifyRecord(s, record, snapshotDir(s, record.snapshotId)),
+    snapshot: verified?.get(record.snapshotId) ?? verifyRecord(s, record, snapshotDir(s, record.snapshotId)),
   })
 }
 function validateRequest(s: RuntimeSnapshotStore, request: RuntimeSnapshotPinRequest): string {
@@ -617,18 +628,23 @@ export function recoverRuntimeSnapshotStore(s: RuntimeSnapshotStore): void {
   clearJournal(s)
 }
 
-function assertKnownRuntimeDirectories(s: RuntimeSnapshotStore, state: RuntimeState): void {
+function assertKnownRuntimeDirectories(
+  s: RuntimeSnapshotStore,
+  state: RuntimeState,
+): ReadonlyMap<string, RuntimeSnapshot> {
+  const verified = new Map<string, RuntimeSnapshot>()
   const root = runtimeRoot(s)
   if (!present(root)) {
     if (Object.keys(state.snapshots).length) integrityFailure('runtime-root-missing')
-    return
+    return verified
   }
   if (lstatSync(root).isSymbolicLink()) integrityFailure('runtime-root-symlink')
   const allowed = new Set(Object.keys(state.snapshots))
   for (const entry of readdirSync(root))
     if (!allowed.has(entry)) integrityFailure('unknown-runtime-directory')
   for (const record of Object.values(state.snapshots))
-    verifyRecord(s, record, snapshotDir(s, record.snapshotId))
+    verified.set(record.snapshotId, verifyRecord(s, record, snapshotDir(s, record.snapshotId)))
+  return verified
 }
 
 export function pinRuntimeSnapshotStore(
@@ -760,8 +776,10 @@ export function runtimePinBlockers(s: RuntimeSnapshotStore, packageId: string): 
 
 export function listRuntimePinsStore(s: RuntimeSnapshotStore): RuntimePin[] {
   const state = readState(s)
-  assertKnownRuntimeDirectories(s, state)
-  return Object.values(state.pins).map((pin) => pinView(s, state, pin))
+  // A synchronous read already verifies every snapshot above; shared pins reuse that result.
+  // Nothing survives this call, so subsequent reads still reject changed installed bytes.
+  const verified = assertKnownRuntimeDirectories(s, state)
+  return Object.values(state.pins).map((pin) => pinView(s, state, pin, verified))
 }
 
 export function collectRuntimeSnapshotsStore(

@@ -69,6 +69,18 @@ export type {
   ConfigTestResult,
   Cursor,
   DaemonNotice,
+  DeviceBindingsListResult,
+  DeviceConnectionProfile,
+  DeviceConnectionResult,
+  DeviceConnectionSaveParams,
+  DeviceRecognitionResult,
+  DeviceRecognitionSaveParams,
+  DeviceSessionBinding,
+  DeviceSessionBindParams,
+  DeviceSessionDetachParams,
+  DeviceSessionGetParams,
+  DeviceSessionResult,
+  DeviceWorkspaceBinding,
   DiagnosticsCollectParams,
   DiagnosticsCollectResult,
   DiagnosticsEventsParams,
@@ -84,6 +96,8 @@ export type {
   ExtensionCallResult,
   ExtUiResponseParams,
   HarnessMeta,
+  ImageGenerationSaveInput,
+  ImageGenerationSettings,
   InitializeMeta,
   JobIdParams,
   JobIdResult,
@@ -198,6 +212,8 @@ export type {
 export type {
   ClientModuleEffectCallParams,
   ClientModuleListResult,
+  ClientModuleMediaResolveParams,
+  ClientModuleMediaResolveResult,
   ClientModuleReadParams,
   ClientModuleReadResult,
   ClientModuleRosterRow,
@@ -426,6 +442,13 @@ export * from './codec/permission.js'
 export * from './codec/stop-reason.js'
 export * from './configs.js'
 export * from './constants.js'
+export {
+  type DeviceCaptureRecord,
+  type DeviceCaptureSelection,
+  readDeviceCaptureEvent,
+  readDeviceCaptureRecord,
+  readDeviceCaptureSelection,
+} from './device-capture-event.js'
 export * from './errors.js'
 export * from './hooks.js'
 export { jcs } from './jcs.js'
@@ -456,10 +479,12 @@ export * from './slots.js'
 export * from './surfaces.js'
 export type { ValidationError, ValidationResult } from './validate.js'
 export {
+  AttachmentValidationError,
   decodeAttachmentData,
   decodeSafeImages,
   isDateTime,
   modelImageInputError,
+  SafeImageError,
   toRpcError,
   USER_MESSAGE_ATTACHMENT_LIMITS,
   USER_MESSAGE_IMAGE_LIMITS,

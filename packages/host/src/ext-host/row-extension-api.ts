@@ -12,6 +12,7 @@ import {
   type ToolDef,
 } from '@agnes/extension-api'
 import { inspectJsonData, isHookEvent } from '@agnes/protocol'
+import { deviceSessionPort } from './device-session-port.js'
 import type { Lease } from './lease.js'
 import type { KernelPorts, RegMeta } from './ports.js'
 import { projectionReader } from './projection-reader.js'
@@ -24,6 +25,21 @@ export const OBSERVE_HOOK_EVENTS: readonly HookEvent[] = Object.freeze(
 const OBSERVE = new Set<string>(OBSERVE_HOOK_EVENTS)
 
 export type RowExtensionApiInput = {
+  imageGenerationConfiguration?: NonNullable<
+    NonNullable<import('@agnes/extension-api').ToolContext['imageGeneration']>['configuration']
+  >
+  imageGeneration?: (
+    input: Parameters<
+      NonNullable<import('@agnes/extension-api').ToolContext['imageGeneration']>['subject']
+    >[0],
+    signal: AbortSignal,
+  ) => ReturnType<NonNullable<import('@agnes/extension-api').ToolContext['imageGeneration']>['subject']>
+  deviceMedia?: PluginExtensionAPI['deviceMedia']
+  deviceSession?: (
+    sessionKey: string,
+    signal: AbortSignal,
+    view?: 'connection' | 'recognition',
+  ) => Promise<unknown>
   mcpManage?: (
     invocation: Pick<
       import('../resources/mcp-manage-port.js').McpManageInvocation,
@@ -117,7 +133,45 @@ export function buildRowExtensionAPI(input: RowExtensionApiInput): PluginExtensi
     signal,
   })
   const denied = (what: string) => () => refuse(`${what} is not open to plugin rows`)
+  const invokeHook = async <E extends HookEvent>(
+    event: E,
+    handler: HookHandler<E>,
+    payload: Parameters<HookHandler<E>>[0],
+    hctx: Parameters<HookHandler<E>>[1],
+    projections: import('@agnes/extension-api').ProjectionReader,
+  ) => {
+    if (event !== 'shutdown') alive()
+    const { device: _device, ...hookContext } = hctx
+    const lifetime = new AbortController()
+    const callSignal = AbortSignal.any([
+      hctx.signal,
+      ...(event === 'shutdown' ? [] : [signal]),
+      lifetime.signal,
+    ])
+    const assertLive = () => {
+      lease.assertInvocationAlive()
+      callSignal.throwIfAborted()
+    }
+    try {
+      return await handler(
+        payload,
+        Object.freeze({
+          ...hookContext,
+          ...(event !== 'shutdown' && input.deviceSession
+            ? { device: deviceSessionPort(hctx.session.key, input.deviceSession, callSignal, assertLive) }
+            : {}),
+          projections,
+          lease: lease.view(),
+          log,
+          signal: callSignal,
+        }),
+      )
+    } finally {
+      lifetime.abort()
+    }
+  }
   const api = {
+    ...(input.deviceMedia ? { deviceMedia: input.deviceMedia } : {}),
     ctx,
     registerTool(def: ToolDef) {
       registering()
@@ -151,14 +205,90 @@ export function buildRowExtensionAPI(input: RowExtensionApiInput): PluginExtensi
             alive()
             lease.consume()
             let finished = false
+            let imageRequested = false
+            const imageViews = new Set<string>()
+            let referenceDescription: string | undefined
+            let referenceViews = false
             const lifetime = new AbortController()
             const callSignal = AbortSignal.any([tctx.signal, signal, lifetime.signal])
             const skillInstall = input.skillInstall
+            const imageGeneration = input.imageGeneration
+            const imageGenerationConfiguration = input.imageGenerationConfiguration
             const mcpManage = input.mcpManage
             const pluginManage = input.pluginManage
+            const { device: _device, imageGeneration: _imageGeneration, ...toolContext } = tctx
             try {
               return await execute(args, {
-                ...tctx,
+                ...toolContext,
+                ...(imageGeneration &&
+                copy.meta.requiresApproval === 'always' &&
+                !copy.meta.isReadOnly &&
+                !copy.classify
+                  ? {
+                      imageGeneration: Object.freeze({
+                        ...(imageGenerationConfiguration
+                          ? {
+                              configuration: async () => {
+                                lease.assertInvocationAlive()
+                                if (finished || callSignal.aborted)
+                                  throw new Error('Image generation invocation expired')
+                                const result = await imageGenerationConfiguration()
+                                lease.assertInvocationAlive()
+                                if (finished || callSignal.aborted)
+                                  throw new Error('Image generation invocation expired')
+                                return {
+                                  revision: result.revision,
+                                  model: result.model,
+                                  size: result.size,
+                                  enabled: result.enabled,
+                                }
+                              },
+                            }
+                          : {}),
+                        subject: async (
+                          request: Parameters<NonNullable<typeof tctx.imageGeneration>['subject']>[0],
+                        ) => {
+                          const assertLive = () => {
+                            lease.assertInvocationAlive()
+                            if (finished || callSignal.aborted)
+                              throw new Error('Image generation invocation expired')
+                          }
+                          assertLive()
+                          const referenceView =
+                            request.view && ['front', 'right', 'back', 'left'].includes(request.view)
+                          if (
+                            imageRequested &&
+                            (!referenceViews ||
+                              !referenceView ||
+                              request.description !== referenceDescription ||
+                              imageViews.has(request.view ?? '') ||
+                              imageViews.size >= 4)
+                          )
+                            throw new Error('Only one image generation request per tool invocation')
+                          if (!imageRequested) {
+                            referenceViews =
+                              Boolean(referenceView) &&
+                              typeof request.description === 'string' &&
+                              request.description.trim().length >= 20
+                            referenceDescription = request.description
+                          }
+                          imageRequested = true
+                          if (request.view) imageViews.add(request.view)
+                          const result = await imageGeneration(request, callSignal)
+                          assertLive()
+                          return result
+                        },
+                      }),
+                    }
+                  : {}),
+                ...(input.deviceSession
+                  ? {
+                      device: deviceSessionPort(tctx.session.key, input.deviceSession, callSignal, () => {
+                        lease.assertInvocationAlive()
+                        if (finished || callSignal.aborted) throw new Error('Device invocation expired')
+                      }),
+                    }
+                  : {}),
                 projections,
                 ...(mcpManage
                   ? {
@@ -255,18 +385,8 @@ export function buildRowExtensionAPI(input: RowExtensionApiInput): PluginExtensi
           payload: Parameters<HookHandler<E>>[0],
           hctx: Parameters<HookHandler<E>>[1],
         ) => {
-          if (event !== 'shutdown') alive()
           // Observe-only: whatever the handler returns is dropped, a throw is the kernel's to report.
-          await handler(
-            payload,
-            Object.freeze({
-              ...hctx,
-              projections,
-              lease: lease.view(),
-              log,
-              signal: event === 'shutdown' ? hctx.signal : AbortSignal.any([hctx.signal, signal]),
-            }),
-          )
+          await invokeHook(event, handler, payload, hctx, projections)
         }
         return ports.hooks.on(event, observed as unknown as HookHandler<E>, meta)
       })
@@ -292,17 +412,7 @@ export function buildRowExtensionAPI(input: RowExtensionApiInput): PluginExtensi
         // Unlike `on` above, the handler's real return value reaches the kernel: this is what lets a
         // transform/intercept-category event actually chain or short-circuit, not just observe.
         const wrapped = (payload: Parameters<HookHandler<E>>[0], hctx: Parameters<HookHandler<E>>[1]) => {
-          if (event !== 'shutdown') alive()
-          return handler(
-            payload,
-            Object.freeze({
-              ...hctx,
-              projections,
-              lease: lease.view(),
-              log,
-              signal: event === 'shutdown' ? hctx.signal : AbortSignal.any([hctx.signal, signal]),
-            }),
-          )
+          return invokeHook(event, handler, payload, hctx, projections)
         }
         return ports.hooks.on(event, wrapped as unknown as HookHandler<E>, meta)
       })

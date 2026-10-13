@@ -1,0 +1,31 @@
+{
+  "client": {
+    "entry": "./bundle.js",
+    "styles": ["./index.css"],
+    "slots": ["workbench.device", "tool.call.toolview"],
+    "slotCatalogVersion": "dsh-client-slots/v1",
+    "services": [
+      "aka.status",
+      "aka.media.ticket",
+      "aka.probe",
+      "aka.connect",
+      "aka.disconnect",
+      "aka.camera.set",
+      "aka.control.action",
+      "aka.control.stop",
+      "aka.settings.read",
+      "aka.settings.save",
+      "aka.task.cancel",
+      "aka.geometry.read",
+      "aka.geometry.save",
+      "aka.geometry.estimate",
+      "aka.modeling.settings.read",
+      "aka.modeling.settings.save",
+      "aka.recognition.round.read",
+      "aka.recognition.round.start",
+      "aka.recognition.test",
+      "aka.capture"
+    ],
+    "projections": []
+  }
+}

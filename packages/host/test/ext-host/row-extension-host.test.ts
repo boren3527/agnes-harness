@@ -1,6 +1,8 @@
 import { Context, type Fiber } from '@agnes/cordis'
 import {
+  type DeviceSessionPort,
   EXTENSION_ID_PATTERN,
+  type HookContext,
   type PluginExtensionAPI,
   type SkillInstallPort,
   type ToolDef,
@@ -31,6 +33,7 @@ function fakeKernel() {
   const tools = new Map<string, string>()
   const definitions = new Map<string, ToolDef>()
   const hooks: { event: string; source: string; hookRank?: number }[] = []
+  const hookHandlers: { event: string; handler: (payload: unknown, ctx: HookContext) => unknown }[] = []
   const events: { type: string; source: string }[] = []
   const leak = new Set<string>()
   const ports = {
@@ -52,7 +55,10 @@ function fakeKernel() {
           ...(meta.hookRank === undefined ? {} : { hookRank: meta.hookRank }),
         }
         hooks.push(entry)
+        const invocation = { event, handler: _handler as (payload: unknown, ctx: HookContext) => unknown }
+        hookHandlers.push(invocation)
         return () => {
+          hookHandlers.splice(hookHandlers.indexOf(invocation), 1)
           const index = hooks.indexOf(entry)
           if (index >= 0) hooks.splice(index, 1)
         }
@@ -70,7 +76,7 @@ function fakeKernel() {
       ...hooks.filter((entry) => entry.source === source).map((entry) => `hook:${entry.event}`),
     ],
   } as unknown as KernelPorts
-  return { ports, tools, definitions, hooks, events, leak }
+  return { ports, tools, definitions, hooks, hookHandlers, events, leak }
 }
 
 function setup(
@@ -78,11 +84,17 @@ function setup(
   skillInstall?: SkillInstallBridge,
   mcpManage?: import('../../src/resources/mcp-manage-port.js').McpManageBridge,
   pluginManage?: import('../../src/resources/plugin-manage-port.js').PluginManageBridge,
+  deviceSession?: (key: string, signal: AbortSignal) => Promise<unknown>,
+  imageGeneration?: import('../../src/ext-host/row-extension-api.js').RowExtensionApiInput['imageGeneration'],
+  imageGenerationConfiguration?: import('../../src/ext-host/row-extension-api.js').RowExtensionApiInput['imageGenerationConfiguration'],
 ) {
   const kernel = fakeKernel()
   const audit: { kind: string; detail: Record<string, unknown> }[] = []
   const order = createExtensionOrder()
   const host = createRowExtensionHost({
+    ...(deviceSession ? { deviceSession } : {}),
+    ...(imageGeneration ? { imageGeneration } : {}),
+    ...(imageGenerationConfiguration ? { imageGenerationConfiguration } : {}),
     ...(skillInstall ? { skillInstall } : {}),
     ...(mcpManage ? { mcpManage } : {}),
     ...(pluginManage ? { pluginManage } : {}),
@@ -142,6 +154,476 @@ function setup(
 }
 
 const tool = (name: string) => fixtureTool(name)
+
+describe('image generation invocation port', () => {
+  it.each([false, true])(
+    'allows parallel secondary views (front cached: %s) and refuses repeats or description changes',
+    async (frontCached) => {
+      let active = 0,
+        peak = 0,
+        release!: () => void
+      const ready = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      const bridge = vi.fn(async (request: { view?: string }) => {
+        if (request.view !== 'front') {
+          active++
+          peak = Math.max(peak, active)
+          if (active === 3) release()
+          await ready
+          active--
+        }
+        return {
+          bytes: new Uint8Array([1]),
+          mime: 'image/png' as const,
+          model: 'fixture',
+          width: 1,
+          height: 1,
+          background: 'model-alpha' as const,
+        }
+      })
+      const t = setup({}, undefined, undefined, undefined, undefined, bridge)
+      t.host.activate(t.activation)
+      const fiber = await t.mount('image', 'ext:acme/image', (_ctx, api) => {
+        const def = tool('image_views')
+        api.registerTool({
+          ...def,
+          meta: { ...def.meta, isReadOnly: false, requiresApproval: 'always', replay: 'never' },
+          async execute(_args, ctx) {
+            const port = ctx.imageGeneration
+            if (!port) throw new Error('Missing port')
+            const description = 'One black ceramic cup with a curved loop handle.'
+            if (!frontCached) await port.subject({ images: [], view: 'front', description })
+            await Promise.all(
+              (['right', 'back', 'left'] as const).map((view) =>
+                port.subject({ images: [], view, description }),
+              ),
+            )
+            await expect(port.subject({ images: [], view: 'right', description })).rejects.toThrow('Only one')
+            await expect(
+              port.subject({
+                images: [],
+                view: 'left',
+                description: 'Changed subject description entirely.',
+              }),
+            ).rejects.toThrow('Only one')
+            return { content: [] }
+          },
+        })
+      })
+      try {
+        await t.kernel.definitions.get('image_views')!.execute({}, {
+          signal: new AbortController().signal,
+          session: { key: 'test' },
+          projections: {},
+        } as never)
+        expect(bridge).toHaveBeenCalledTimes(frontCached ? 3 : 4)
+        expect(peak).toBe(3)
+      } finally {
+        await fiber.dispose()
+      }
+    },
+  )
+  it('limits generation to one request in an approved mutating tool and expires escaped access', async () => {
+    const bridge = vi.fn(async () => ({
+      bytes: new Uint8Array([1]),
+      mime: 'image/png' as const,
+      model: 'fixture',
+      width: 1,
+      height: 1,
+      background: 'model-alpha' as const,
+    }))
+    const configuration = vi.fn(async () => ({
+      revision: 1,
+      model: 'qwen-image-2.1-pro',
+      size: '1K' as const,
+      enabled: true,
+      secret: 'must-not-be-forwarded',
+    }))
+    const t = setup({}, undefined, undefined, undefined, undefined, bridge, configuration)
+    t.host.activate(t.activation)
+    let escaped: import('@agnes/extension-api').ToolContext['imageGeneration']
+    const fiber = await t.mount('image', 'ext:acme/image', (_ctx, api) => {
+      const def = tool('image_subject')
+      api.registerTool({
+        ...def,
+        meta: {
+          ...def.meta,
+          isReadOnly: false,
+          isOpenWorld: true,
+          requiresApproval: 'always',
+          replay: 'never',
+        },
+        async execute(_args, ctx) {
+          escaped = ctx.imageGeneration
+          expect(Object.isFrozen(escaped)).toBe(true)
+          expect(await escaped?.configuration?.()).toEqual({
+            revision: 1,
+            model: 'qwen-image-2.1-pro',
+            size: '1K',
+            enabled: true,
+          })
+          await escaped!.subject({ images: [] })
+          await expect(escaped!.subject({ images: [] })).rejects.toThrow('Only one')
+          return { content: [] }
+        },
+      })
+      api.registerTool({
+        ...tool('image_read'),
+        async execute(_args, ctx) {
+          expect(ctx.imageGeneration).toBeUndefined()
+          return { content: [] }
+        },
+      })
+    })
+    const context = { signal: new AbortController().signal, session: { key: 'test' }, projections: {} }
+    try {
+      await t.kernel.definitions.get('image_subject')!.execute({}, context as never)
+      await t.kernel.definitions.get('image_read')!.execute({}, context as never)
+      expect(bridge).toHaveBeenCalledTimes(1)
+      await expect(escaped!.subject({ images: [] })).rejects.toThrow('expired')
+      await expect(escaped?.configuration?.()).rejects.toThrow('expired')
+      expect(configuration).toHaveBeenCalledTimes(1)
+    } finally {
+      await fiber.dispose()
+    }
+  })
+  it('does not return a generation completed after tool cancellation', async () => {
+    let resolve!: (
+      value: Awaited<
+        ReturnType<NonNullable<import('@agnes/extension-api').ToolContext['imageGeneration']>['subject']>
+      >,
+    ) => void
+    const bridge = vi.fn(
+      () =>
+        new Promise<Parameters<typeof resolve>[0]>((done) => {
+          resolve = done
+        }),
+    )
+    const t = setup({}, undefined, undefined, undefined, undefined, bridge)
+    t.host.activate(t.activation)
+    const fiber = await t.mount('image', 'ext:acme/image', (_ctx, api) => {
+      const def = tool('image_subject')
+      api.registerTool({
+        ...def,
+        meta: { ...def.meta, isReadOnly: false, requiresApproval: 'always', replay: 'never' },
+        async execute(_args, ctx) {
+          await ctx.imageGeneration!.subject({ images: [] })
+          return { content: [] }
+        },
+      })
+    })
+    const ac = new AbortController()
+    try {
+      const work = t.kernel.definitions
+        .get('image_subject')!
+        .execute({}, { signal: ac.signal, session: { key: 'test' }, projections: {} } as never)
+      const refusal = expect(work).rejects.toThrow('expired')
+      await vi.waitFor(() => expect(bridge).toHaveBeenCalledTimes(1))
+      ac.abort()
+      resolve({
+        bytes: new Uint8Array([1]),
+        mime: 'image/png',
+        model: 'fixture',
+        width: 1,
+        height: 1,
+        background: 'model-alpha',
+      })
+      await refusal
+    } finally {
+      await fiber.dispose()
+    }
+  })
+})
+
+describe('private plugin media endpoint registration', () => {
+  const endpoint = { port: 4192, authorization: `Bearer ${'a'.repeat(43)}` }
+  it('stamps row revision, hides dormant registrations and revokes on release/unload', async () => {
+    const t = setup()
+    let registration: ReturnType<NonNullable<PluginExtensionAPI['deviceMedia']>['register']> | undefined
+    const fiber = await t.mount('media-row', 'ext:acme/media', (_ctx, api) => {
+      registration = api.deviceMedia?.register(endpoint)
+    })
+    expect(registration?.rowRevision).toBe('snapshot-media-row')
+    expect(t.host.deviceMediaEndpoint('ext:acme/media')).toBeNull()
+    t.host.activate(t.activation)
+    const read = t.host.deviceMediaEndpoint('ext:acme/media')
+    expect(read).toMatchObject({
+      ...endpoint,
+      rowRevision: 'snapshot-media-row',
+      registrationId: registration?.registrationId,
+    })
+    expect(Object.isFrozen(read)).toBe(true)
+    await fiber.dispose()
+    expect(registration?.revoked.aborted).toBe(true)
+    expect(t.host.deviceMediaEndpoint('ext:acme/media')).toBeNull()
+  })
+  it('refuses duplicate endpoints and malformed data without exposing credentials', async () => {
+    const t = setup()
+    t.host.activate(t.activation)
+    let first: PluginExtensionAPI | undefined
+    let second: PluginExtensionAPI | undefined
+    const firstFiber = await t.mount('first', 'ext:acme/first', (_ctx, api) => {
+      first = api
+      api.deviceMedia?.register(endpoint)
+    })
+    const secondFiber = await t.mount('second', 'ext:acme/second', (_ctx, api) => {
+      second = api
+    })
+    expect(() => first?.deviceMedia?.register(endpoint)).toThrow('conflicting')
+    expect(() => second?.deviceMedia?.register(endpoint)).toThrow('conflicting')
+    for (const invalid of [
+      { ...endpoint, port: 0 },
+      { ...endpoint, host: '127.0.0.1' },
+      { ...endpoint, authorization: 'sensitive-invalid' },
+      { ...endpoint, port: 1.2 },
+    ]) {
+      expect(() => second?.deviceMedia?.register(invalid)).toThrow('invalid')
+    }
+    expect(JSON.stringify(t.audit)).not.toContain(endpoint.authorization)
+    await firstFiber.dispose()
+    await secondFiber.dispose()
+  })
+  it('keeps a replacement registration when an old release arrives', async () => {
+    const t = setup()
+    t.host.activate(t.activation)
+    let api: PluginExtensionAPI | undefined
+    const fiber = await t.mount('media', 'ext:acme/media', (_ctx, value) => {
+      api = value
+    })
+    const first = api?.deviceMedia?.register(endpoint)
+    first?.release()
+    expect(first?.revoked.aborted).toBe(true)
+    const next = api?.deviceMedia?.register({ ...endpoint, port: 4193 })
+    first?.release()
+    expect(t.host.deviceMediaEndpoint('ext:acme/media')?.registrationId).toBe(next?.registrationId)
+    expect(next?.revoked.aborted).toBe(false)
+    await fiber.dispose()
+    expect(() => api?.deviceMedia?.register(endpoint)).toThrow()
+  })
+  it('retires a previous same-row endpoint before a new owner is visible', async () => {
+    const t = setup()
+    t.host.activate(t.activation)
+    let previous: ReturnType<NonNullable<PluginExtensionAPI['deviceMedia']>['register']> | undefined
+    const first = await t.mount('old-media', 'ext:acme/media', (_ctx, api) => {
+      previous = api.deviceMedia?.register(endpoint)
+    })
+    const next = await t.mount('new-media', 'ext:acme/media', (_ctx, api) => {
+      api.deviceMedia?.register(endpoint)
+    })
+    expect(previous?.revoked.aborted).toBe(true)
+    expect(t.host.deviceMediaEndpoint('ext:acme/media')?.rowRevision).toBe('snapshot-new-media')
+    await first.dispose()
+    expect(t.host.deviceMediaEndpoint('ext:acme/media')?.rowRevision).toBe('snapshot-new-media')
+    await next.dispose()
+  })
+})
+
+describe('plugin device enrollment lookup', () => {
+  const required = <T>(value: T | undefined): T => {
+    if (value === undefined) throw new Error('missing test fixture value')
+    return value
+  }
+  const snapshot = (key: string) => ({
+    workspace: {
+      workspaceId: 'a'.repeat(64),
+      deviceId: '11111111-1111-4111-8111-111111111111',
+      revision: 1,
+      active: true,
+    },
+    session:
+      key === 'device-session'
+        ? {
+            sessionId: key,
+            workspaceId: 'a'.repeat(64),
+            deviceId: '11111111-1111-4111-8111-111111111111',
+            bindingRevision: 1,
+            active: true,
+          }
+        : null,
+  })
+  const context = (key = 'device-session'): HookContext => ({
+    session: { key, lane: 'main', workspaceRoot: '/workspace' },
+    signal: new AbortController().signal,
+    replayed: false,
+    projections: {} as HookContext['projections'],
+    lease: {} as HookContext['lease'],
+    platform,
+    log,
+  })
+
+  it('captures actual tool identity, leaves ordinary sessions empty and expires escaped lookup', async () => {
+    const bridge = vi.fn(async (key: string) => snapshot(key))
+    const t = setup({}, undefined, undefined, undefined, bridge)
+    t.host.activate(t.activation)
+    let escaped: Readonly<DeviceSessionPort> | undefined
+    const values: unknown[] = []
+    const fiber = await t.mount('device', 'ext:acme/device', (_ctx, agnes) => {
+      agnes.registerTool({
+        ...tool('device_observe'),
+        async execute(_args, ctx) {
+          escaped = ctx.device
+          expect(Object.isFrozen(escaped)).toBe(true)
+          ;(ctx.session as { key: string }).key = 'author-mutated'
+          const value = await required(escaped).binding()
+          if (value) expect(Object.isFrozen(value)).toBe(true)
+          values.push(value)
+          return { content: [] }
+        },
+      })
+    })
+    try {
+      const registered = required(t.kernel.definitions.get('device_observe'))
+      await registered.execute({}, context() as never)
+      await registered.execute({}, context('ordinary') as never)
+      expect(bridge.mock.calls.map(([key]) => key)).toEqual(['device-session', 'ordinary'])
+      expect(values).toEqual([snapshot('device-session').session, null])
+      await expect(required(escaped).binding()).rejects.toThrow('expired')
+      expect(bridge).toHaveBeenCalledTimes(2)
+    } finally {
+      await fiber.dispose()
+    }
+  })
+
+  it.each(['cancel', 'unload'] as const)('rejects a late tool lookup after %s', async (mode) => {
+    let settle!: (value: unknown) => void
+    const bridge = vi.fn(
+      (_key: string, _signal: AbortSignal) =>
+        new Promise<unknown>((resolve) => {
+          settle = resolve
+        }),
+    )
+    const t = setup({}, undefined, undefined, undefined, bridge)
+    t.host.activate(t.activation)
+    const fiber = await t.mount('device', 'ext:acme/device', (_ctx, agnes) => {
+      agnes.registerTool({
+        ...tool('device_observe'),
+        async execute(_args, ctx) {
+          await required(ctx.device).binding()
+          return { content: [] }
+        },
+      })
+    })
+    const ac = new AbortController()
+    const pending = t.kernel.definitions
+      .get('device_observe')!
+      .execute({}, { ...context(), signal: ac.signal } as never)
+    const refusal = expect(pending).rejects.toThrow(/expired|revoked/)
+    try {
+      await vi.waitFor(() => expect(bridge).toHaveBeenCalledTimes(1))
+      if (mode === 'cancel') ac.abort()
+      else await fiber.dispose()
+      expect(required(bridge.mock.calls[0])[1].aborted).toBe(true)
+      settle(snapshot('device-session'))
+      await refusal
+    } finally {
+      await fiber.dispose()
+    }
+  })
+
+  it.each(['context', 'compact'] as const)(
+    'bounds %s hook lookup and preserves hook semantics',
+    async (event) => {
+      const bridge = vi.fn(async (key: string) => snapshot(key))
+      const t = setup({}, undefined, undefined, undefined, bridge)
+      t.host.activate(t.activation)
+      let escaped: Readonly<DeviceSessionPort> | undefined
+      let hookSignal: AbortSignal | undefined
+      const handler = async (_payload: unknown, ctx: HookContext) => {
+        escaped = ctx.device
+        hookSignal = ctx.signal
+        const binding = await required(escaped).binding()
+        return { additionalContext: binding ? `device:${binding.deviceId}` : 'ordinary' }
+      }
+      const fiber = await t.mount('device', 'ext:acme/device', (_ctx, agnes) => {
+        if (event === 'context') agnes.registerHook('context', handler)
+        else agnes.on('compact', handler as never)
+      })
+      try {
+        const invoke = required(t.kernel.hookHandlers.find((entry) => entry.event === event)).handler
+        const result = await invoke({}, context())
+        expect(result).toEqual(
+          event === 'context'
+            ? {
+                additionalContext: `device:${required(snapshot('device-session').session ?? undefined).deviceId}`,
+              }
+            : undefined,
+        )
+        expect(required(hookSignal).aborted).toBe(true)
+        await expect(required(escaped).binding()).rejects.toBeDefined()
+        expect(bridge).toHaveBeenCalledTimes(1)
+        expect(await invoke({}, context('ordinary'))).toEqual(
+          event === 'context' ? { additionalContext: 'ordinary' } : undefined,
+        )
+        expect(bridge.mock.calls.map(([key]) => key)).toEqual(['device-session', 'ordinary'])
+      } finally {
+        await fiber.dispose()
+      }
+    },
+  )
+
+  it.each(['context', 'compact'] as const)(
+    'rejects a late %s hook lookup after cancellation',
+    async (event) => {
+      let settle!: (value: unknown) => void
+      const bridge = vi.fn(
+        (_key: string, _signal: AbortSignal) =>
+          new Promise<unknown>((resolve) => {
+            settle = resolve
+          }),
+      )
+      const t = setup({}, undefined, undefined, undefined, bridge)
+      t.host.activate(t.activation)
+      const handler = async (_payload: unknown, ctx: HookContext) => {
+        if (!ctx.device) throw new Error('missing device port')
+        await ctx.device.binding()
+        return {}
+      }
+      const fiber = await t.mount('device', 'ext:acme/device', (_ctx, agnes) => {
+        if (event === 'context') agnes.registerHook('context', handler)
+        else agnes.on('compact', handler as never)
+      })
+      const ac = new AbortController()
+      const invoke = t.kernel.hookHandlers.find((entry) => entry.event === event)?.handler
+      if (!invoke) throw new Error('missing hook')
+      const pending = Promise.resolve(invoke({}, { ...context(), signal: ac.signal }))
+      const refusal = expect(pending).rejects.toBeDefined()
+      try {
+        await vi.waitFor(() => expect(bridge).toHaveBeenCalledTimes(1))
+        ac.abort()
+        settle(snapshot('device-session'))
+        await refusal
+        expect(bridge.mock.calls[0]?.[1].aborted).toBe(true)
+      } finally {
+        await fiber.dispose()
+      }
+    },
+  )
+
+  it('does not provide device lookup during shutdown', async () => {
+    const bridge = vi.fn(async (key: string) => snapshot(key))
+    const t = setup({}, undefined, undefined, undefined, bridge)
+    t.host.activate(t.activation)
+    const fiber = await t.mount('device', 'ext:acme/device', (_ctx, agnes) => {
+      agnes.registerHook('shutdown', (_payload, ctx) => {
+        expect(ctx.device).toBeUndefined()
+      })
+    })
+    try {
+      const stalePort: DeviceSessionPort = {
+        binding: async () => {
+          throw new Error('inherited port used')
+        },
+      }
+      await t.kernel.hookHandlers
+        .find((entry) => entry.event === 'shutdown')!
+        .handler({}, { ...context(), device: stalePort })
+      expect(bridge).not.toHaveBeenCalled()
+    } finally {
+      await fiber.dispose()
+    }
+  })
+})
 
 describe('plugin Skill install request port', () => {
   it('stamps row identity and expires an escaped callback after tool completion', async () => {

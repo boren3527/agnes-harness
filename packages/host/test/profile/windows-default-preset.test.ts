@@ -1,3 +1,4 @@
+import { validateProfileManifest, validateResolvedProfile } from '@agnes/protocol'
 import { describe, expect, it } from 'vitest'
 import { resolveProfile } from '../../src/profile/resolve.js'
 import type { ProfileInputs, ResolveEnv } from '../../src/profile/types.js'
@@ -9,6 +10,48 @@ const env = (os: ResolveEnv['platform']['os']): ResolveEnv => ({
   homeDir: 'C:/agnes',
 })
 describe('Windows builtin default preset selection', () => {
+  it('keeps recognition destinations separate from the Windows session preset', async () => {
+    const recognitionNetworkAllow = [
+      'openplatform.aliyuncs.com',
+      'oss-cn-shanghai.aliyuncs.com',
+      'objectdet.cn-shanghai.aliyuncs.com',
+    ]
+    const user = { name: 'local-dev', policy: { recognitionNetworkAllow } }
+    const profile = await resolveProfile({ builtin: 'local-dev', user }, env('win32'))
+    expect(profile.presets.default).toBe('standard-windows')
+    expect(profile.policy.recognitionNetworkAllow).toEqual(recognitionNetworkAllow)
+    expect(validateProfileManifest(user).ok).toBe(true)
+    expect(validateResolvedProfile(profile).ok).toBe(true)
+    expect(
+      (await resolveProfile({ builtin: 'local-dev' }, env('win32'))).policy.recognitionNetworkAllow,
+    ).toBeUndefined()
+  })
+  it.each(
+    [
+      ['*'],
+      ['example.com'],
+      ['openplatform.aliyuncs.com', 'openplatform.aliyuncs.com'],
+      'openplatform.aliyuncs.com',
+    ].map((hosts) => ({ hosts })),
+  )('rejects invalid recognition destinations %j', async ({ hosts }) => {
+    const user = { name: 'local-dev', policy: { recognitionNetworkAllow: hosts } }
+    expect(validateProfileManifest(user).ok).toBe(false)
+    await expect(resolveProfile({ builtin: 'local-dev', user: user as never }, env('win32'))).rejects.toThrow(
+      'recognition network policy',
+    )
+  })
+  it('refuses a workspace adding recognition network permission', async () => {
+    await expect(
+      resolveProfile(
+        {
+          builtin: 'local-dev',
+          workspaceOverlay: { policy: { recognitionNetworkAllow: ['openplatform.aliyuncs.com'] } } as never,
+          lock: { packages: {}, workspace: { path: 'C:/repo', hash: 'hash', manifestId: 'fixture' } },
+        },
+        env('win32'),
+      ),
+    ).rejects.toThrow()
+  })
   it.each(['linux', 'darwin', 'win32'] as const)('selects the builtin default for %s', async (os) => {
     const profile = await resolveProfile({ builtin: 'local-dev' }, env(os))
     const expected = os === 'win32' ? 'standard-windows' : 'standard'

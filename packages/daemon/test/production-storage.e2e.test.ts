@@ -851,6 +851,7 @@ describe('production supervisor storage', () => {
 
   it('closes the supervisor before storage exactly once on normal or signal-driven shutdown', async () => {
     const events: string[] = []
+    const scans: unknown[] = []
     const store = { table: () => ({}) }
     const owners: string[] = []
     let storageOptions: unknown
@@ -863,6 +864,10 @@ describe('production supervisor storage', () => {
           storageOptions = o
           return {
             crashReclaim: reclaim,
+            async scan(key: string, query: unknown) {
+              scans.push({ key, query })
+              return [{ seq: 7 }]
+            },
             tables(id: string) {
               owners.push(id)
               return store
@@ -892,6 +897,14 @@ describe('production supervisor storage', () => {
     expect(received?.jobTables).toBeDefined()
     expect(received?.artifactAuthorityTable).toBeDefined()
     expect(received?.reclaim).toBeDefined()
+    const readCaptureEvent = received?.captureEventRead
+    if (!readCaptureEvent) throw new Error('missing readonly capture event lookup')
+    expect(await readCaptureEvent('fixed-session', 7, new AbortController().signal)).toEqual({ seq: 7 })
+    expect(scans).toEqual([{ key: 'fixed-session', query: { fromSeq: 7, toSeq: 7, limit: 1 } }])
+    const cancelled = new AbortController()
+    cancelled.abort()
+    await expect(readCaptureEvent('fixed-session', 7, cancelled.signal)).rejects.toThrow()
+    expect(scans).toHaveLength(1)
     expect(received?.tables).toBeUndefined()
     expect(received?.ports?.directory).toBe(directory)
     await Promise.all([supervisor.close(), supervisor.close()])

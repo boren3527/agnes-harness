@@ -74,6 +74,54 @@ function stubPlugin(ctx: Context, log: { loaded: string[]; disposed: string[] })
 }
 
 describe('client reconciler（WC10 前端状态机）', () => {
+  it.each(['ready', 'import-failed'] as const)(
+    'preloads JS and CSS in parallel, reclaiming styles on failure: %s',
+    async (outcome) => {
+      const h = await harness()
+      const log = { loaded: [] as string[], disposed: [] as string[] }
+      stubPlugin(h.ctx, log)
+      let finishImport!: () => void
+      let finishStyles!: () => void
+      const activate = vi.fn(),
+        dispose = vi.fn()
+      const importing = new Promise<void>((resolve) => {
+        finishImport = resolve
+      })
+      const styling = new Promise<void>((resolve) => {
+        finishStyles = resolve
+      })
+      const importer = vi.fn(async () => {
+        await importing
+        if (outcome === 'import-failed') throw new Error('fixture import rejected')
+        return { apply() {} }
+      })
+      const prepareStyles = vi.fn(async () => {
+        await styling
+        return { activate, dispose }
+      })
+      const reconciler = createReconciler({
+        ctx: h.ctx,
+        source: { list: async () => roster([styledMod('parallel', 'v1')]) },
+        importer,
+        prepareStyles,
+      })
+      const pending = reconciler.reconcileNow()
+      await vi.waitFor(() => {
+        expect(importer).toHaveBeenCalled()
+        expect(prepareStyles).toHaveBeenCalled()
+      })
+      expect(log.loaded).toEqual([])
+      finishImport()
+      finishStyles()
+      await pending
+      expect(reconciler.snapshot().get('parallel')?.phase).toBe(outcome === 'ready' ? 'active' : 'failed')
+      if (outcome === 'ready') expect(activate).toHaveBeenCalledOnce()
+      else {
+        expect(activate).not.toHaveBeenCalled()
+        expect(dispose).toHaveBeenCalledOnce()
+      }
+    },
+  )
   it('真实 clientModule 以低 priority 替换已迁移区域，撤销名册后不会被下一次对账复活', async () => {
     const ctx = new Context()
     await ctx.plugin(SlotRegistry)

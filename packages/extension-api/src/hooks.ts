@@ -130,6 +130,8 @@ export interface HookReturnMap {
 }
 
 export interface HookContext {
+  /** Fresh readonly enrollment for this invocation; unavailable during shutdown. */
+  readonly device?: Readonly<import('./common.js').DeviceSessionPort>
   readonly projections: ProjectionReader
   readonly session: SessionRef
   readonly replayed: boolean // replayOnResume 重发时 true；handler 必须幂等

@@ -1,11 +1,90 @@
-import type { Actor, JsonValue, ServiceCapability } from '@agnes/protocol'
+import type {
+  Actor,
+  DeviceCaptureRecord,
+  DeviceCaptureSelection,
+  JsonValue,
+  ServiceCapability,
+} from '@agnes/protocol'
 import { validateServiceCapability } from '@agnes/protocol'
-import type { Logger, PlatformView } from './common.js'
+import type { DeviceSessionPort, Logger, PlatformView, SessionRef } from './common.js'
 import type { ToolContext } from './tool.js'
 
 export type { ServiceCapability } from '@agnes/protocol'
 export type ServiceKind = ServiceCapability['kind']
+/** Service-only budget operation; Host fixes session and live call identity. No credential access. */
+export type DeviceRecognitionBudgetRequest = Readonly<
+  {
+    expectedBindingRevision: number
+    expectedConfigRevision: number
+  } & (
+    | { operation: 'read' }
+    | { operation: 'start'; expectedRoundRevision: number; startId: string }
+    | { operation: 'reserve'; expectedRoundRevision: number; attemptId: string }
+  )
+>
+export type DeviceRecognitionBudgetRound = Readonly<{
+  deviceId: string
+  roundRevision: number
+  budget: number
+  reserved: number
+}>
+export interface DeviceRecognitionBudgetPort {
+  request(
+    input: DeviceRecognitionBudgetRequest,
+  ): Promise<
+    DeviceRecognitionBudgetRound | Readonly<{ granted: boolean; round: DeviceRecognitionBudgetRound }> | null
+  >
+}
+/** Service-only single-image inference. Host fixes the call, provider, credentials and budget. */
+export interface DeviceRecognitionPort {
+  run(
+    expected: Readonly<{ bindingRevision: number; configRevision: number; roundRevision: number }>,
+    select: (
+      signal: AbortSignal,
+    ) => Promise<
+      Readonly<{ id: string; receivedAt: number; width: number; height: number; bytes: Uint8Array }>
+    >,
+    verifySelection?: () => Promise<void>,
+  ): Promise<
+    Readonly<{
+      id: string
+      deviceId: string
+      bindingRevision: number
+      configRevision: number
+      roundRevision: number
+      frameId: string
+      width: number
+      height: number
+      sha256: string
+      providerRequestId: string
+      elapsedMs: number
+      detections: readonly Readonly<{
+        label: string
+        confidence: number
+        box: readonly [number, number, number, number]
+      }>[]
+    }>
+  >
+}
+
 export interface ServiceContext {
+  /** Optional admitted AKA effect only; selecting/configuring does not automatically run inference. */
+  readonly recognition?: Readonly<DeviceRecognitionPort>
+  /** Supporting Hosts expose this only to admitted AKA capture/test effects, never arbitrary event append. */
+  readonly captureArtifacts?: Readonly<{
+    read(): Promise<DeviceCaptureRecord | null>
+    save(bytes: Uint8Array, selection: DeviceCaptureSelection): Promise<DeviceCaptureRecord>
+    recover(): Promise<DeviceCaptureRecord>
+    publish(): Promise<DeviceCaptureRecord>
+  }>
+  /** Only authorized recognition effect services on supporting hosts; absent for queries/tools. */
+  readonly recognitionBudget?: Readonly<DeviceRecognitionBudgetPort>
+  /** Fresh host-owned enrollment lookup for this invocation only; never physical control authority. */
+  readonly device?: Readonly<DeviceSessionPort>
+  /** Host-resolved session/workspace identity; absent for non-session embeddings and older hosts.
+   * This is data, never a substitute for authorization, and cannot be supplied in service input.
+   */
+  readonly session?: Readonly<Pick<SessionRef, 'key' | 'workspaceRoot'>>
   readonly actor: Actor
   readonly source: string
   readonly requestId: string

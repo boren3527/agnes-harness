@@ -1,4 +1,4 @@
-import { createReadStream } from 'node:fs'
+import { createReadStream, readFileSync } from 'node:fs'
 import { connect } from 'node:net'
 import { pathToFileURL } from 'node:url'
 import { createTestHost } from '@agnes/host/testkit'
@@ -29,6 +29,9 @@ void runWorker(
   {
     buildHost: async (profile) => {
       const packageDirectory = `${profile.dataDir}/service-package`
+      const declared = JSON.parse(readFileSync(`${packageDirectory}/package.json`, 'utf8')) as {
+        agnes: { plugins: { id: string; inject?: string[] }[] }
+      }
       const source: RuntimePluginSnapshot = {
         snapshot: {
           snapshotId: serviceSnapshotId,
@@ -75,6 +78,7 @@ void runWorker(
           rows: [
             createPluginRow({
               id: serviceRowId,
+              inject: declared.agnes.plugins.find((plugin) => plugin.id === serviceRowId)?.inject ?? [],
               plugin: `${servicePackageId}@${serviceSnapshotId}/main`,
               snapshotDigest: serviceSnapshotId,
               exportName: 'main',

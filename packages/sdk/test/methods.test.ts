@@ -20,6 +20,48 @@ function harness() {
     '_agnes/v1/session.setYolo': () => ({ effectiveFromSeq: 2 }),
     '_agnes/v1/session.list': () => ({ items: [] }),
     '_agnes/v1/workspace.list': () => ({ items: [] }),
+    '_agnes/v1/config.imageGeneration.get': () => ({
+      revision: 0,
+      enabled: false,
+      size: '1K',
+      model: 'agnes-image-2.5-flash',
+      endpoint: 'https://api.agnes-ai.cn/v1/images/generations',
+      credentialConfigured: false,
+    }),
+    '_agnes/v1/config.imageGeneration.save': () => ({
+      revision: 1,
+      enabled: true,
+      size: '2K',
+      model: 'agnes-image-2.5-flash',
+      endpoint: 'https://api.agnes-ai.cn/v1/images/generations',
+      credentialConfigured: true,
+    }),
+    '_agnes/v1/device.bindings.list': () => ({ items: [] }),
+    '_agnes/v1/device.recognition.save': () => ({
+      deviceId: '11111111-1111-4111-8111-111111111111',
+      bindingRevision: 1,
+      configRevision: 1,
+      settings: null,
+    }),
+    '_agnes/v1/device.recognition.get': () => ({
+      deviceId: '11111111-1111-4111-8111-111111111111',
+      bindingRevision: 1,
+      configRevision: 0,
+      settings: null,
+    }),
+    '_agnes/v1/device.connection.get': () => ({
+      deviceId: '11111111-1111-4111-8111-111111111111',
+      bindingRevision: 1,
+      profile: null,
+    }),
+    '_agnes/v1/device.connection.save': () => ({
+      deviceId: '11111111-1111-4111-8111-111111111111',
+      bindingRevision: 1,
+      profile: null,
+    }),
+    '_agnes/v1/device.session.get': () => ({ workspace: null, session: null }),
+    '_agnes/v1/device.session.bind': () => ({ workspace: null, session: null }),
+    '_agnes/v1/device.session.detach': () => ({ workspace: null, session: null }),
     '_agnes/v1/workspace.add': () => ({
       workspace: {
         path: '/canonical',
@@ -66,6 +108,25 @@ function harness() {
 
 describe('method surface: setPreset / setModel / session.list / session.fork', () => {
   const { f, c, s } = harness()
+
+  it('uses the independent image configuration contracts over the SDK transport', async () => {
+    expect(await c.config.imageGeneration.get()).toMatchObject({ revision: 0, credentialConfigured: false })
+    const input = {
+      expectedRevision: 0,
+      enabled: true,
+      size: '2K' as const,
+      apiKey: ['fixture', 'only', 'key'].join('-'),
+    }
+    expect(await c.config.imageGeneration.save(input)).toMatchObject({
+      revision: 1,
+      size: '2K',
+      credentialConfigured: true,
+    })
+    expect(
+      f.calls.findLast((call) => call.method === '_agnes/v1/config.imageGeneration.save')?.params,
+    ).toEqual(input)
+    expect(f.calls.filter((call) => call.method === '_agnes/v1/config.save')).toHaveLength(0)
+  })
 
   it.each([
     [
@@ -168,6 +229,54 @@ describe('method surface: setPreset / setModel / session.list / session.fork', (
       _meta: { 'ai.agnes.harness': { sessionKey: 'stable' } },
     })
     expect(f.calls.filter((call) => call.method === '_agnes/v1/workspace.add')).toHaveLength(1)
+    expect(await c.device.bindings()).toEqual({ items: [] })
+    expect(await c.device.session('stable')).toEqual({ workspace: null, session: null })
+    await c.device.bindSession('stable', 0)
+    expect(f.calls.findLast((call) => call.method === '_agnes/v1/device.session.bind')?.params).toEqual({
+      sessionId: 'stable',
+      expectedRevision: 0,
+    })
+    await c.device.detachSession('stable', 1)
+    expect(f.calls.findLast((call) => call.method === '_agnes/v1/device.session.detach')?.params).toEqual({
+      sessionId: 'stable',
+      expectedRevision: 1,
+    })
+    await c.device.bindSession('stable', 2, { replaceInactiveDevice: true })
+    expect(f.calls.findLast((call) => call.method === '_agnes/v1/device.session.bind')?.params).toEqual({
+      sessionId: 'stable',
+      expectedRevision: 2,
+      replaceInactiveDevice: true,
+    })
+    expect(await c.device.recognition('stable')).toMatchObject({ configRevision: 0, settings: null })
+    expect(f.calls.findLast((call) => call.method === '_agnes/v1/device.recognition.get')?.params).toEqual({
+      sessionId: 'stable',
+    })
+    const recognition = {
+      sessionId: 'stable',
+      expectedBindingRevision: 1,
+      expectedConfigRevision: 0,
+      settings: null,
+    }
+    expect(await c.device.saveRecognition(recognition)).toMatchObject({ configRevision: 1 })
+    expect(f.calls.findLast((call) => call.method === '_agnes/v1/device.recognition.save')?.params).toEqual(
+      recognition,
+    )
+    await c.device.connection('stable')
+    expect(f.calls.findLast((call) => call.method === '_agnes/v1/device.connection.get')?.params).toEqual({
+      sessionId: 'stable',
+    })
+    const connection = {
+      sessionId: 'stable',
+      expectedBindingRevision: 1,
+      expectedConfigRevision: 0,
+      ip: '192.168.1.42',
+      port: 80,
+      macAddress: '12:34:56:78:90:ab',
+    }
+    await c.device.saveConnection(connection)
+    expect(f.calls.findLast((call) => call.method === '_agnes/v1/device.connection.save')?.params).toEqual(
+      connection,
+    )
   })
 
   it('approval.decide returns the server sequence without accepting a caller-supplied Actor', async () => {

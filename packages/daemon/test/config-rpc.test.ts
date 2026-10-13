@@ -72,6 +72,47 @@ it('permits shared local configuration but denies nonlocal identities and absent
     await Promise.all([local.close(), remote.close(), missing.close()])
   }
 })
+it('gates image settings locally and redacts save failures without applying chat profiles', async () => {
+  const settings = {
+    revision: 1,
+    enabled: true,
+    size: '1K' as const,
+    model: 'agnes-image-2.5-flash' as const,
+    endpoint: 'https://api.agnes-ai.cn/v1/images/generations' as const,
+    credentialConfigured: true,
+  }
+  const imageGeneration = { get: vi.fn(async () => settings), save: vi.fn(async () => settings) }
+  const s = { ...service(), imageGeneration },
+    local = endpoint(true, s),
+    remote = endpoint(false, s)
+  const input = {
+    expectedRevision: 0,
+    enabled: true,
+    size: '1K',
+    apiKey: ['fixture', 'only', 'key'].join('-'),
+  }
+  try {
+    expect(await request(remote, '_agnes/v1/config.imageGeneration.save', input)).toMatchObject({
+      error: { message: 'CAPABILITY_DENIED' },
+    })
+    expect(imageGeneration.save).not.toHaveBeenCalled()
+    expect(await request(local, '_agnes/v1/config.imageGeneration.get')).toMatchObject({ result: settings })
+    expect(await request(local, '_agnes/v1/config.imageGeneration.save', input)).toMatchObject({
+      result: settings,
+    })
+    expect(s.save).not.toHaveBeenCalled()
+    imageGeneration.save.mockRejectedValue(new Error('fixture-only-key upstream body'))
+    const failure = await request(local, '_agnes/v1/config.imageGeneration.save', {
+      ...input,
+      expectedRevision: 1,
+    })
+    expect(failure).toMatchObject({ error: { data: { reason: 'CONFIG_FAILED' } } })
+    expect(JSON.stringify(failure)).not.toContain('fixture-only-key')
+  } finally {
+    await local.close()
+    await remote.close()
+  }
+})
 it('redacts provider errors and reports persisted-but-not-applied configuration honestly', async () => {
   const s = service(),
     ep = endpoint(true, s)

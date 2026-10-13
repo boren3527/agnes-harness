@@ -153,7 +153,7 @@ export async function runWebCommand(
     // `SURFACE_MOUNT_REFRESH_MS` (spec RC1) so a Surface instance `agnesd` hot-updates after this
     // process's boot is picked up within a bounded window instead of never -- see
     // packages/cli/launch/surface-mounts.ts.
-    mounts = await fetchSurfaceMountProxy(backend)
+    mounts = await fetchSurfaceMountProxy(backend, { waitForInitial: false })
     web = await makeServer({
       root: resources.webRoot,
       wsUrl: backend.web.url,
@@ -168,6 +168,7 @@ export async function runWebCommand(
       // from its immutable snapshots over the same private connection; the launcher never touches
       // the package store itself.
       clientModuleAsset: (pathname: string) => adminHandler.readClientModule(pathname),
+      deviceMedia: adminHandler.resolveDeviceMedia,
       // The daemon's roster invalidation is bridged to a separate same-origin SSE stream. This only
       // reloads browser modules; it never restarts the daemon/worker runtime.
       subscribePluginEvents: (listener) => adminHandler.subscribeClientModuleEvents(listener),

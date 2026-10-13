@@ -179,6 +179,23 @@ describe('count calibration', () => {
       },
     })
     const provider = withCount('unsupported')
+    provider.models = () => [
+      {
+        id: 'm',
+        route: 'default',
+        name: 'Image fixture',
+        api: 'openai-completions',
+        baseUrl: 'https://example.invalid',
+        reasoning: false,
+        input: ['text', 'image'],
+        contextWindow: 10000,
+        maxTokens: 1000,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        toolCallFormats: ['native'],
+        thinkingReplay: 'native',
+        contract_id: null,
+      },
+    ]
     const { session } = await openSession({ provider, preset: preset(4000), seams })
     session.d.imageInputTokenFallback = async ({ imageCount }) => ({ tokens: 9000, imageCount })
     await session.enqueue('next-turn', {

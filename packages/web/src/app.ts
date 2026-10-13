@@ -24,6 +24,10 @@ import {
   type Session,
 } from '@agnes/sdk/browser'
 import { bindDismissibleDialog } from '@agnes/web-admin-frame'
+import { createAntdRoot, NotificationHost, type Notifier, type NotifyInput } from '@agnes/web-ui'
+import { attachmentErrorNotice } from '@agnes/web-units'
+import { createElement } from 'react'
+import { flushSync } from 'react-dom'
 import { createPendingCoordinator } from './admin-pane-coordinator.js'
 import { bindAppearance, bindSkinGroup } from './appearance.js'
 import type { ApprovalAction } from './approval.js'
@@ -36,6 +40,7 @@ import { bindSlotCardContext } from './client-modules/timeline-slot.js'
 import type { ComposerView } from './composer.js'
 import { rememberWebComposer, selectionFromMemory } from './composer-memory.js'
 import { createComputerUsePaneController } from './computer-use-pane.js'
+import { isDirectDeviceCommand } from './device-command-policy.js'
 import { createDiagnosticsDialog } from './diagnostics-dialog.js'
 import {
   APPROVAL_SEARCH_PAGES,
@@ -100,10 +105,14 @@ const composerDraftKey = 'agnes-web-composer-draft'
 // Keep image submissions below the daemon's WebSocket frame cap, including their JSON-RPC envelope.
 const savedComposerDraft = sessionStorage.getItem(composerDraftKey)
 const notice = element('notice', 'p')
+// 首屏配置引导刻意留在 #notice 上：它和设置面板同时出现，是页面级说明，做成 6 秒消失的通知会把
+// 说明弄丢。这个 kind 只服务于它的退场判断，写入点和清空点靠它对齐（见 clearFirstRunNotice）。
+const FIRST_RUN_NOTICE_KIND = 'first-run-configure'
 const conversation = element('conversation-shell', 'div')
 const newSessionDialog = element('new-session', 'dialog')
 const newSessionForm = element('new-session-form', 'form')
 const newSessionCwd = element('new-session-cwd', 'input')
+const newSessionMode = element('new-session-mode', 'select')
 const newSessionCancel = button('new-session-cancel')
 const newSessionCreate = button('new-session-create')
 const workspacePick = button('workspace-pick')
@@ -128,6 +137,49 @@ const reconnect = createReconnectController({
   reload: () => location.reload(),
   onPhase: renderReconnect,
 })
+// 即时提示走屏幕右上角的通知浮层：会自己消失、能手动关掉，不像 #notice 那样一直挂在会话面板
+// 顶部等下一次操作顶掉。独立节点，不复用 region-slots 的 overlayHost。
+const notificationHost = document.createElement('div')
+notificationHost.dataset.agnesNotifications = 'true'
+document.body.append(notificationHost)
+const notificationRoot = createAntdRoot(notificationHost)
+let notifier: Notifier | undefined
+// flushSync：首帧同步提交，layout effect 里的 onReady 才会在同一帧把 notifier 交出来，
+// 否则挂载到首次渲染之间那段时间的提示只能落到下面的兜底路径上（假定时器的环境里那次渲染
+// 可能一直排不到）。
+flushSync(() =>
+  notificationRoot.render(
+    createElement(NotificationHost, {
+      onReady(ready: Notifier) {
+        notifier = ready
+      },
+    }),
+  ),
+)
+/**
+ * `#notice` 上是否挂着不该被顶掉的常驻内容：会话恢复块（带说明和两个重试按钮）或首屏配置引导
+ * （靠 data-kind 上的 first-run-configure 认自己）。两者都有自己的退场路径——`clearSessionRecovery`
+ * 与 `clearFirstRunNotice`——别的写入点一律让开：被顶掉就再也找不回来，而瞬时提示只是过时了。
+ * 判断集中在这里，是因为写入点有四处（notify 的兜底、run、submitComposer、savedConfiguration 的
+ * 退场），各写各的条件迟早会漏掉一处。
+ */
+function noticeHoldsPersistentContent(): boolean {
+  return sessionRecovery !== undefined || notice.dataset.kind === FIRST_RUN_NOTICE_KIND
+}
+/** 通知浮层就是 #notice 的迁移目标：常驻的恢复块与两条页面级提示仍留在 #notice 上。 */
+function notify(input: NotifyInput): void {
+  // 宿主还没就绪时退回 #notice，避免提示静默丢失。kind 必须跟着走：写死空值会让兜底路径里的
+  // 错误提示丢掉 [data-kind="error"] 的配色。
+  if (!notifier) {
+    // 兜底要往 #notice 上写，同样得给常驻内容让路；放弃这条提示，与 showError、closed、gap
+    // 三处分流同一取舍：那三处在有恢复块时都不走 notify。
+    if (noticeHoldsPersistentContent()) return
+    notice.textContent = input.text
+    notice.dataset.kind = input.kind ?? ''
+    return
+  }
+  notifier.notify(input)
+}
 function renderReconnect(phase: ReconnectPhase): void {
   reconnectNotice.hidden = phase === 'idle'
   if (phase === 'idle') {
@@ -203,7 +255,11 @@ const rosterSource: RosterSource = {
 const claimSlotCard: ClaimResolver = (entry, extId) =>
   entry.owner !== undefined && (moduleExtIds.get(entry.owner)?.includes(extId) ?? false)
 const computerUseStatus = createComputerUsePaneController(client)
-addEventListener('pagehide', () => computerUseStatus.dispose(), { once: true })
+// 与下面主 pagehide 同一取舍：进往返缓存不是关闭，恢复后这个面板还要用。这里也不能写 once——
+// 它按触发次数注销，persisted 那一次即使什么都不做，监听器照样会被摘掉。
+addEventListener('pagehide', (event) => {
+  if (!event.persisted) computerUseStatus.dispose()
+})
 const clientModules = await startClientModules({
   agnes: client,
   claim: claimSlotCard,
@@ -223,7 +279,7 @@ const clientModules = await startClientModules({
       throw new Error(t('app.plugin.serviceInvalid'))
     return (body as { output: unknown }).output
   },
-  clientEffectCaller: async (module, sessionId, service, commandId, input) => {
+  clientEffectCaller: async (module, sessionId, service, commandId, input, mode) => {
     const response = await fetch('/api/client-modules/effect', {
       method: 'POST',
       credentials: 'same-origin',
@@ -237,6 +293,7 @@ const clientModules = await startClientModules({
         service,
         commandId,
         input,
+        ...(mode?.readbackOnly ? { readbackOnly: true } : {}),
       }),
     })
     if (!response.ok) throw new Error(t('app.plugin.effectUnavailable'))
@@ -246,6 +303,7 @@ const clientModules = await startClientModules({
     return (body as { output: unknown }).output
   },
   authorizeCommand: ({ owner, command }) =>
+    isDirectDeviceCommand(owner, command) ||
     window.confirm(
       t('app.plugin.authorize', {
         owner,
@@ -256,10 +314,20 @@ const clientModules = await startClientModules({
       }),
     ),
   panelContainer: document.getElementById('main-content') ?? undefined,
+  deviceWorkbenchContainer: document.getElementById('device-workbench') ?? undefined,
+  deviceWorkbenchLayout: document.getElementById('session-workbench') ?? undefined,
+  onDeviceBindingChanged: () =>
+    run(async () => {
+      await refreshWorkspaces()
+      updateSidebar()
+    }),
   sidebarContainer: document.querySelector<HTMLElement>('aside.sidebar') ?? undefined,
   sidebar: {
     actions: {
       newSession: (workspace) => run(() => beginNewDraft(workspace === undefined, workspace)),
+      newDevice: () => {
+        if (workbenchReady && deviceBindingAvailable) run(() => beginNewDraft(true, undefined, 'device'))
+      },
       addWorkspace: () =>
         run(async () => {
           if (!draftingNew) await beginNewDraft()
@@ -369,7 +437,10 @@ const stopPluginHotReload = startPluginHotReload({
   reconciler: clientModules.reconciler,
   onError: (error) => console.warn('[client-modules] SSE 热替换失败', error),
 })
-addEventListener('pagehide', () => stopPluginHotReload(), { once: true })
+// 同上：热替换流只在真正离开页面时关闭。
+addEventListener('pagehide', (event) => {
+  if (!event.persisted) stopPluginHotReload()
+})
 let connected = false
 let configured = false
 let current: Session | undefined
@@ -446,6 +517,12 @@ let workspaceRows: WorkspaceEntry[] = []
 let sessionNext: string | undefined
 let selectedWorkspace: WorkspaceEntry | undefined
 let draftingNew = false
+let draftMode: 'chat' | 'device' = 'chat'
+let pendingDeviceWorkspace: string | undefined
+let deviceBindingAvailable = false
+let workbenchReady = false
+let workspaceDialogDevice = false
+let deviceWorkspaceIds = new Set<string>()
 let pendingSessionKey: string | undefined
 let liveApproval:
   | { request: PermissionRequest; afterSeq: number; finish(value: PermissionOutcome): void }
@@ -454,13 +531,18 @@ let liveApproval:
 function updateSidebar(): void {
   clientModules.sidebar?.update({
     sessions: sessionRows,
-    workspaces: workspaceRows,
+    workspaces: workspaceRows.map((row) =>
+      row.workspaceId && deviceWorkspaceIds.has(row.workspaceId)
+        ? { ...row, name: `${row.name}（设备）` }
+        : row,
+    ),
     labels: sessionLabels,
     locale: clientModules.locale.getSnapshot(),
     ...(current ? { currentId: current.id } : {}),
     ...(sessionNext ? { next: sessionNext } : {}),
-    sessionPending,
-    newDisabled: !connected || sending || sessionPending || newSessionCreating,
+    sessionPending: sessionPending || !workbenchReady,
+    newDisabled: !connected || !workbenchReady || sending || sessionPending || newSessionCreating,
+    newDeviceDisabled: !deviceBindingAvailable,
   })
 }
 
@@ -496,6 +578,10 @@ const sessionActions = createSessionActions({
 })
 let sessionRecovery: { id: string; message: string } | undefined
 function errorMessage(error: unknown): string {
+  // 附件与图片校验错误自带 code，先按词条本地化；其余错误沿用后台返回的文案。
+  // 这一步必须在 errorNotice 之前：它只看得见 error.data 里的 code/reason。
+  const attachment = attachmentErrorNotice(error)
+  if (attachment) return t(attachment.key, attachment.vars)
   // Provider values are redacted by settings before leaving that controller.
   const message = error instanceof Error ? error.message : t('app.error.fallback')
   const diagnostic =
@@ -519,19 +605,17 @@ function errorMessage(error: unknown): string {
 }
 function showError(error: unknown): void {
   const message = errorMessage(error)
+  // 恢复块带两个按钮，不能被会自己消失的通知顶掉；其余错误走通知浮层。
   if (sessionRecovery) {
     renderSessionRecovery(message)
     notice.dataset.kind = 'error'
-  } else {
-    notice.textContent = message
-    notice.dataset.kind = 'error'
-  }
+  } else notify({ text: message, kind: 'error' })
   if (newSessionDialog.open) element('new-session-error', 'p').textContent = message
 }
 function run(op: () => Promise<void>): void {
   element('new-session-error', 'p').textContent = ''
   if (sessionRecovery) renderSessionRecovery()
-  else {
+  else if (!noticeHoldsPersistentContent()) {
     notice.textContent = ''
     notice.dataset.kind = ''
   }
@@ -614,7 +698,7 @@ function renderControls(): void {
   // 切换会话加载期间的视觉态：旧画面降不透明度提示「正在准备」，新投影就绪后
   // 由 sessionPending = false 的那次 renderControls 平滑恢复。
   document.body.classList.toggle('session-switching', sessionPending)
-  const available = connected
+  const available = connected && workbenchReady
   const busy = projection ? webView(projection, undefined, t).busy : false
   const images = composerRuntime.getAttachmentBlocks()
   const hasInput = composerRuntime.getDraft().trim().length > 0 || images.length > 0
@@ -622,7 +706,7 @@ function renderControls(): void {
   const action = composerActionPresentation({ busy, loading: sessionPending, sending }, t)
   for (const control of notice.querySelectorAll<HTMLButtonElement>('[data-recovery-action]'))
     control.disabled = recoveryDisabled()
-  const canStartDraft = draftingNew && selectedWorkspace?.available === true
+  const canStartDraft = draftingNew && draftMode === 'chat' && selectedWorkspace?.available === true
   const permissionUnknown =
     current !== undefined && (permissionRefreshPending || sessionYoloEnabled === undefined)
   const selectedRecord = runtimeModels.find(
@@ -1112,8 +1196,7 @@ async function open(
     stopEvents = undefined
     live = undefined
     if (!stopped) {
-      notice.textContent = t('app.notice.oldSessionClosing')
-      notice.dataset.kind = 'warning'
+      notify({ text: t('app.notice.oldSessionClosing'), kind: 'warning' })
     }
     await previous?.detach()
     if (epoch !== selection) return
@@ -1301,19 +1384,28 @@ async function forkTurn(turn: UITurn): Promise<void> {
     throw new Error(t('app.fork.notIdle'))
   const forked = await client.session.fork(parent.id, turn.endSeq)
   await open(forked.id, { created: forked })
-  notice.textContent = t('app.fork.created')
-  notice.dataset.kind = ''
+  notify({ text: t('app.fork.created'), kind: 'info' })
   composerRuntime.focus()
 }
 function renderNewSessionControls(): void {
   newSessionCreate.disabled =
-    !connected || sessionPending || newSessionCreating || workspacePickerBusy || !newSessionCwd.value.trim()
+    !connected ||
+    !workbenchReady ||
+    sessionPending ||
+    newSessionCreating ||
+    workspacePickerBusy ||
+    !newSessionCwd.value.trim()
   setButtonLabel(
     newSessionCreate,
     newSessionCreating ? t('app.newSession.verifying') : t('app.newSession.useWorkspace'),
   )
   workspacePick.disabled =
-    !connected || sessionPending || newSessionCreating || workspacePickerBusy || !workspacePickerReady
+    !connected ||
+    !workbenchReady ||
+    sessionPending ||
+    newSessionCreating ||
+    workspacePickerBusy ||
+    !workspacePickerReady
   workspacePick.hidden = workspacePickerReady === false
   setButtonLabel(
     workspacePick,
@@ -1328,6 +1420,13 @@ function renderNewSessionControls(): void {
         : t('app.newSession.noPicker')
   if (workspacePickerReady === false) workspaceManual.open = true
   newSessionCwd.disabled = workspacePickerBusy
+  newSessionMode.disabled =
+    !connected ||
+    !workbenchReady ||
+    sessionPending ||
+    workspaceDialogDevice ||
+    workspacePickerBusy ||
+    newSessionCreating
   newSessionCancel.disabled = newSessionCreating || workspacePickerBusy
   for (const control of newSessionDialog.querySelectorAll<HTMLButtonElement>('[data-new-session-cancel]'))
     control.disabled = newSessionCreating || workspacePickerBusy
@@ -1335,6 +1434,7 @@ function renderNewSessionControls(): void {
 function openNewSessionDialog(): void {
   if (!connected || sessionPending || newSessionCreating) return
   if (!newSessionDialog.open) {
+    element('new-session-error', 'p').textContent = ''
     try {
       newSessionDialog.showModal()
     } catch {
@@ -1352,8 +1452,20 @@ function closeNewSessionDialog(): void {
     newSessionDialog.removeAttribute('open')
   }
 }
+function isDeviceWorkspace(workspace: WorkspaceEntry | undefined): boolean {
+  return workspace?.workspaceId !== undefined && deviceWorkspaceIds.has(workspace.workspaceId)
+}
 function updateWorkspaceOptions(): void {
   renderWorkspaceOptions(element('workspace-option-items', 'div'), workspaceRows, (workspace) => {
+    if (!workbenchReady || sessionPending || newSessionCreating) return
+    if (
+      newSessionMode.value === 'device' ||
+      (newSessionMode.value === 'auto' && isDeviceWorkspace(workspace))
+    ) {
+      newSessionCwd.value = workspace.path
+      run(() => registerWorkspace(workspace.path))
+      return
+    }
     selectedWorkspace = workspace
     closeNewSessionDialog()
     renderControls()
@@ -1361,22 +1473,41 @@ function updateWorkspaceOptions(): void {
   })
 }
 async function registerWorkspace(cwd: string): Promise<void> {
-  if (!connected || sessionPending || newSessionCreating) return
+  if (!connected || !workbenchReady || sessionPending || newSessionCreating) return
   if (!cwd) return
   newSessionCreating = true
   renderControls()
   try {
-    const result = await client.workspace.add(cwd)
+    const result = await client.workspace.add(cwd).catch((error) => {
+      throw new Error(workspaceErrorNotice(error, t), { cause: error })
+    })
     selectedWorkspace = result.workspace
     workspaceRows = [result.workspace, ...workspaceRows.filter((row) => row.path !== result.workspace.path)]
     updateWorkspaceOptions()
+    const deviceMode =
+      newSessionMode.value === 'device' ||
+      (newSessionMode.value === 'auto' && isDeviceWorkspace(result.workspace))
+    if (deviceMode) {
+      const workspace = result.workspace
+      if (pendingDeviceWorkspace && pendingDeviceWorkspace !== workspace.path)
+        pendingSessionKey = crypto.randomUUID()
+      pendingDeviceWorkspace = workspace.path
+      const key = pendingSessionKey ?? crypto.randomUUID()
+      pendingSessionKey = key
+      const initialModel = knownSessionModel
+      const created = await client.session.new({ cwd: workspace.path, sessionKey: key })
+      const association = await client.device.session(created.id)
+      await client.device.bindSession(created.id, association.workspace?.revision ?? 0)
+      await refreshWorkspaces()
+      await open(created.id, { created, workspace, ...(initialModel ? { initialModel } : {}) })
+      draftMode = 'chat'
+    }
     await list()
     closeNewSessionDialog()
     composerRuntime.focus()
   } catch (error) {
-    const failure = new Error(workspaceErrorNotice(error, t), { cause: error })
-    element('new-session-error', 'p').textContent = failure.message
-    throw failure
+    element('new-session-error', 'p').textContent = errorMessage(error)
+    throw error
   } finally {
     newSessionCreating = false
     renderControls()
@@ -1386,7 +1517,8 @@ async function chooseWorkspace(): Promise<void> {
   await registerWorkspace(newSessionCwd.value.trim())
 }
 async function pickWorkspace(): Promise<void> {
-  if (!workspacePickerReady || workspacePickerBusy || newSessionCreating) return
+  if (!connected || !workbenchReady || !workspacePickerReady || workspacePickerBusy || newSessionCreating)
+    return
   workspacePickerBusy = true
   renderNewSessionControls()
   try {
@@ -1410,7 +1542,11 @@ async function pickWorkspace(): Promise<void> {
     renderNewSessionControls()
   }
 }
-async function beginNewDraft(showWorkspacePicker = true, workspace?: WorkspaceEntry): Promise<void> {
+async function beginNewDraft(
+  showWorkspacePicker = true,
+  workspace?: WorkspaceEntry,
+  mode: 'chat' | 'device' = 'chat',
+): Promise<void> {
   if (sessionPending || sending) return
   if (workspace) selectedWorkspace = workspace
   clearSessionRecovery()
@@ -1423,6 +1559,10 @@ async function beginNewDraft(showWorkspacePicker = true, workspace?: WorkspaceEn
   clientModules.session.setSession(undefined)
   projection = undefined
   draftingNew = true
+  draftMode = mode
+  pendingDeviceWorkspace = undefined
+  workspaceDialogDevice = mode === 'device'
+  newSessionMode.value = workspaceDialogDevice ? 'device' : 'auto'
   draftModelSettingsEdited = false
   pendingSessionKey = crypto.randomUUID()
   knownSessionModel = inherited.model ? modelDefaults(inherited.model) : undefined
@@ -1443,7 +1583,12 @@ async function beginNewDraft(showWorkspacePicker = true, workspace?: WorkspaceEn
   history.replaceState(null, '', `${url.pathname}${url.search}`)
   topbarRuntime.setTaskTitle(t('app.newSession.defaultTitle'))
   render()
-  if (!selectedWorkspace?.available && showWorkspacePicker) openNewSessionDialog()
+  if (
+    mode === 'device' ||
+    isDeviceWorkspace(selectedWorkspace) ||
+    (!selectedWorkspace?.available && showWorkspacePicker)
+  )
+    openNewSessionDialog()
   else composerRuntime.focus()
   sessionPending = true
   renderControls()
@@ -1451,8 +1596,7 @@ async function beginNewDraft(showWorkspacePicker = true, workspace?: WorkspaceEn
   try {
     const stopped = await stopWithTimeout(stop)
     if (!stopped) {
-      notice.textContent = t('app.notice.oldSessionClosing')
-      notice.dataset.kind = 'warning'
+      notify({ text: t('app.notice.oldSessionClosing'), kind: 'warning' })
     }
   } catch (error) {
     cleanupError = error
@@ -1469,8 +1613,15 @@ async function beginNewDraft(showWorkspacePicker = true, workspace?: WorkspaceEn
   }
   if (cleanupError) throw cleanupError
 }
+let workspaceReadGeneration = 0
 async function refreshWorkspaces(): Promise<void> {
-  const page = await client.workspace.list()
+  const generation = ++workspaceReadGeneration
+  const deviceRead = client.device?.bindings().catch(() => undefined)
+  const [page, devices] = await Promise.all([client.workspace.list(), deviceRead])
+  if (generation !== workspaceReadGeneration) return
+  deviceBindingAvailable = devices !== undefined
+  if (devices)
+    deviceWorkspaceIds = new Set(devices.items.filter((row) => row.active).map((row) => row.workspaceId))
   workspaceRows = page.items
   if (selectedWorkspace) selectedWorkspace = workspaceRows.find((row) => row.path === selectedWorkspace?.path)
   updateWorkspaceOptions()
@@ -1512,8 +1663,7 @@ async function selectPermission(mode: PermissionMode): Promise<boolean> {
   if (!current && draftingNew) {
     permissionMode = mode
     rememberWebComposer({ permission: mode })
-    notice.textContent = t('app.permission.draftNotice', { mode: permissionLabel(mode) })
-    notice.dataset.kind = ''
+    notify({ text: t('app.permission.draftNotice', { mode: permissionLabel(mode) }), kind: 'info' })
     renderControls()
     return true
   }
@@ -1538,11 +1688,13 @@ async function selectPermission(mode: PermissionMode): Promise<boolean> {
     sessionYoloEnabled = requestedYolo
     permissionMode = mode
     rememberWebComposer({ permission: mode })
-    notice.textContent =
-      mode === 'full'
-        ? t('app.permission.notice.full')
-        : t('app.permission.notice.mode', { mode: permissionLabel(mode) })
-    notice.dataset.kind = ''
+    notify({
+      text:
+        mode === 'full'
+          ? t('app.permission.notice.full')
+          : t('app.permission.notice.mode', { mode: permissionLabel(mode) }),
+      kind: 'info',
+    })
     return true
   } catch (error) {
     if (current === session && selection === epoch && !sessionPending) showError(error)
@@ -1593,8 +1745,7 @@ async function selectModel(option: ModelPickerOption, settings?: ModelSettings):
     else if (!sameModel) draftModelSettingsEdited = false
     knownSessionModel = selected
     rememberWebComposer({ model: knownSessionModel })
-    notice.textContent = t('app.notice.newSessionModel')
-    notice.dataset.kind = ''
+    notify({ text: t('app.notice.newSessionModel'), kind: 'info' })
     renderControls()
     return true
   }
@@ -1615,8 +1766,7 @@ async function selectModel(option: ModelPickerOption, settings?: ModelSettings):
     knownSessionModel = selected
     rememberWebComposer({ model: knownSessionModel })
     initialModelPending = undefined
-    notice.textContent = t('app.notice.modelSaved')
-    notice.dataset.kind = ''
+    notify({ text: t('app.notice.modelSaved'), kind: 'info' })
     live?.refresh()
     return true
   } catch (error) {
@@ -1629,8 +1779,17 @@ async function selectModel(option: ModelPickerOption, settings?: ModelSettings):
     }
   }
 }
-async function savedConfiguration(saved: ConfigSnapshot): Promise<void> {
+/**
+ * 首屏配置引导的退场：保存设置走 `options.onSaved` 直接回调，不经过 `run(op)`，那里那次清空接不住它。
+ * 不能无条件清空——同一个元素还挂着会话恢复块和它的两个按钮，保存设置时可能正显示着恢复块。
+ */
+function clearFirstRunNotice(): void {
+  if (sessionRecovery || notice.dataset.kind !== FIRST_RUN_NOTICE_KIND) return
+  notice.textContent = ''
   notice.dataset.kind = ''
+}
+async function savedConfiguration(saved: ConfigSnapshot): Promise<void> {
+  clearFirstRunNotice()
   accountProvider = saved.provider
   accountLabels = new Map(
     (saved.accounts ?? []).map((row) => [row.route, `${row.label} · ${row.providerId}`]),
@@ -1641,28 +1800,44 @@ async function savedConfiguration(saved: ConfigSnapshot): Promise<void> {
       entry.route === (saved.provider?.route ?? saved.provider?.id) && entry.id === saved.provider?.model,
   )
   if (!saved.configured && !savedModels.length) {
-    notice.textContent = t('app.model.noAccounts')
+    notify({ text: t('app.model.noAccounts'), kind: 'info' })
     return
   }
   if (saved.effect === 'restart-required' || !published) {
-    notice.textContent = t('app.model.savedNotEffective')
+    notify({ text: t('app.model.savedNotEffective'), kind: 'info' })
     return
   }
-  notice.textContent = t('app.model.savedNotice')
+  notify({ text: t('app.model.savedNotice'), kind: 'info' })
 }
 newSessionForm.addEventListener('submit', (event) => {
   event.preventDefault()
   run(chooseWorkspace)
 })
 newSessionCwd.addEventListener('input', renderNewSessionControls)
+newSessionMode.addEventListener('change', () => {
+  if (newSessionMode.disabled) return
+  if (pendingDeviceWorkspace) {
+    pendingSessionKey = crypto.randomUUID()
+    pendingDeviceWorkspace = undefined
+  }
+  draftMode = newSessionMode.value === 'device' ? 'device' : 'chat'
+  renderControls()
+})
 workspacePick.addEventListener('click', () => run(pickWorkspace))
 bindDismissibleDialog({
   dialog: newSessionDialog,
   cancel: newSessionCancel,
   additional: newSessionDialog.querySelectorAll('[data-new-session-cancel]'),
   canClose: () => !newSessionCreating && !workspacePickerBusy,
-  close: closeNewSessionDialog,
-  restoreFocus: () => clientModules.sidebar?.focusNew(),
+  close: () => {
+    draftMode = 'chat'
+    closeNewSessionDialog()
+    renderControls()
+  },
+  restoreFocus: () => {
+    if (workspaceDialogDevice) clientModules.sidebar?.focusNewDevice?.()
+    else clientModules.sidebar?.focusNew()
+  },
 })
 addEventListener('focus', () => {
   if (connected)
@@ -1984,7 +2159,7 @@ function submitComposer(): void {
     permissionChangePending ||
     permissionRefreshPending ||
     (session && sessionYoloEnabled === undefined) ||
-    (!session && (!draftingNew || !selectedWorkspace?.available)) ||
+    (!session && (!draftingNew || draftMode !== 'chat' || !selectedWorkspace?.available)) ||
     !canSubmitComposer({ connected, hasSession: true, sending, stopping, loading: sessionPending })
   )
     return
@@ -2012,8 +2187,13 @@ function submitComposer(): void {
     showError(new Error(t('app.error.messageTooLarge')))
     return
   }
-  notice.textContent = ''
-  notice.dataset.kind = ''
+  // 留在 #notice 上的两条页面级提示不会自己退场，用户看完可能接着发消息，这里顺手退掉它们。
+  // 常驻内容另有退场路径，由 noticeHoldsPersistentContent 挡着——老实现是无条件清空，
+  // 恢复块显示时提交消息会连它的两个按钮一起抹掉。
+  if (!noticeHoldsPersistentContent()) {
+    notice.textContent = ''
+    notice.dataset.kind = ''
+  }
   const submission = ++submissionGeneration
   const connectionEpoch = permissionConnectionEpoch
   let ownedSelection = selection
@@ -2151,10 +2331,7 @@ client.on('closed', () => {
   // While the page recovers by itself, the notice only states the fact; the recovery status says what happens next.
   const message = intentionalClose ? t('app.connection.closedIntentional') : t('app.connection.lost')
   if (sessionRecovery) renderSessionRecovery(message)
-  else {
-    notice.textContent = message
-    notice.dataset.kind = 'error'
-  }
+  else notify({ text: message, kind: 'error' })
   if (!intentionalClose) reconnect.start()
 })
 /** Gap and generation notices name their session; another session's are not this view's concern. */
@@ -2164,7 +2341,7 @@ client.on('gap', (payload) => {
   if (!forCurrent(payload)) return
   const message = t('app.gap.partial')
   if (sessionRecovery) renderSessionRecovery(message)
-  else notice.textContent = message
+  else notify({ text: message })
   void live?.resync().catch(showError)
 })
 client.on('generationChanged', (payload) => {
@@ -2220,6 +2397,7 @@ async function refreshModelConfiguration(): Promise<void> {
   await refreshModels()
 }
 let modelRefreshPending = false
+// Saves, reconnects and visibility changes refresh immediately; background reads are only a fallback.
 const modelRefreshTimer = setInterval(() => {
   if (!connected || document.visibilityState !== 'visible' || modelRefreshPending) return
   modelRefreshPending = true
@@ -2228,12 +2406,19 @@ const modelRefreshTimer = setInterval(() => {
     .finally(() => {
       modelRefreshPending = false
     })
-}, 2000)
-window.addEventListener('pagehide', () => {
+}, 10_000)
+window.addEventListener('pagehide', (event) => {
+  // 进往返缓存（bfcache）不是关闭：页面会被原样恢复。这时卸载通知根，恢复出来的页面就再也
+  // 报不出任何提示；关掉连接也会让它变成一具尸体。只有真正离开页面才做这些清理。
+  if (event.persisted) return
   clearInterval(modelRefreshTimer)
   intentionalClose = true
   reconnect.cancel()
   titleRefresh.close()
+  // 通知浮层自己带着自动关闭计时器：页面已经在关，留着它只会让计时器空转。
+  notificationRoot.unmount()
+  // 根卸掉之后这个 api 就是死引用，留着它 notify() 会被静默丢弃、永远轮不到下面的兜底。
+  notifier = undefined
   void (stopEvents?.() ?? Promise.resolve()).finally(() => client.close())
 })
 
@@ -2261,18 +2446,21 @@ run(async () => {
   accountLabels = new Map(
     (snapshot.accounts ?? []).map((row) => [row.route, `${row.label} · ${row.providerId}`]),
   )
-  await refreshModels()
+  // These reads share the initialized client, but none depends on another read's result.
+  const [, , page] = await Promise.all([
+    refreshModels(),
+    refreshWorkspaces().catch((error) =>
+      showError(new Error(t('app.workspaceList.unreadable'), { cause: error })),
+    ),
+    list(),
+  ])
   if (!configured) {
     renderControls()
     notice.textContent = t('app.firstRun.configure')
+    // 退场由 savedConfiguration 开头的 clearFirstRunNotice 负责。
+    notice.dataset.kind = FIRST_RUN_NOTICE_KIND
     await settings.open()
   }
-  try {
-    await refreshWorkspaces()
-  } catch (error) {
-    showError(new Error(t('app.workspaceList.unreadable'), { cause: error }))
-  }
-  const page = await list()
   const selected = new URL(location.href).searchParams.get('session')
   if (selected) {
     const candidates = page.items.some((item) => item.sessionId === selected)
@@ -2281,6 +2469,9 @@ run(async () => {
     if (candidates.items.some((item) => item.sessionId === selected)) await open(selected)
     else {
       notice.textContent = t('app.session.notFound')
+      // 这条可能紧跟在首屏引导之后写入：不复位 kind，元素还带着 first-run-configure 标记，
+      // 用户随后保存设置时 clearFirstRunNotice 会把这条提示一并清掉。
+      notice.dataset.kind = ''
       renderControls()
     }
   } else {
@@ -2288,4 +2479,6 @@ run(async () => {
     if (first) await open(first.sessionId)
     else await beginNewDraft(configured)
   }
+  workbenchReady = true
+  renderControls()
 })

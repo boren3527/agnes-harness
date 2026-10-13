@@ -62,6 +62,8 @@ export type HostOptions = Omit<AssembleDeps, 'audit' | 'loader'> & {
 }
 
 export interface Host {
+  /** Private worker/daemon coordination, never an extension service or browser result. */
+  readonly deviceMediaEndpoint: Assembled['deviceMediaEndpoint']
   /** Privileged coordination port. It is not reachable from ExtensionAPI or any wire request. */
   readonly activationBarrier: ExtensionActivationBarrier
   /** Authenticated management port. It is not registered as a model tool or extension service. */
@@ -171,6 +173,7 @@ export async function createHost(profile: ResolvedProfile, opts: HostOptions): P
   let closed = false
   let closePromise: Promise<void> | undefined
   return {
+    deviceMediaEndpoint: a.deviceMediaEndpoint,
     activationBarrier: a.activationBarrier,
     approvalGrants: a.approvalGrants,
     callService: (params, credential, signal, effectAdmission) => {
@@ -180,13 +183,17 @@ export async function createHost(profile: ResolvedProfile, opts: HostOptions): P
       try {
         pending = a.publicationDispatch.workspace(() => {
           const prepared = a.prepareService(params)
+          const sessionKey = prepared.params.sessionId
           return {
-            port: workspaceRuntimes.invocation(prepared.params.sessionId),
+            port: workspaceRuntimes.invocation(sessionKey),
             handler: (view) => {
               entered = true
               const activation = a.activationBarrier.admit('service')
               return activation.run(() =>
-                a.callPreparedService(prepared, credential, view, signal, effectAdmission),
+                a.callPreparedService(prepared, credential, view, signal, effectAdmission, {
+                  key: sessionKey,
+                  workspaceRoot: view.root,
+                }),
               )
             },
           }

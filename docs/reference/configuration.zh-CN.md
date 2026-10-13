@@ -46,6 +46,8 @@ builtin 模板是基础，用户 profile 与 Host configuration overlay 合并�
 
 完整字段以[Profile Schema](../../packages/protocol/schema/profile.json)、[实际类型](../../packages/host/src/profile/types.ts)、[local-dev 模板](../../packages/host/templates/local-dev.yaml)及[enterprise 模板](../../packages/host/templates/enterprise.yaml)核对。Schema 合法只是第一步，策略与装配可能进一步拒绝。
 
+识别云端访问由用户 profile 的 `policy.recognitionNetworkAllow` 单独控制，与 `sandbox.network_allow` 分开。只接受 `openplatform.aliyuncs.com`、`oss-cn-shanghai.aliyuncs.com`、`objectdet.cn-shanghai.aliyuncs.com` 三个域名，省略时禁止识别联网；工作区配置不能设置此权限。用户授权后配置这些域名，更新并重启本地服务。会话预设保持 `standard-windows`。兼容别名 `aka-standard-windows` 不再设置沙箱网络权限，因为现有操作系统沙箱不支持按域名放行，设置后会阻止会话打开。此策略不放行 shell 或普通服务的网络访问。
+
 ## 模型与密钥
 
 现行配置服务支持账号列表、每账号 route 和默认账号，账号路由可能为 `account-...`。选择界面返回的 route/model，不假设所有 DeepSeek 账号共享同一路由。Provider/模型能力来自目录和合同，保存时还校验所选项；修改默认值不追溯改写旧会话。
@@ -63,6 +65,8 @@ API 客户端可通过 `_agnes/v1/session.setModel` 传入可选的 `thinking`�
 预设的 `tools.output_max_bytes`（整数，4096 到 1048576，默认 32768）决定模型最多能看到一条工具结果的多少，超过就由输出守卫截断：保留预算的前一半和最后八分之一，完整内容另存，被截断的结果会给出 `read` 与 `grep` 都认的 `artifact://…` 路径，用来读回其余部分；`read` 的分页也按同一上限。值越大，模型每条结果看到的越多，上下文和会话账本里留到压缩前的内容也越多，调大要慎重；调小最低到 4096。已经打开的会话沿用开始时解析的值。
 
 预设的 `tools.timeout_ms`（整数，至少 1000，默认 120000）是一次工具调用在被内核强制截止之前最多能跑多久，`tools.timeouts`（工具名到毫秒数的映射，每项至少 1000）为指名的工具覆盖这个值。随包的 `base` 预设设有 `timeouts.shell: 600000`。`shell` 工具在模型不传 `timeoutMs` 时按 `tools.timeout_ms` 运行；模型可以申请更长，直到 `shell` 的上限，超出的部分按上限截断，所以前台命令最长 600000，而 `tools.timeout_ms` 仍是默认值。内核会在自己的强制截止之前一小段宽限（2000 毫秒与上限十分之一中的较小者）就把上限告知工具，因此超时的命令由执行器杀死，模型拿到的是已捕获的输出和一行 `[timed out after Nms: ...]`，而不是"结果未知"。当前构建没有可用的 shell 后台作业，所以调大上限是让一条命令获得更多时间的唯一办法。更长的上限会让这一轮及其写者租约占用同样长的时间，调大要慎重。已经打开的会话沿用开始时解析的值。
+
+内置 `base` 预设还为 AKA 接近、搬运、巡逻、任务、绕物拍摄及主体图准备工具分别设置 200000 毫秒上限，`agh_ortho_mesh_run` 为 600000 毫秒，`aka_build_model` 为 900000 毫秒。插件启用后这些指名上限才会用到，不会延长单次运动或自动开启识别；其他工具沿用原有上限。新会话继承新值，已有会话保留此前解析的预设。
 
 使用 Agnes 中国官方网关时，若请求未覆盖额度，adapter 会明确将内置模型的目录额度 65536 作为 `max_tokens` 发送。[3.0 Flash](https://agnes-ai.com/zh-Hans/docs/agnes-30-flash)、[2.5 Pro](https://agnes-ai.com/zh-Hans/docs/agnes-25-pro)和 [Pro Alpha](https://agnes-ai.com/zh-Hans/docs/agnes-25-pro-alpha) 的官方规格为 65536；[Pro Beta](https://agnes-ai.com/en/docs/agnes-25-pro-beta) 按 Pro 同系额度配置为 65536，尚未单独验证网关容量；[2.5 Flash](https://agnes-ai.com/zh-Hans/docs/agnes-25-flash) 和 [2.0 Flash](https://agnes-ai.com/zh-Hans/docs/agnes-20-flash) 的官方说明使用约数 65.5K，此处按 65536 配置。已废弃模型保留注册以兼容现有配置，其可用性取决于网关。请求中明确设置的额度仍优先。仅修改目录元数据不会设置底层 OpenAI 兼容流请求的额度。大文件仍应通过多次小型 write/edit 调用分段构建；默认额度不能保证任意大的单次调用都能完成。
 

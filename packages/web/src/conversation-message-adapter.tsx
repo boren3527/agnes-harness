@@ -15,12 +15,39 @@ import {
   ConversationToolCard,
   ConversationTurnActions,
 } from '@agnes/web-ui/assistant-ui'
-import { type ReactNode, useSyncExternalStore } from 'react'
+import { type ReactNode, useEffect, useRef, useSyncExternalStore } from 'react'
+import { createArtifactImagePreview } from './artifact-image-preview.js'
 import type { ClaimResolver } from './client-modules/boot.js'
 import { toolIconReact } from './tool-icon.js'
 
 type SlotNode = Extract<UINode, { kind: 'slot' }>
 const noSessionSubscription = () => () => undefined
+
+function ArtifactImage({
+  node,
+  session,
+  resources,
+  locale,
+}: {
+  node: Extract<UINode, { kind: 'artifact' }>
+  session?: SessionService | undefined
+  resources?: ClientResourceService | undefined
+  locale?: LocaleService | undefined
+}) {
+  const host = useRef<HTMLDivElement>(null)
+  const { sha256, size, mime } = node.ref
+  useEffect(() => {
+    if (!host.current) return
+    const preview = createArtifactImagePreview(
+      host.current,
+      { ...(session ? { session } : {}), ...(resources ? { resources } : {}) },
+      (key, vars) => locale?.t(key, vars) ?? key,
+    )
+    preview.update({ sha256, size, mime }, node.name)
+    return () => preview.dispose()
+  }, [sha256, size, mime, node.name, session, resources, locale])
+  return <div className="timeline-artifact-preview" ref={host} />
+}
 
 function SlotLeaf({
   node,
@@ -180,8 +207,22 @@ export function WebConversationMessages({
         t={(key) => locale?.t(key) ?? key}
       />
     ),
-    renderNode: (node, native) =>
-      registry ? <DshNodeLeaf key={node.id} node={node} native={native} registry={registry} /> : native,
+    renderNode: (node, native) => {
+      const content =
+        node.kind === 'artifact' ? (
+          <>
+            {native}
+            <ArtifactImage node={node} session={session} resources={resources} locale={locale} />
+          </>
+        ) : (
+          native
+        )
+      return registry ? (
+        <DshNodeLeaf key={node.id} node={node} native={content} registry={registry} />
+      ) : (
+        content
+      )
+    },
   }
   const messages = <ConversationMessages key={sessionScope ?? ''} {...props} />
   return registry ? (

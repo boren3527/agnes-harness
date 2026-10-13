@@ -199,6 +199,13 @@ describe('HostedSessions hibernates idle sessions and wakes them on demand', () 
   it('wakes for a session-scoped worker command and holds the session open while it runs', async () => {
     const t = await setup()
     await t.open('service')
+    await expect(
+      t.hosted.withSession('service', 'inspectService', async () => {
+        await Promise.resolve()
+        return t.channel.currentSessionKey()
+      }),
+    ).resolves.toBe('service')
+    expect(() => t.channel.currentSessionKey()).toThrow('no session context')
     await t.idle()
     expect(t.hibernated('service')).toBe(true)
     let release!: () => void
@@ -207,7 +214,9 @@ describe('HostedSessions hibernates idle sessions and wakes them on demand', () 
     })
     const call = t.hosted.withSession('service', 'callService', async () => {
       expect(t.hibernated('service')).toBe(false)
+      expect(t.channel.currentSessionKey()).toBe('service')
       await held
+      expect(t.channel.currentSessionKey()).toBe('service')
       return 'served'
     })
     await vi.waitFor(() => expect(t.hibernated('service')).toBe(false))

@@ -1,0 +1,48 @@
+import type { LocaleCatalog } from './index.js'
+export const imageModelLocaleCatalog: LocaleCatalog = {
+  en: {
+    'imageModel.title': 'Image generation model',
+    'imageModel.intro': 'Turn capture views into a subject image for the modeling workflow.',
+    'imageModel.model': 'Model',
+    'imageModel.size': 'Output resolution',
+    'imageModel.enabled': 'Enable image-to-image',
+    'imageModel.keyHint': 'Stored privately. Leave blank to keep the saved key.',
+    'imageModel.workflowHint':
+      'With the AKA plugin enabled, ask the conversation to prepare a clear, background-free subject from the four captured views. The tool loads automatically at startup; saved settings take effect immediately.',
+    'imageModel.documentation': 'Image model API documentation',
+    'imageModel.backgroundHint':
+      'Transparent PNG is checked. A pure white border may be removed locally; review the cutout before presenting it.',
+    'imageModel.unconfigured': 'Not configured',
+    'imageModel.ready': 'Configured',
+    'imageModel.disabled': 'Configured · disabled',
+    'imageModel.reload': 'Reload',
+    'imageModel.save': 'Save image model',
+    'imageModel.saved': 'Saved. Available for the next generation; no restart required.',
+    'imageModel.loading': 'Loading…',
+    'imageModel.saving': 'Saving…',
+    'imageModel.failed': 'Unable to save. Reload configuration and check the API key.',
+    'imageModel.readFailed': 'Unable to read image model configuration. Retry loading.',
+  },
+  'zh-CN': {
+    'imageModel.title': '图片生成模型',
+    'imageModel.intro': '用采样照片生成主体图，接入后续建模流程。',
+    'imageModel.model': '模型',
+    'imageModel.size': '输出分辨率',
+    'imageModel.enabled': '启用图生图',
+    'imageModel.keyHint': '密钥私有保存；留空保留已保存的密钥。',
+    'imageModel.workflowHint':
+      '启用 AKA 插件后，可在会话中让小车用四面采样照片生成清晰、无背景的主体参考图。工具随启动自动加载，保存配置立即生效。',
+    'imageModel.documentation': '图片模型调用手册',
+    'imageModel.backgroundHint': '检查 PNG 实际透明度，必要时清除纯白边缘背景；展示前请复核主体效果。',
+    'imageModel.unconfigured': '尚未配置',
+    'imageModel.ready': '已配置',
+    'imageModel.disabled': '已配置 · 未启用',
+    'imageModel.reload': '重新读取',
+    'imageModel.save': '保存图片模型',
+    'imageModel.saved': '已保存，下次生成立即生效，无需重启。',
+    'imageModel.loading': '正在读取…',
+    'imageModel.saving': '正在保存…',
+    'imageModel.failed': '保存失败，请重新读取配置并检查密钥。',
+    'imageModel.readFailed': '无法读取图片模型配置，请重试。',
+  },
+}

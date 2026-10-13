@@ -73,6 +73,104 @@ it('projects empty defaults without invented generation, state or budget', async
   expect(validateAgainst(UITimeline, { ...timeline, generation: 7 }).ok).toBe(true)
 })
 
+it('projects a genuine saved device capture as an artifact without fabricating a tool or job', async () => {
+  const captureId = '11111111-1111-4111-8111-111111111111'
+  const ref = { sha256: 'a'.repeat(64), size: 3000, mime: 'image/jpeg' }
+  const event = {
+    ...row('x/core/device-capture', { captureId, ref }, { ignorable: true }),
+    seq: 1,
+    ts: '2026-10-10T00:00:00.000Z',
+    id: 'capture-event',
+  }
+  const result = await projectUI([event], { sessionKey: 'capture-session' })
+  expect(result.nodes).toEqual([expect.objectContaining({ kind: 'artifact', seq: 1, name: captureId, ref })])
+  expect(
+    (
+      await projectUI([{ ...event, data: { captureId, ref, purpose: 'recognition' } }], {
+        sessionKey: 'capture-session',
+      })
+    ).nodes,
+  ).toEqual([])
+  const { session } = await open({ provider: fakeProvider([]) })
+  const receipt = await session.append([
+    row('x/core/device-capture', { captureId, ref }, { ignorable: true }),
+  ])
+  expect(kind((await session.projectUI()).nodes, 'artifact')).toEqual([
+    expect.objectContaining({ seq: receipt.firstSeq, name: captureId, ref }),
+  ])
+  for (const changed of [
+    { origin: 'ext:untrusted' },
+    { trust: 'untrusted' },
+    { ignorable: false },
+    { data: { captureId, ref, extra: true } },
+  ]) {
+    expect(
+      (await projectUI([{ ...event, ...changed } as Event], { sessionKey: 'capture-session' })).nodes,
+    ).toEqual([])
+  }
+})
+
+it('projects tool render images on completion and replay, including legacy receipts', async () => {
+  const ref = { sha256: 'b'.repeat(64), size: 1234, mime: 'image/png' }
+  const link = {
+    type: 'resource_link' as const,
+    uri: `artifact://${ref.sha256}`,
+    mimeType: ref.mime,
+    name: 'artifact',
+  }
+  const events: Event[] = [
+    row('tool/result', {
+      toolUseId: 'render',
+      isError: false,
+      enforcement: { level: 'none', scope: [] },
+      authz: { decisionId: 'd' },
+      content: [
+        { ...link, size: ref.size },
+        { ...link, size: ref.size },
+      ],
+    }),
+    row('tool/result', {
+      toolUseId: 'legacy-render',
+      isError: false,
+      enforcement: { level: 'none', scope: [] },
+      authz: { decisionId: 'd' },
+      content: [{ ...link, name: 'image' }],
+      structured: { artifact: { ref } },
+    }),
+  ].map((event, index) => ({
+    ...event,
+    id: `render-${index}`,
+    seq: index + 1,
+    ts: '2026-10-13T00:00:00.000Z',
+  }))
+  const cell = new UIProjectionCell('k', 'main')
+  cell.sealReplay()
+  cell.apply(events)
+  const live = await cell.view()
+  const images = kind(live.nodes, 'artifact')
+  expect(images).toHaveLength(2)
+  expect(images.map((n) => n.ref)).toEqual([ref, ref])
+  expect(new Set(images.map((n) => n.id)).size).toBe(2)
+  expect(kind((await projectUI(events, { sessionKey: 'k' })).nodes, 'artifact')).toEqual(images)
+  expect(validateAgainst(UITimeline, { ...live, generation: 1 }).ok).toBe(true)
+  const base = events[0]
+  if (!base) throw new Error('missing render fixture')
+  for (const change of [
+    { isError: true },
+    { interrupted: true },
+    { content: [{ ...link, name: 'image', size: ref.size }] },
+    { content: [{ ...link, uri: 'https://example.test/image.png', size: 1234 }] },
+    { content: [{ ...link, size: 9 * 1024 * 1024 }] },
+    { content: [link], structured: { artifact: { ref: { ...ref, sha256: 'c'.repeat(64) } } } },
+    { content: [link], structured: null },
+  ]) {
+    const result = await projectUI([{ ...base, seq: 1, data: { ...(base.data as object), ...change } }], {
+      sessionKey: 'k',
+    })
+    expect(kind(result.nodes, 'artifact')).toEqual([])
+  }
+})
+
 it('pages through adapter scan caps instead of silently truncating a long session', async () => {
   const { session, storage } = await open({ provider: fakeProvider([]) })
   const scan = storage.scan.bind(storage)

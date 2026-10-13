@@ -22,10 +22,17 @@ export function toLedgerContent(content: ToolResult['content']): ContentBlock[] 
   return content.map((b): ContentBlock => {
     if (b.type === 'text') return { type: 'text', text: b.text }
     if (b.type === 'image')
-      return { type: 'resource_link', uri: artifactUri(b.ref), mimeType: b.mime, name: 'image' }
+      return {
+        type: 'resource_link',
+        uri: artifactUri(b.ref),
+        size: b.ref.size,
+        mimeType: b.mime,
+        name: 'image',
+      }
     return {
       type: 'resource_link',
       uri: artifactUri(b.ref),
+      size: b.ref.size,
       mimeType: b.mime ?? b.ref.mime,
       name: 'artifact',
     }

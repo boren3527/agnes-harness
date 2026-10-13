@@ -1,0 +1,3 @@
+# Compatibility alias. Recognition permission belongs to the Host profile, not the OS sandbox.
+name: aka-standard-windows
+extends: standard-windows

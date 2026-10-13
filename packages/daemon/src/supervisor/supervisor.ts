@@ -6,6 +6,7 @@ import {
   ActivationInProgressError,
   type ConfigurationService,
   composeSecrets,
+  createCredentialStore,
   createExtensionActivationBarrier,
   createFileAudit,
   createPlatform,
@@ -41,6 +42,7 @@ import {
   type EventEnvelope,
   type ExtensionCallParams,
   type ExtensionCallResult,
+  readDeviceCaptureEvent,
   rpcError,
 } from '@agnes/protocol'
 import {
@@ -85,6 +87,7 @@ import {
 } from '../local/methods/agnes.js'
 import { type ArtifactReadRpcOptions, registerArtifactRead } from '../local/methods/artifacts.js'
 import { registerConfiguration } from '../local/methods/config.js'
+import { registerDeviceBindings } from '../local/methods/device-bindings.js'
 import { registerDiagnostics } from '../local/methods/diagnostics.js'
 import { executeJournaledEffect, registerExtensions } from '../local/methods/extensions.js'
 import { registerSessionPreferences } from '../local/methods/session-preferences.js'
@@ -143,6 +146,7 @@ import { publishProbedRuntimeTarget } from '../runtime-target-publisher.js'
 import { NonceTable, startClaimsGc, TableClaims } from '../storage/claims-table.js'
 import { PersistentCommandJournal } from '../storage/command-journal.js'
 import { CompositeTargetStore } from '../storage/composite-target-store.js'
+import { DeviceBindingIndex } from '../storage/device-bindings.js'
 import type { SessionWorkspacePort, TicketPort } from '../storage/lister.js'
 import {
   MemorySessionWorkspaces,
@@ -182,6 +186,14 @@ import {
 import { startChildMaintenance } from './child-maintenance.js'
 import { configurationApplication } from './configuration.js'
 import { bindConnection } from './connection.js'
+import { workerDeviceCaptureSelection } from './device-capture-selection.js'
+import { workerDeviceMediaReader } from './device-media-read.js'
+import { deviceMediaSessionResolver } from './device-media-resolve.js'
+import { workerDeviceRecognitionBudget } from './device-recognition-budget.js'
+import { DeviceRecognitionExecutor } from './device-recognition-execute.js'
+import { deviceRecognitionReadback } from './device-recognition-readback.js'
+import { DeviceRecognitionRequests } from './device-recognition-request.js'
+import { readWorkerDeviceSession } from './device-session-read.js'
 import { publishDaemonDiscovery, removeDaemonDiscovery } from './discovery.js'
 import { type JwksResolver, type JwksTransport, startJwksCache } from './jwks-cache.js'
 import { closeWithAudit, installSignals, shutdownLadder } from './lifecycle.js'
@@ -642,6 +654,8 @@ export type StartSupervisorOptions = {
   jobTables?: Pick<Tables, 'table'>
   /** Dedicated-schema capability for the fail-closed artifact authority index. */
   artifactAuthorityTable?: TableHandle
+  /** Trusted readonly durable lookup. No worker event payloads or raw ledger handle. */
+  captureEventRead?: (sessionKey: string, seq: number, signal: AbortSignal) => Promise<unknown>
   /** Resolved remote credentials. Secret references are resolved only by the executable composition
    * root and never stored in the profile snapshot written for workers. */
   remoteAuth?: Omit<AuthConfig, 'transport'> & {
@@ -709,6 +723,7 @@ export type StartSupervisorOptions = {
         authority: PackageAdminAuthority,
       ) => Promise<ExtensionCallResult>,
     ): void
+    bindClientMedia?(resolver: ReturnType<typeof deviceMediaSessionResolver>): void
     bindPluginTree?(
       store: CompositeTargetStore,
       workerGeneration?: () => number | undefined,
@@ -1040,6 +1055,27 @@ export async function startSupervisor(o: StartSupervisorOptions): Promise<{
         : new MemoryWorkspaceBindings(),
     )
     workspaceCatalogRef = workspaceCatalog
+    const deviceBindings = jobTables
+      ? new DeviceBindingIndex(
+          jobTables.table('device_workspace_bindings'),
+          (binding) => pool.deviceBindingChanged(binding),
+          (connection) => pool.deviceConnectionChanged(connection),
+          (recognition) => pool.deviceRecognitionChanged(recognition),
+        )
+      : undefined
+    // Fixed owner home, never a request-supplied workspace/path; construction performs no writes.
+    const deviceRecognitionCredentials = o.config.home
+      ? createCredentialStore({ root: o.config.home })
+      : undefined
+    const deviceRecognitionExecutor = new DeviceRecognitionExecutor()
+    const deviceRecognitionRequests = new DeviceRecognitionRequests(deviceRecognitionExecutor)
+    const readRecognitionResult = deviceRecognitionReadback({
+      bindings: deviceBindings,
+      ownership: sessionOwnership,
+      workspaces: workspaceCatalog,
+      artifactRead,
+      ...(o.captureEventRead ? { eventRead: o.captureEventRead } : {}),
+    })
     // The CLI/launcher supplied startup root is one of D44's two authority sources. Register it
     // once before resource-control resolves its default workspace; ambient cwd never grants this.
     if (o.workspaceRoot) await workspaceCatalog.add(o.workspaceRoot)
@@ -1127,7 +1163,79 @@ export async function startSupervisor(o: StartSupervisorOptions): Promise<{
       onLog: (input) => o.audit?.({ kind: 'worker.log', ...input }),
       onSessionFailure: (sessionKey, error) => registry.interrupt(sessionKey, error),
       ...(runtimeDelivery ? { runtimeDelivery } : {}),
-      onRequest: async (sessionKey, f) => {
+      onRequest: async (sessionKey, f, effect, link) => {
+        if (f.method === 'device-recognition-execute') {
+          if (!link) throw rpcError('CAPABILITY_DENIED')
+          return deviceRecognitionRequests.request(
+            {
+              bindings: deviceBindings,
+              credentials: deviceRecognitionCredentials,
+              ownership: sessionOwnership,
+              workspaces: workspaceCatalog,
+            },
+            link,
+            sessionKey,
+            f.params,
+            effect,
+          )
+        }
+        if (f.method === 'device-capture-selection')
+          return workerDeviceCaptureSelection(
+            {
+              bindings: deviceBindings,
+              ownership: sessionOwnership,
+              workspaces: workspaceCatalog,
+              ...(projectedArtifactRead ? { inspector: projectedArtifactRead.inspector } : {}),
+              ...(o.captureEventRead ? { eventRead: o.captureEventRead } : {}),
+              ...(projectedArtifactRead
+                ? {
+                    publicationAuthority: async (
+                      key: string,
+                      principalId: string,
+                      event: EventEnvelope,
+                      signal: AbortSignal,
+                    ) => {
+                      await projectedArtifactRead.projection.observe(key, event, signal)
+                      const capture = readDeviceCaptureEvent(event)
+                      if (!capture) throw new Error('capture publication unavailable')
+                      const result = await projectedArtifactRead.workerRead(
+                        { sessionId: key, laneId: 'main', ownerId: principalId, sha256: capture.ref.sha256 },
+                        signal,
+                      )
+                      if (!result || !('ok' in result) || !result.ok)
+                        throw new Error('capture publication unavailable')
+                      if (
+                        result.artifact.sha256 !== capture.ref.sha256 ||
+                        result.artifact.size !== capture.ref.size ||
+                        result.artifact.mime !== capture.ref.mime
+                      )
+                        throw new Error('capture publication unavailable')
+                    },
+                  }
+                : {}),
+            },
+            sessionKey,
+            f.params,
+            effect,
+          )
+        if (f.method === 'device-recognition-budget')
+          return workerDeviceRecognitionBudget(
+            {
+              bindings: deviceBindings,
+              ownership: sessionOwnership,
+              workspaces: workspaceCatalog,
+              assertRecognitionIdle: (deviceId) => deviceRecognitionExecutor.assertIdle(deviceId),
+            },
+            sessionKey,
+            f.params,
+            effect,
+          )
+        if (f.method === 'device-session-read')
+          return readWorkerDeviceSession(
+            { store: deviceBindings, ownership: sessionOwnership, workspaces: workspaceCatalog },
+            sessionKey,
+            f.params,
+          )
         if (f.method === 'plugin-manage' || f.method === 'plugin-manage-abort')
           return pluginManageRequests(sessionKey, f.requestId, f.method, f.params)
         if (f.method === 'mcp-manage' || f.method === 'mcp-manage-abort')
@@ -1426,6 +1534,14 @@ export async function startSupervisor(o: StartSupervisorOptions): Promise<{
             : undefined,
         )
       void revertFailedDesired?.()
+      const resolveClientMedia = deviceMediaSessionResolver({
+        profile: o.profile.name,
+        bindings: deviceBindings,
+        ownership: sessionOwnership,
+        workspaces: workspaceCatalog,
+        read: workerDeviceMediaReader(pool, () => o.profile),
+      })
+      o.packageRuntime.bindClientMedia?.(resolveClientMedia)
       effectivePackageAdmin ??= {
         service: createPackageAdminService({
           manager: o.packageRuntime.manager,
@@ -1437,6 +1553,7 @@ export async function startSupervisor(o: StartSupervisorOptions): Promise<{
           ...(runtimeStore ? { pluginTree: runtimeStore } : {}),
           ...(pinCoordinator ? { revokeRuntimePackage: pinCoordinator.revokePackage } : {}),
           workerGeneration: () => pool.businessWorker()?.generation,
+          clientMediaResolve: resolveClientMedia,
           clientServiceCall: async (input) => {
             if (!clientServiceCall) throw rpcError('CAPABILITY_DENIED')
             return await clientServiceCall(input)
@@ -1538,6 +1655,8 @@ export async function startSupervisor(o: StartSupervisorOptions): Promise<{
             commandId: input.commandId,
           },
           bindingKind: 'client-module.effect',
+          ...(input.readbackOnly ? { readbackOnly: true as const } : {}),
+          readRecognitionResult,
         })
       })
     }
@@ -1711,6 +1830,7 @@ export async function startSupervisor(o: StartSupervisorOptions): Promise<{
         agnesVersion: '0.0.0',
         quiescenceWaitMs: 2_000,
         configuration: o.configuration !== undefined,
+        deviceBindings: deviceBindings !== undefined,
         // The WSS lifecycle bearer is only an upgrade gate. initialize still requires one of the
         // configured remote credentials; missing/local auth on WSS is always refused.
         auth: {
@@ -1804,6 +1924,12 @@ export async function startSupervisor(o: StartSupervisorOptions): Promise<{
       registerConfiguration(ep, o.configuration, profileApplication?.apply, profileApplication?.present)
       registerSessionPreferences(ep, lister, preferences)
       registerWorkspaces(ep, workspaceCatalog)
+      registerDeviceBindings(ep, {
+        store: deviceBindings,
+        workspaces: workspaceCatalog,
+        requireSessionOwner: requireSessionOwner(cx),
+        recognitionCredentials: deviceRecognitionCredentials,
+      })
       registerAcp(ep, cx, feeds, attached)
       registerAgnes(ep, cx, feeds, attached)
       registerDiagnostics(ep, {
@@ -1825,6 +1951,7 @@ export async function startSupervisor(o: StartSupervisorOptions): Promise<{
               o.config.localWeb
               ? (effectivePackageAdmin.webAuthority ?? localWebSkinReadAuthority)
               : (effectivePackageAdmin.webAuthority ?? denyPackageAdminAuthority),
+          transport === 'unix',
         )
       registerResourceControl(
         ep,
@@ -2064,9 +2191,8 @@ function adaptHostTables(store: HostTableStore): Pick<Tables, 'table'> {
 
 /**
  * Opens the Host-owned storage used by the real supervisor process and gives jobs an isolated
- * package table store. The core ledger database is opened only because `createSqliteStorage` owns
- * the lifetime of both its core adapter and package stores; no raw SQLite handle crosses into
- * daemon.
+ * package table store. Host owns the core ledger lifetime; capture acknowledgement receives a
+ * bounded readonly event lookup, never another writer or a raw SQLite handle.
  *
  * Package tables remain isolated in `tables('@agnes/daemon')`; crash reclaim receives Host's narrow
  * operation-only port, never a raw core SQLite handle.
@@ -2093,6 +2219,12 @@ export async function startProductionSupervisor(
         'artifact_read_authority',
       ),
       reclaim: storage.crashReclaim,
+      captureEventRead: async (key, seq, signal) => {
+        signal.throwIfAborted()
+        const rows = await storage.scan(key, { fromSeq: seq, toSeq: seq, limit: 1 })
+        signal.throwIfAborted()
+        return rows[0]
+      },
     })
   } catch (error) {
     try {
@@ -2314,6 +2446,7 @@ export async function runAgnesd(args: RunAgnesdArgs = {}, deps: RunAgnesdDeps = 
         authority: PackageAdminAuthority,
       ) => Promise<ExtensionCallResult>)
     | undefined
+  let packageClientMediaResolve: ReturnType<typeof deviceMediaSessionResolver> | undefined
   const deferredRuntimePins: RuntimePinsAdapter = {
     async inspect(profileName) {
       return (
@@ -2359,6 +2492,10 @@ export async function runAgnesd(args: RunAgnesdArgs = {}, deps: RunAgnesdDeps = 
         await publish(artifact)
       },
       workerGeneration: () => packageWorkerGeneration?.(),
+      clientMediaResolve: async (input, authority, signal) => {
+        if (!packageClientMediaResolve) throw rpcError('CAPABILITY_DENIED')
+        return await packageClientMediaResolve(input, authority, signal)
+      },
       clientServiceCall: async (input) => {
         if (!packageClientServiceCall) throw rpcError('CAPABILITY_DENIED')
         return await packageClientServiceCall(input)
@@ -2428,6 +2565,9 @@ export async function runAgnesd(args: RunAgnesdArgs = {}, deps: RunAgnesdDeps = 
             },
             bindClientEffect(dispatcher) {
               packageClientEffectCall = dispatcher
+            },
+            bindClientMedia(resolver) {
+              packageClientMediaResolve = resolver
             },
           },
         }

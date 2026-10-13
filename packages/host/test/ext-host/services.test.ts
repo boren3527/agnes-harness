@@ -4,8 +4,11 @@ import { serviceFixture } from '@agnes/extension-api/testkit'
 import type { Actor, ExtensionCallParams, JsonValue } from '@agnes/protocol'
 import { describe, expect, it, vi } from 'vitest'
 import { leaseFor } from '../../src/ext-host/lease.js'
+import { pluginRowSource } from '../../src/ext-host/row-extension-host.js'
 import {
   isServicePreDispatchFailure,
+  type ServiceEffectAdmission,
+  type ServiceInvocationAuthorization,
   type ServiceInvocationDeps,
   serviceInvoker,
 } from '../../src/ext-host/service-invocation.js'
@@ -21,11 +24,11 @@ const workspace = {
   approvalContext: () => ({}),
   checkpointContext: () => ({}),
 } as unknown as WorkspaceInvocationView
-function setup(over: Partial<ServiceDef> = {}, budget = Infinity) {
+function setup(over: Partial<ServiceDef> = {}, budget = Infinity, owner = 'fixture/service') {
   const def: ServiceDef = { ...serviceFixture(), ...over }
   const { handler: _, ...cap } = def
   const manifest: ExtensionManifest = {
-    id: 'fixture/service',
+    id: owner,
     version: '1.0.0',
     apiRange: '^1.0',
     entry: './index.ts',
@@ -38,6 +41,8 @@ function setup(over: Partial<ServiceDef> = {}, budget = Infinity) {
     audit = vi.fn()
   const dispose = registry.register(def, { manifest, lease, signal: ac.signal })
   let saved: ServiceContext | undefined
+  let trustedAdmission: ServiceEffectAdmission | undefined
+  let recognitionAuthorization: ServiceInvocationAuthorization | undefined
   const deps: ServiceInvocationDeps = {
     registry,
     authority: {
@@ -53,7 +58,9 @@ function setup(over: Partial<ServiceDef> = {}, budget = Infinity) {
     },
     audit: { write: audit },
     signal: ac.signal,
-    context(_entry, identity, alive, invocationWorkspace) {
+    context(_entry, identity, alive, invocationWorkspace, admission, authorization) {
+      recognitionAuthorization = authorization
+      trustedAdmission = admission
       expect(invocationWorkspace).toBe(workspace)
       const unavailable = () => {
         alive()
@@ -99,7 +106,7 @@ function setup(over: Partial<ServiceDef> = {}, budget = Infinity) {
     input: JsonValue = { value: 1 },
     extra: Partial<ExtensionCallParams> = {},
     signal?: AbortSignal,
-    effectAdmission?: { commandId: string },
+    effectAdmission?: ServiceEffectAdmission,
   ) =>
     invoker.call(
       {
@@ -121,7 +128,21 @@ function setup(over: Partial<ServiceDef> = {}, budget = Infinity) {
       workspace,
       signal,
     )
-  return { def, manifest, registry, lease, deps, ac, audit, dispose, call, inspect, saved: () => saved }
+  return {
+    def,
+    manifest,
+    registry,
+    lease,
+    deps,
+    ac,
+    audit,
+    dispose,
+    call,
+    inspect,
+    saved: () => saved,
+    admission: () => trustedAdmission,
+    authorization: () => recognitionAuthorization,
+  }
 }
 
 describe('S3 Service registration and invocation', () => {
@@ -183,6 +204,54 @@ describe('S3 Service registration and invocation', () => {
     expect(registry.resolve(owner, h.def.name)).toBeUndefined()
   })
 
+  it('confines Host-owned recognition destinations to the exact AKA effects', () => {
+    const h = setup()
+    const owner = pluginRowSource('ext:agnes-examples/aka-robot')
+    const authority = {
+      owner,
+      version: '1.0.0',
+      signal: h.ac.signal,
+      assertAlive() {},
+      assertRunning() {},
+      consume() {},
+      recognitionNetwork: true as const,
+    }
+    const registry = new ServiceRegistry()
+    for (const name of ['aka.recognition.test', 'aka.recognition.enable']) {
+      const def = { ...h.def, name, kind: 'effect' as const }
+      registry.registerRow(def, authority)
+      const network = registry.resolve(owner, name)?.manifest.capabilities.network
+      expect(network).toEqual({
+        hosts: [
+          'openplatform.aliyuncs.com',
+          'oss-cn-shanghai.aliyuncs.com',
+          'objectdet.cn-shanghai.aliyuncs.com',
+        ],
+      })
+      expect(Object.isFrozen(network)).toBe(true)
+      expect(Object.isFrozen(network && !Array.isArray(network) ? network.hosts : undefined)).toBe(true)
+    }
+    for (const def of [
+      { ...h.def, name: 'aka.recognition.round.start', kind: 'effect' as const },
+      { ...h.def, name: 'aka.recognition.test', kind: 'query' as const },
+      h.def,
+    ])
+      expect(() => registry.registerRow(def, authority)).toThrow(/recognition/)
+    expect(() =>
+      registry.registerRow(
+        { ...h.def, name: 'aka.recognition.test', kind: 'effect' },
+        {
+          ...authority,
+          owner: pluginRowSource('ext:fixture/service'),
+        },
+      ),
+    ).toThrow(/recognition/)
+    const { recognitionNetwork: _, ...withoutNetwork } = authority
+    const noGrant = new ServiceRegistry()
+    noGrant.registerRow({ ...h.def, name: 'aka.recognition.test', kind: 'effect' }, withoutNetwork)
+    expect(noGrant.resolve(owner, 'aka.recognition.test')?.manifest.capabilities.network).toBeUndefined()
+  })
+
   it('uses exact manifest metadata, fails duplicates and preserves newer identities on stale dispose', () => {
     const h = setup(),
       authority = { manifest: h.manifest, lease: h.lease, signal: h.ac.signal }
@@ -207,6 +276,134 @@ describe('S3 Service registration and invocation', () => {
     }
   })
 
+  it.each([
+    'grant',
+    'actor',
+    'decision',
+    'expired',
+    'source',
+    'approval',
+    'invalid-decision',
+    'cancel',
+  ] as const)(
+    'revalidates live recognition %s authority instead of trusting initial admission',
+    async (mode) => {
+      const h = setup(
+        {
+          name: 'aka.recognition.test',
+          kind: 'effect',
+          handler: async () => {
+            const proof = h.authorization()
+            const authority = h.deps.authority
+            if (!proof || !authority) throw new Error('missing trusted recognition authority')
+            expect(proof.revoked.aborted).toBe(false)
+            if (mode === 'cancel')
+              vi.mocked(h.deps.principals.resolve).mockImplementationOnce(async () => {
+                h.ac.abort()
+                return structuredClone(actor)
+              })
+            if (mode === 'source')
+              vi.mocked(authority.resolve).mockResolvedValueOnce({
+                source: 'other',
+                subjectCredential: 'verified-subject',
+                grants: [
+                  {
+                    extension: pluginRowSource('ext:agnes-examples/aka-robot'),
+                    name: 'aka.recognition.test',
+                    range: '^1.0',
+                  },
+                ],
+              })
+            if (mode === 'approval')
+              vi.mocked(h.deps.principals.authorize).mockResolvedValueOnce({
+                decisionId: 'approval',
+                effect: 'require_approval',
+                reason: '',
+              })
+            if (mode === 'invalid-decision')
+              vi.mocked(h.deps.principals.authorize).mockResolvedValueOnce({ effect: 'allow' } as never)
+            if (mode === 'grant')
+              vi.mocked(authority.resolve).mockResolvedValueOnce({
+                source: 'reports',
+                subjectCredential: 'verified-subject',
+                grants: [],
+              })
+            if (mode === 'actor')
+              vi.mocked(h.deps.principals.resolve).mockResolvedValueOnce({ ...actor, role: 'other' })
+            if (mode === 'decision')
+              vi.mocked(h.deps.principals.authorize).mockResolvedValueOnce({
+                decisionId: 'deny',
+                effect: 'deny',
+                reason: '',
+              })
+            if (mode === 'expired')
+              vi.mocked(h.deps.principals.authorize).mockResolvedValueOnce({
+                decisionId: 'expired',
+                effect: 'allow',
+                reason: '',
+                expiresAt: '2000-01-01T00:00:00.000Z',
+              } as never)
+            await proof.assertAuthorized()
+            return { value: 1 }
+          },
+        },
+        Infinity,
+        pluginRowSource('ext:agnes-examples/aka-robot'),
+      )
+      await expect(
+        h.call({ value: 1 }, { commandId: 'capture' }, undefined, {
+          commandId: 'capture',
+          callId: 'a'.repeat(32),
+        }),
+      ).rejects.toMatchObject({ data: { code: mode === 'cancel' ? 'REQUEST_TIMEOUT' : 'CAPABILITY_DENIED' } })
+      const proof = h.authorization()
+      if (!proof) throw new Error('missing trusted recognition authority')
+      expect(proof.revoked.aborted).toBe(true)
+      await expect(proof.assertAuthorized()).rejects.toMatchObject({
+        data: { code: 'REQUEST_TIMEOUT' },
+      })
+    },
+  )
+  it.each(['test', 'enable', 'query', 'unrelated', 'missing-call-id'] as const)(
+    'exposes the private live checker only for the journaled recognition effect: %s',
+    async (mode) => {
+      const name =
+        mode === 'enable' ? 'aka.recognition.enable' : mode === 'unrelated' ? 'photo' : 'aka.recognition.test'
+      const allowed = mode === 'test' || mode === 'enable'
+      const h = setup(
+        {
+          name,
+          kind: mode === 'query' ? 'query' : 'effect',
+          handler: async (_input, ctx) => {
+            const proof = h.authorization()
+            expect(proof !== undefined).toBe(allowed)
+            expect(ctx).not.toHaveProperty('recognitionAuthorization')
+            if (proof) {
+              await proof.assertAuthorized()
+              await proof.assertAuthorized()
+              expect(proof.revoked.aborted).toBe(false)
+            }
+            return { value: 1 }
+          },
+        },
+        1,
+        pluginRowSource('ext:agnes-examples/aka-robot'),
+      )
+      await expect(
+        h.call(
+          { value: 1 },
+          mode === 'query' ? {} : { commandId: 'cloud' },
+          undefined,
+          mode === 'query'
+            ? undefined
+            : { commandId: 'cloud', ...(mode === 'missing-call-id' ? {} : { callId: 'a'.repeat(32) }) },
+        ),
+      ).resolves.toEqual({ output: { value: 1 } })
+      const proof = h.authorization()
+      if (proof)
+        await expect(proof.assertAuthorized()).rejects.toMatchObject({ data: { code: 'REQUEST_TIMEOUT' } })
+    },
+  )
   it('injects authenticated identity, authorizes first and returns a copied result', async () => {
     const order: string[] = [],
       output = { value: 3 }
@@ -313,6 +510,20 @@ describe('S3 Service registration and invocation', () => {
       h.call({ value: 1 }, { commandId: 'command' }, undefined, { commandId: 'command' }),
     ).resolves.toEqual({ output: { value: 1 } })
     expect(handler).toHaveBeenCalledTimes(1)
+    const admission = { commandId: 'command', callId: 'a'.repeat(32) }
+    await h.call({ value: 1 }, { commandId: 'command' }, undefined, admission)
+    expect(h.admission()).toEqual(admission)
+    expect(h.admission()).not.toBe(admission)
+    expect(Object.isFrozen(h.admission())).toBe(true)
+    expect(JSON.stringify(h.saved())).not.toContain(admission.callId)
+    admission.callId = 'b'.repeat(32)
+    expect(h.admission()?.callId).toBe('a'.repeat(32))
+    for (const callId of ['', 'worker-selected', 'A'.repeat(32), 123 as never]) {
+      await expect(
+        h.call({ value: 1 }, { commandId: 'command' }, undefined, { commandId: 'command', callId }),
+      ).rejects.toMatchObject({ data: { code: 'CAPABILITY_DENIED' } })
+    }
+    expect(handler).toHaveBeenCalledTimes(2)
   })
 
   it('classifies from trusted manifest metadata after auth and schema checks without dispatch', async () => {

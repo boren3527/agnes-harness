@@ -24,6 +24,7 @@ import {
 import * as systemNode from '@agnes/system-node'
 import { createPrivateDirectorySync } from '@agnes/system-node'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import * as clientModuleRegistry from '../src/packages/client-modules.js'
 import {
   type ClientModuleRegistry,
   type ClientModulesChanged,
@@ -339,6 +340,54 @@ it('installs an actual local package, returns a durable idempotent receipt, and 
   })
 })
 
+it('reads independent package runtime states concurrently and preserves inventory ordering on partial failure', async () => {
+  const first = await manager.inspect(profileDir, source)
+  await manager.install(profileDir, source, { expectedIntegrity: first.integrity })
+  const secondDir = join(root, 'candidate-b')
+  cpSync(join(fixtures, 'pkg-a'), secondDir, { recursive: true })
+  const pkg = JSON.parse(readFileSync(join(secondDir, 'package.json'), 'utf8'))
+  pkg.name = 'acme/pkg-b'
+  pkg.agnes.plugins[0].id = 'ext:acme/pkg-b/main'
+  writeFileSync(join(secondDir, 'package.json'), JSON.stringify(pkg))
+  const secondSource = parseSource('file:./candidate-b')
+  const second = await manager.inspect(profileDir, secondSource)
+  await manager.install(profileDir, secondSource, { expectedIntegrity: second.integrity })
+  let release!: () => void
+  const hold = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const started = new Set<string>()
+  const admin = service({
+    activation: {
+      actual: async (_profile, id) => {
+        started.add(id)
+        await hold
+        if (id === 'acme/pkg-b') throw new Error('fixture observation failure')
+        return 'not-running'
+      },
+      reconcile: async () => ({ actual: 'not-running' }),
+    },
+  })
+  const pending = admin.call('_agnes/v1/packages.list', { profile }, authority)
+  const completed = pending.then(
+    (value) => ({ value }),
+    (error: unknown) => ({ error }),
+  )
+  try {
+    await vi.waitFor(() => expect(started.size).toBe(2))
+  } finally {
+    release()
+  }
+  const result = await completed
+  if ('error' in result) throw result.error
+  expect(result.value).toMatchObject({
+    packages: [
+      { id: 'acme/pkg-a', actual: 'not-running' },
+      { id: 'acme/pkg-b', actual: 'unavailable' },
+    ],
+  })
+})
+
 it('refreshes the client-module roster after every successful package lifecycle transition', async () => {
   const events: ClientModulesChanged[] = []
   const admin = service({
@@ -399,6 +448,8 @@ it('refreshes the client-module roster after every successful package lifecycle 
     id: row.id,
   })
 
+  // Completion is persisted before the roster notice is published; wait for that observable notice.
+  await waitFor(() => events.length === 6)
   expect(events.map(({ reason, packageId }) => ({ reason, packageId }))).toEqual([
     { reason: 'inventory', packageId: 'acme/pkg-a' },
     { reason: 'trust', packageId: 'acme/pkg-a' },
@@ -994,6 +1045,8 @@ it('replays a received install after a process crash without treating desired st
   })
   expect(await operation(restarted, profile, operationId)).toMatchObject({ state: 'completed' })
   expect(existsSync(packageDir(root, profile, 'acme/pkg-a'))).toBe(true)
+  // The durable terminal state precedes the background roster notification.
+  await waitFor(() => clientModuleEvents.length > 0)
   expect(clientModuleEvents).toMatchObject([{ profile, reason: 'inventory', packageId: 'acme/pkg-a' }])
 })
 
@@ -1878,4 +1931,64 @@ it('fails the whole read closed when an installed file was swapped after install
       authority,
     ),
   ).rejects.toMatchObject({ data: { reason: 'E_PACKAGE_INTEGRITY' } })
+})
+
+it('runAgnesd connects media admission to the production resolver after binding', async () => {
+  const revision = `sha256-${'a'.repeat(64)}`
+  const original = clientModuleRegistry.createClientModuleRegistry
+  const registry = vi
+    .spyOn(clientModuleRegistry, 'createClientModuleRegistry')
+    .mockImplementation((options) => ({
+      ...original(options),
+      mediaOwner: async () => ({ backendRowId: 'ext:robot', revision, rosterRevision: 'roster' }),
+    }))
+  const endpoint = {
+    found: true as const,
+    port: 12345,
+    authorization: `Bearer ${'a'.repeat(43)}`,
+    rowRevision: revision,
+    registrationId: '11111111-1111-4111-8111-111111111111',
+    workerGeneration: 1,
+    deviceId: 'robot',
+    bindingRevision: 1,
+    configRevision: 1,
+    rosterRevision: 'roster',
+  }
+  try {
+    await runAgnesd(
+      { home: root, workspace: root, dataDir: join(root, 'media-daemon-data'), profile },
+      {
+        startProduction: async (options) => {
+          const admin = options.packageAdmin?.service
+          if (!admin) throw new Error('missing production admin')
+          const params = { profile, rowId: 'web:robot', sessionId: 'session' }
+          await expect(
+            admin.call('_agnes/v1/clientModules.resolveMedia', params, authority),
+          ).rejects.toMatchObject({
+            data: { code: 'CAPABILITY_DENIED' },
+          })
+          const resolve = vi.fn(async () => endpoint)
+          options.packageRuntime?.bindClientMedia?.(resolve)
+          await expect(
+            admin.call('_agnes/v1/clientModules.resolveMedia', params, authority),
+          ).resolves.toEqual(endpoint)
+          expect(resolve).toHaveBeenCalledWith(
+            { ...params, backendRowId: 'ext:robot', rosterRevision: 'roster' },
+            authority,
+            expect.any(AbortSignal),
+          )
+          return {
+            socketPath: join(root, 'media-daemon-data', 'daemon', 'test.sock'),
+            owner: { pid: process.pid, generation: 1 },
+            reclaimNow: async () => undefined,
+            evictIdleNow: async () => undefined,
+            close: async () => undefined,
+          } as never
+        },
+        publishDiscovery: (async () => undefined) as never,
+      },
+    )
+  } finally {
+    registry.mockRestore()
+  }
 })

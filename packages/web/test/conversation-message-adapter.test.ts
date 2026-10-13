@@ -2,7 +2,7 @@
 
 import { Context } from '@agnes/cordis'
 import type { UINode, UITurn } from '@agnes/protocol'
-import { SlotRegistry } from '@agnes/web-client'
+import { type ClientResourceService, SessionService, SlotRegistry } from '@agnes/web-client'
 import {
   AssistantRuntimeProvider,
   createConversationProjectionStore,
@@ -10,7 +10,7 @@ import {
 } from '@agnes/web-ui/assistant-ui'
 import { act, createElement, useEffect, useState } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { WebConversationMessages } from '../src/conversation-message-adapter.js'
 import { costDetails, costSummary } from '../src/usage.js'
 import { zhLocaleService, zhT } from './helpers/locale.js'
@@ -76,6 +76,86 @@ async function update(store: ReturnType<typeof createConversationProjectionStore
   await act(async () => store.update({ sessionId: 'session', nodes }))
 }
 const item = (id: string) => host.querySelector<HTMLElement>(`[data-node-id="${id}"]`)
+
+it('shows real tool-image previews through the production React adapter and retains the latest when collapsed', async () => {
+  const session = new SessionService(ctx, 'session')
+  const ref = { sha256: 'a'.repeat(64), size: 100, mime: 'image/png' }
+  const release = vi.fn()
+  const load = vi.fn(async () => ({ artifact: ref, url: 'blob:https://example.test/render', release }))
+  const resources = { images: { load } } as unknown as ClientResourceService
+  const picture: UINode = { kind: 'artifact', id: 'render', seq: 3, name: 'render', ref }
+  const turn: UITurn = {
+    id: 'render-turn',
+    turn: 1,
+    startSeq: 1,
+    startedAt: '2026-10-13T00:00:00.000Z',
+    status: 'running',
+    nodeIds: ['user', 'tool', 'render'],
+    inherited: false,
+    forkable: true,
+    usage: {
+      totals: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+      reasoningComplete: true,
+      billingComplete: true,
+      calls: [],
+    },
+  }
+  const store = createConversationProjectionStore({
+    sessionId: 'session',
+    nodes: [user, tool('running'), picture],
+    turns: [turn],
+  })
+  const locale = zhLocaleService()
+  function ImageHarness({ current }: { current: UITurn }) {
+    const runtime = useConversationRuntime(store)
+    return createElement(
+      AssistantRuntimeProvider,
+      { runtime },
+      createElement(WebConversationMessages, { registry, session, resources, locale, turns: [current] }),
+    )
+  }
+  await act(async () => root.render(createElement(ImageHarness, { current: turn })))
+  expect(item('render')?.querySelector('img')?.getAttribute('src')).toBe('blob:https://example.test/render')
+  const thumbnail = item('render')?.querySelector<HTMLButtonElement>('.artifact-image-thumbnail')
+  expect(thumbnail?.getAttribute('aria-haspopup')).toBe('dialog')
+  thumbnail?.focus()
+  await act(async () => thumbnail?.click())
+  const preview = document.querySelector<HTMLDialogElement>('.artifact-image-dialog')
+  expect(preview?.open).toBe(true)
+  expect(preview?.querySelector('img')?.getAttribute('src')).toBe('blob:https://example.test/render')
+  await act(async () => preview?.querySelector('button')?.click())
+  expect(preview?.open).toBe(false)
+  expect(document.activeElement).toBe(thumbnail)
+  thumbnail?.blur()
+  expect(item('render')?.closest('.turn-final')?.hasAttribute('hidden')).toBe(false)
+  const finished = {
+    ...turn,
+    status: 'completed' as const,
+    endSeq: 6,
+    finalAssistantId: 'answer',
+    nodeIds: [...turn.nodeIds, 'final-render', 'answer'],
+  }
+  await act(async () => {
+    store.update({
+      sessionId: 'session',
+      nodes: [
+        user,
+        tool('completed'),
+        picture,
+        { ...picture, id: 'final-render', seq: 4 },
+        { kind: 'assistant', id: 'answer', seq: 5, text: '杯子建好了。' },
+      ],
+      turns: [finished],
+    })
+    root.render(createElement(ImageHarness, { current: finished }))
+  })
+  expect(item('final-render')?.querySelector('img')).not.toBeNull()
+  expect(item('final-render')?.closest('.turn-final')?.hasAttribute('hidden')).toBe(false)
+  expect(item('render')?.closest('.turn-process-body')?.hasAttribute('hidden')).toBe(true)
+  await act(async () => root.render(null))
+  expect(document.querySelector('.artifact-image-dialog')).toBeNull()
+  expect(release).toHaveBeenCalledTimes(load.mock.calls.length)
+})
 
 describe('W3b Web-owned leaves and real web-client slots', () => {
   it('retires a reused slot ID when the session changes', async () => {

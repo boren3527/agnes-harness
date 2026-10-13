@@ -236,6 +236,8 @@ const CONFIG_VALIDATORS: Record<string, (x: unknown) => ValidationResult<unknown
   ClientModuleReadParams: validateClientModuleReadParams,
   ClientModuleReadResult: validateClientModuleReadResult,
   ClientModuleServiceCallParams: validateClientModuleServiceCallParams,
+  ClientModuleMediaResolveParams: (x) => validatePackageAdminData('ClientModuleMediaResolveParams', x),
+  ClientModuleMediaResolveResult: (x) => validatePackageAdminData('ClientModuleMediaResolveResult', x),
   ClientModuleServiceCallResult: validateClientModuleServiceCallResult,
   ClientModuleEffectCallParams: validateClientModuleEffectCallParams,
   ClientModuleEffectCallResult: validateClientModuleEffectCallResult,

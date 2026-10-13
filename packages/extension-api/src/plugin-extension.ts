@@ -16,6 +16,15 @@ export type ObserveHookEvent = {
  * the simplified observe-only entry it always was).
  */
 export interface PluginExtensionAPI {
+  /** Optional trusted-row registration of a private loopback media endpoint. No device I/O or authority. */
+  readonly deviceMedia?: Readonly<{
+    register(endpoint: Readonly<{ port: number; authorization: string }>): Readonly<{
+      rowRevision: string
+      registrationId: string
+      revoked: AbortSignal
+      release(): void
+    }>
+  }>
   readonly ctx: ExtensionAPI['ctx']
   registerTool: ExtensionAPI['registerTool']
   on<E extends ObserveHookEvent>(event: E, handler: NoInfer<HookHandler<E>>): Disposer

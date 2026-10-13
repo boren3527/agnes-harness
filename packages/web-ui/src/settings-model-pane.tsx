@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react'
 import { fallbackT, type Translate } from './locales/index.js'
+import { SettingsImageModel } from './settings-image-model.js'
 import { Button } from './ui/button.js'
 
 export function SettingsModelPane({
@@ -42,6 +43,7 @@ export function SettingsModelPane({
           <p className="config-list-note">{t('settings-shell.accountsNote')}</p>
         </section>
         {afterAccounts}
+        <SettingsImageModel t={t} />
       </div>
     </section>
   )

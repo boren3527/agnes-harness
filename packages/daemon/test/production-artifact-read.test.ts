@@ -40,6 +40,41 @@ async function fixture() {
 }
 
 describe('production artifact read composition', () => {
+  it('capture confirmation rejects reclaimed bytes even when historical inspection preserves their metadata', async () => {
+    const item = await fixture()
+    const tables = sqliteTables()
+    try {
+      const index = new PersistentArtifactReadAuthorityIndex(tables.table('artifact-read-authority'))
+      const projected = composeProductionProjectedArtifactRead(item.dataDir, {
+        authority: createArtifactReadAuthorityPort(index),
+        writer: { append: index.append.bind(index), revoke: index.revoke.bind(index) },
+        ownership: { resolve: async () => ({ active: true, principalId: 'local' }) },
+        limits: { maxArtifactBytes: 1024, maxResponseBytes: 1024 },
+        operationTimeoutMs: 1_000,
+        scopeTimeoutMs: 1_000,
+      })
+      const signal = new AbortController().signal
+      const identity = { sha256: item.artifact.sha256, mime: item.artifact.mime }
+      await expect(projected.inspector.inspect(identity, signal)).resolves.toEqual(item.artifact)
+      const moduleUrl = new URL('../../host/src/private-artifact-store.ts', import.meta.url).href
+      const { writeComputerUseTombstoneLocked } = await import(moduleUrl)
+      await writeComputerUseTombstoneLocked(item.dataDir, process.platform === 'win32' ? 'win32' : 'darwin', {
+        sha256: item.artifact.sha256,
+        size: item.artifact.size,
+        createdAtMs: 0,
+        collectedAtMs: 1,
+      })
+      await rm(
+        join(item.dataDir, 'artifacts', 'sha256', item.artifact.sha256.slice(0, 2), item.artifact.sha256),
+      )
+      const { createLocalArtifactReadStore } = await import('@agnes/host')
+      const historical = createLocalArtifactReadStore({ dataDir: item.dataDir, maxArtifactBytes: 1024 })
+      await expect(historical.inspect(identity, signal)).resolves.toEqual(item.artifact)
+      await expect(projected.inspector.inspect(identity, signal)).rejects.toThrow()
+    } finally {
+      await tables.close()
+    }
+  })
   it.each(['header', 'session image', 'document image'] as const)(
     'uses projected %s authority as the production RPC scope',
     async (source) => {

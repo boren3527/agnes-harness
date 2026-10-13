@@ -2,6 +2,7 @@
 
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import type { PackageInstalledDescriptor } from '@agnes/protocol'
 import { afterEach, expect, it, vi } from 'vitest'
 import { ADMIN_FEATURES } from '../src/admin/plugins/types.js'
 
@@ -13,7 +14,10 @@ const html = readFileSync(join(process.cwd(), 'packages/web/public/admin.html'),
 type Fetcher = ReturnType<typeof vi.fn<typeof fetch>>
 
 /** A backend that is ready and empty; `inspect` decides what checking a source does. */
-function backend(inspect: (body: Record<string, unknown>) => Response): Fetcher {
+function backend(
+  inspect: (body: Record<string, unknown>) => Response,
+  packages: PackageInstalledDescriptor[] = [],
+): Fetcher {
   return vi.fn<typeof fetch>(async (input, init) => {
     const url = String(input)
     const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {}
@@ -28,7 +32,7 @@ function backend(inspect: (body: Record<string, unknown>) => Response): Fetcher 
         features: Object.values(ADMIN_FEATURES),
       })
     if (url.endsWith('/catalog/list')) return Response.json({ items: [], nextCursor: null })
-    if (url.endsWith('/list')) return Response.json({ packages: [] })
+    if (url.endsWith('/list')) return Response.json({ packages })
     if (url.endsWith('/tree/list')) return Response.json({ desiredDigest: 'sha256-x', actual: true })
     if (url.endsWith('/surfaces')) return Response.json({ surfaces: [] })
     if (url.endsWith('/pins/inspect')) return Response.json({ orphans: [] })
@@ -37,7 +41,9 @@ function backend(inspect: (body: Record<string, unknown>) => Response): Fetcher 
   })
 }
 
-async function mount(fetcher: Fetcher, before?: () => void): Promise<void> {
+let dispose: (() => void) | undefined
+
+async function mount(fetcher: Fetcher, before?: () => void) {
   document.documentElement.innerHTML = html
     .replace('<link rel="stylesheet" href="/style.css" />', '')
     .replace('<script type="module" src="/admin.js"></script>', '')
@@ -46,12 +52,14 @@ async function mount(fetcher: Fetcher, before?: () => void): Promise<void> {
   vi.stubGlobal('fetch', fetcher)
   const { mountPluginAdmin } = await import('../src/admin/plugins/admin.js')
   const mounted = mountPluginAdmin()
+  dispose = mounted.dispose
   await mounted.ready
   // The install button is inert until the admin context has loaded.
   await vi.waitFor(() => expect(document.querySelector('#install-source')).not.toBeNull())
   await vi.waitFor(() =>
     expect((document.querySelector('#plugin-list') as HTMLElement).textContent).not.toContain('正在'),
   )
+  return mounted
 }
 
 const sourceDialog = () => document.getElementById('source-dialog') as HTMLDialogElement
@@ -83,10 +91,54 @@ function submit(type: string, ref: string): void {
 }
 
 afterEach(() => {
+  dispose?.()
+  dispose = undefined
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
   sessionStorage.clear()
   document.documentElement.replaceChildren()
+})
+
+it('keeps the update source form open when launched from installed plugin details and refreshed', async () => {
+  const installed: PackageInstalledDescriptor = {
+    id: 'acme/device',
+    version: '1.0.0',
+    source: { type: 'file', ref: 'file:./examples/device' },
+    integrity: `sha256-${'a'.repeat(64)}`,
+    capabilityHash: 'b'.repeat(64),
+    trusted: true,
+    desired: 'installed-disabled',
+    actual: 'not-running',
+    cleanupPending: false,
+    rollbackTarget: null,
+    contributions: [],
+    blockers: [],
+  }
+  const fetcher = backend(
+    () => Response.json({ operationId: 'inspect-update', profile: 'local-dev' }),
+    [installed],
+  )
+  const mounted = await mount(fetcher)
+  await vi.waitFor(() => expect(document.querySelector('.plugin-row')).not.toBeNull())
+  document.querySelector<HTMLElement>('.plugin-row[data-plugin-id="acme/device"]')?.click()
+  const detail = document.getElementById('plugin-detail') as HTMLDialogElement
+  expect(detail.open).toBe(true)
+  const update = [...detail.querySelectorAll('button')].find(
+    (button) => button.textContent === 'Update from a new source',
+  )
+  expect(update).toBeDefined()
+  update?.click()
+  expect(sourceDialog().open).toBe(true)
+  expect(detail.open).toBe(false)
+  setNativeValue(sourceType(), 'file')
+  setNativeValue(sourceRef(), installed.source.ref)
+  await mounted.reload()
+  expect(sourceDialog().open).toBe(true)
+  expect(detail.open).toBe(false)
+  expect(sourceRef().value).toBe(installed.source.ref)
+  submit('file', installed.source.ref)
+  await vi.waitFor(() => expect(inspectCalls(fetcher)).toHaveLength(1))
+  await vi.waitFor(() => expect(sourceDialog().open).toBe(false))
 })
 
 it('keeps the dialog open and says what is wrong when a file source lacks its file: prefix', async () => {

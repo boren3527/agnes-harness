@@ -120,8 +120,8 @@ describe('tool types', () => {
       }),
     })
   })
-  it('ToolMeta requires all eight keys (no optional markers)', () => {
-    expectTypeOf<keyof ToolMeta>().toEqualTypeOf<
+  it('ToolMeta requires all eight keys; returnsImages is the one optional key', () => {
+    expectTypeOf<Exclude<keyof ToolMeta, 'returnsImages'>>().toEqualTypeOf<
       | 'isReadOnly'
       | 'isDestructive'
       | 'isConcurrencySafe'
@@ -131,6 +131,7 @@ describe('tool types', () => {
       | 'deferLoading'
       | 'requiresApproval'
     >()
+    expectTypeOf<ToolMeta['returnsImages']>().toEqualTypeOf<boolean | undefined>()
     // @ts-expect-error costHint 键不能省略——「声明无」也要显式写 undefined
     const m: ToolMeta = {
       isReadOnly: true,
@@ -179,6 +180,8 @@ describe('tool types', () => {
   it('pins the exact key set: nine seam windows plus kernel facilities, nothing else (spec §6.1)', () => {
     expectTypeOf<keyof ToolContext>().toEqualTypeOf<
       | 'skillInstall'
+      | 'device'
+      | 'imageGeneration'
       | 'mcpManage'
       | 'pluginManage'
       | 'projections'

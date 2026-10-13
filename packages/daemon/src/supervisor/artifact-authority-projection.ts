@@ -1,10 +1,43 @@
 import { types as utilTypes } from 'node:util'
-import { type ArtifactRef, type EventEnvelope, validateEvent } from '@agnes/protocol'
+import { type ArtifactRef, type EventEnvelope, readDeviceCaptureEvent, validateEvent } from '@agnes/protocol'
 import type {
   ArtifactAuthorityBinding,
   ArtifactAuthorityWriteResult,
 } from '../local/artifact-read-authority.js'
 import type { ArtifactReadScopeAuthority } from '../local/methods/artifacts.js'
+
+type MediaResult = Pick<EventEnvelope, 'origin' | 'trust'> &
+  Partial<Pick<EventEnvelope, 'lane' | 'sourceEventSeqs' | 'data'>>
+
+/**
+ * Whether the images in a tool result may reach the model: the screen and document readers' when
+ * untrusted, read's when trusted, and any other tool's only when the result is closed-world (trusted)
+ * and `call`, the recorded tool/call row the result names as its source, declared `returnsImages`.
+ */
+export function requestMediaOriginIsValid(result: MediaResult, call?: EventEnvelope): boolean {
+  if (['tool:computer_use', 'tool:document_read'].includes(result.origin)) return result.trust === 'untrusted'
+  if (result.trust !== 'trusted') return false
+  if (result.origin === 'tool:read') return true
+  if (call?.type !== 'tool/call' || call.origin !== 'model' || call.trust !== 'trusted') return false
+  const data = call.data as {
+    toolUseId?: unknown
+    name?: unknown
+    resolvedPolicy?: { returnsImages?: unknown }
+  }
+  return (
+    result.sourceEventSeqs?.length === 1 &&
+    result.sourceEventSeqs[0] === call.seq &&
+    (result.lane ?? 'main') === (call.lane ?? 'main') &&
+    result.origin === `tool:${String(data.name)}` &&
+    (result.data as { toolUseId?: unknown } | undefined)?.toolUseId === data.toolUseId &&
+    data.resolvedPolicy?.returnsImages === true
+  )
+}
+
+/** A tool/call row whose recorded policy declares that its results carry images. */
+const declaresImages = (event: EventEnvelope): boolean =>
+  event.type === 'tool/call' &&
+  (event.data as { resolvedPolicy?: { returnsImages?: unknown } }).resolvedPolicy?.returnsImages === true
 
 const MAX_ROOTS_PER_HEADER = 256
 const ARTIFACT_URI = /^artifact:\/\/([0-9a-f]{64})$/u
@@ -104,7 +137,14 @@ function artifact(value: unknown, sha256: string, mime: string): ArtifactRef | u
   }
 }
 
-function mediaRoots(event: EventEnvelope): readonly Readonly<{ sha256: string; mime: string }>[] | undefined {
+function mediaRoots(
+  event: EventEnvelope,
+  call: EventEnvelope | undefined,
+): readonly Readonly<{ sha256: string; mime: string; size?: number }>[] | undefined {
+  if (event.type === 'x/core/device-capture') {
+    const capture = readDeviceCaptureEvent(event)
+    return capture ? [capture.ref] : undefined
+  }
   if (event.type === 'request/header') {
     if (event.origin !== 'system' || event.trust !== 'trusted') return undefined
     const data = event.data as { media?: { manifest?: unknown } }
@@ -125,10 +165,7 @@ function mediaRoots(event: EventEnvelope): readonly Readonly<{ sha256: string; m
   }
   if (event.type !== 'tool/result') return undefined
   const data = event.data as { content?: unknown; isError?: unknown }
-  const imageResult =
-    (['tool:computer_use', 'tool:document_read'].includes(event.origin) && event.trust === 'untrusted') ||
-    (event.origin === 'tool:read' && event.trust === 'trusted')
-  if (!imageResult || data.isError !== false) return undefined
+  if (!requestMediaOriginIsValid(event, call) || data.isError !== false) return undefined
   if (!Array.isArray(data.content)) return undefined
   const roots = new Map<string, Readonly<{ sha256: string; mime: string }>>()
   for (const value of data.content) {
@@ -184,6 +221,8 @@ export function createArtifactAuthorityProjection(
     throw unavailable()
   }
   const lanes = new Map<string, Map<string, LaneState>>()
+  // Per session, the tool/call rows that declared images, by seq; their results name them as source.
+  const imageCalls = new Map<string, Map<number, EventEnvelope>>()
   const epochs = new Map<string, EpochState>()
   const epoch = (sessionId: string, laneId: string) => {
     const state = epochs.get(sessionId) ?? { session: 0, lanes: new Map<string, number>() }
@@ -211,7 +250,9 @@ export function createArtifactAuthorityProjection(
       const checked = validateEvent(raw)
       if (!checked.ok || signal.aborted) return
       const event = checked.value as EventEnvelope
-      const roots = mediaRoots(event)
+      const calls = imageCalls.get(sessionId) ?? new Map<number, EventEnvelope>()
+      if (declaresImages(event)) imageCalls.set(sessionId, calls.set(event.seq, event))
+      const roots = mediaRoots(event, calls.get(event.sourceEventSeqs?.[0] ?? 0))
       if (!roots?.length) return
       const laneId = event.lane ?? 'main'
       const observedEpoch = epoch(sessionId, laneId)
@@ -226,7 +267,13 @@ export function createArtifactAuthorityProjection(
           entry.sha256,
           entry.mime,
         )
-        if (!ref || signal.aborted || !current(sessionId, laneId, observedEpoch)) throw unavailable()
+        if (
+          !ref ||
+          (entry.size !== undefined && entry.size !== ref.size) ||
+          signal.aborted ||
+          !current(sessionId, laneId, observedEpoch)
+        )
+          throw unavailable()
         bindings.push(Object.freeze({ sessionId, laneId, ownerId, artifact: ref }))
       }
       const confirmedOwner = owner(await ownership.resolve(sessionId, signal))
@@ -312,6 +359,7 @@ export function createArtifactAuthorityProjection(
     revokeLane,
     resetSession(sessionId: string) {
       bumpSession(sessionId)
+      imageCalls.delete(sessionId)
       const session = lanes.get(sessionId)
       lanes.delete(sessionId)
       if (!session) return

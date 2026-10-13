@@ -12,6 +12,8 @@
       "!**/generated",
       "!**/dist",
       "!**/node_modules",
+      "!examples/packages/aka-robot-plugin/runtime.cjs",
+      "!examples/packages/aka-robot-plugin/client/bundle.js",
       "!docs",
       "!packages/web-ui/src/conversation/tailwind.css",
       "!packages/base/fixtures/tool-schemas",

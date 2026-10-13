@@ -1,12 +1,12 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createExtensionActivationBarrier, type Host } from '@agnes/host'
+import { createExtensionActivationBarrier, type Host, pluginRowSource } from '@agnes/host'
 import { type ExtensionCallResult, rpcError } from '@agnes/protocol'
 import { describe, expect, it, vi } from 'vitest'
 import { CommandQueue } from '../src/local/command-queue.js'
 import { LocalEndpoint } from '../src/local/endpoint.js'
-import { registerExtensions } from '../src/local/methods/extensions.js'
+import { executeJournaledEffect, registerExtensions } from '../src/local/methods/extensions.js'
 import { type CommandJournal, MemoryJournal } from '../src/local/ports.js'
 import { PersistentCommandJournal } from '../src/storage/command-journal.js'
 import { sqliteTables } from './sqlite-tables.js'
@@ -73,6 +73,179 @@ const ackRequest = (id: number, commandId: string) => ({
 })
 
 describe('S5 extension.call daemon boundary', () => {
+  it('reads only a completed original recognition receipt after restart without entering the service', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agnes-recognition-readback-'))
+    const database = join(dir, 'journal.db'),
+      queue = new CommandQueue()
+    let tables = sqliteTables(database)
+    const params = {
+      sessionId: 'device-session',
+      extension: pluginRowSource('ext:agnes-examples/aka-robot'),
+      service: 'aka.recognition.test',
+      commandId: 'original-recognition',
+      input: { bindingRevision: 1, configRevision: 1, recognitionRevision: 2, roundRevision: 3 },
+    }
+    const identity = {
+      principalId: 'owner',
+      clientId: 'client-web',
+      sessionId: params.sessionId,
+      commandId: params.commandId,
+    }
+    const receipt = { output: { frameId: 'original', providerRequestId: 'charged-once', detections: [] } }
+    const call = vi.fn(async (): Promise<ExtensionCallResult> => receipt)
+    const run = (
+      journal: CommandJournal,
+      readbackOnly?: true,
+      p = params,
+      principalId = identity.principalId,
+    ) =>
+      executeJournaledEffect({
+        journal,
+        commandQueue: queue,
+        callService: call,
+        params: p,
+        credential: { kind: 'local' },
+        signal: new AbortController().signal,
+        serviceId: p.service,
+        identity: { ...identity, commandId: p.commandId, principalId },
+        bindingKind: 'client-effect',
+        ...(readbackOnly ? { readbackOnly } : {}),
+      })
+    try {
+      const first = new PersistentCommandJournal(tables.table('command_journal'))
+      await expect(run(first, true)).rejects.toMatchObject({ data: { code: 'OUTCOME_UNKNOWN' } })
+      expect(call).not.toHaveBeenCalled()
+      await expect(run(first)).resolves.toEqual(receipt)
+      const unknown = { ...params, commandId: 'unknown-recognition' }
+      call.mockRejectedValueOnce(new Error('lost detection response'))
+      await expect(run(first, undefined, unknown)).rejects.toMatchObject({
+        data: { code: 'OUTCOME_UNKNOWN' },
+      })
+      await tables.close()
+      tables = sqliteTables(database)
+      const journal = new PersistentCommandJournal(tables.table('command_journal'))
+      await expect(run(journal, true)).resolves.toEqual(receipt)
+      await expect(run(journal, true, unknown)).rejects.toMatchObject({ data: { code: 'OUTCOME_UNKNOWN' } })
+      await expect(run(journal, undefined, unknown)).rejects.toMatchObject({
+        data: { code: 'OUTCOME_UNKNOWN' },
+      })
+      await expect(run(journal, true, params, 'other-owner')).rejects.toMatchObject({
+        data: { code: 'OUTCOME_UNKNOWN' },
+      })
+      await expect(
+        run(journal, true, { ...params, input: { ...params.input, roundRevision: 4 } }),
+      ).rejects.toMatchObject({ data: { code: 'ID_CONFLICT' } })
+      await expect(
+        run(journal, true, { ...params, service: 'aka.recognition.enable' }),
+      ).rejects.toMatchObject({ data: { code: 'CAPABILITY_DENIED' } })
+      expect(call).toHaveBeenCalledTimes(2)
+    } finally {
+      await queue.close()
+      await tables.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+  it('recovers only the original AKA photo command across a durable journal restart', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agnes-photo-recovery-'))
+    const database = join(dir, 'journal.db')
+    const queue = new CommandQueue()
+    let tables = sqliteTables(database)
+    const params = {
+      sessionId: 'device-session',
+      extension: pluginRowSource('ext:agnes-examples/aka-robot'),
+      service: 'aka.capture',
+      commandId: 'original-photo',
+      input: { bindingRevision: 1, configRevision: 1 },
+    }
+    const identity = {
+      principalId: 'owner',
+      clientId: 'client-web',
+      sessionId: params.sessionId,
+      commandId: params.commandId,
+    }
+    const recovered = { output: { frameId: 'original-frame', eventSeq: 7 } }
+    const call = vi.fn(async (...args: Parameters<Host['callService']>): Promise<ExtensionCallResult> => {
+      if (!args[3]?.recoverOnly) throw new Error('lost reply after original selection')
+      return recovered
+    })
+    const run = (journal: CommandJournal, input = params, readbackOnly?: true) =>
+      executeJournaledEffect({
+        journal,
+        commandQueue: queue,
+        callService: call,
+        params: input,
+        credential: { kind: 'local' },
+        signal: new AbortController().signal,
+        serviceId: 'aka.capture',
+        identity,
+        bindingKind: 'client-effect',
+        ...(readbackOnly ? { readbackOnly } : {}),
+      })
+    try {
+      const emptyJournal = new PersistentCommandJournal(tables.table('command_journal'))
+      await expect(run(emptyJournal, params, true)).rejects.toMatchObject({
+        data: { code: 'OUTCOME_UNKNOWN' },
+      })
+      expect(call).not.toHaveBeenCalled()
+      await expect(run(emptyJournal)).rejects.toMatchObject({
+        data: { code: 'OUTCOME_UNKNOWN' },
+      })
+      await tables.close()
+      tables = sqliteTables(database)
+      const journal = new PersistentCommandJournal(tables.table('command_journal'))
+      await expect(
+        run(journal, { ...params, input: { bindingRevision: 1, configRevision: 2 } }),
+      ).rejects.toMatchObject({ data: { code: 'ID_CONFLICT' } })
+      await expect(run(journal, params, true)).resolves.toEqual(recovered)
+      expect(call.mock.calls[1]?.[3]).toEqual({ commandId: params.commandId, recoverOnly: true })
+      await expect(run(journal, params, true)).resolves.toEqual(recovered)
+      expect(call).toHaveBeenCalledTimes(2)
+    } finally {
+      await queue.close()
+      await tables.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps failed photo recovery uncertain even when the recovery handler refuses before dispatch', async () => {
+    const queue = new CommandQueue(),
+      journal = new MemoryJournal()
+    const call = vi.fn(async (...args: Parameters<Host['callService']>): Promise<ExtensionCallResult> => {
+      if (args[3]?.recoverOnly) throw rpcError('CAPABILITY_DENIED', { _servicePhase: 'pre-dispatch' })
+      throw new Error('unknown original')
+    })
+    const params = {
+      sessionId: 'device-session',
+      extension: pluginRowSource('ext:agnes-examples/aka-robot'),
+      service: 'aka.capture',
+      commandId: 'photo',
+      input: {},
+    }
+    const run = () =>
+      executeJournaledEffect({
+        journal,
+        commandQueue: queue,
+        callService: call,
+        params,
+        credential: { kind: 'local' },
+        signal: new AbortController().signal,
+        serviceId: 'aka.capture',
+        identity: {
+          principalId: 'owner',
+          clientId: 'client-web',
+          sessionId: params.sessionId,
+          commandId: params.commandId,
+        },
+        bindingKind: 'client-effect',
+      })
+    try {
+      for (let i = 0; i < 3; i++)
+        await expect(run()).rejects.toMatchObject({ data: { code: 'OUTCOME_UNKNOWN' } })
+      expect(call.mock.calls.map((args) => args[3]?.recoverOnly ?? false)).toEqual([false, true, true])
+    } finally {
+      await queue.close()
+    }
+  })
   it('fails closed before inspection for stale or substituted session ids', async () => {
     const callService = vi.fn(async () => ({ output: { ok: true } })) as unknown as Host['callService']
     const stale = endpoint(

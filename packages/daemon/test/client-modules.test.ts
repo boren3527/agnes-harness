@@ -1,6 +1,17 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { InstalledInventory, InstalledPackage, PackageManager } from '@agnes/package-manager'
 import {
   buildRuntimeTarget,
@@ -84,6 +95,42 @@ const running = (integrity: string): PackageActivationObservation => ({
   actualIntegrity: integrity,
 })
 
+it('checks independent backend rows concurrently while retaining live failures and stable roster order', async () => {
+  const files = fixture()
+  const packages = ['acme/first', 'acme/second', 'acme/failed'].map((id) => {
+    const row = installed({ directory: files.packageDirectory, backend: true })
+    return { ...row, id, contributions: row.contributions.map((c) => ({ ...c, id })) } as InstalledPackage
+  })
+  const installedRows = { profile: 'local-dev', hash: 'inventory', packages }
+  const registry = createClientModuleRegistry({ snapshotDirectory: () => files.snapshots })
+  const releases = new Map<string, (result: PackageActivationObservation) => void>()
+  const pending = registry.list({
+    profile: 'local-dev',
+    profileDirectory: files.root,
+    inventory: installedRows,
+    actual: (id) =>
+      id === 'acme/failed'
+        ? Promise.reject(new Error('fixture unavailable'))
+        : new Promise((resolve) => releases.set(id, resolve)),
+    refreshInventory: async () => installedRows,
+  })
+  try {
+    await vi.waitFor(() => expect([...releases.keys()].sort()).toEqual(['acme/first', 'acme/second']))
+  } finally {
+    for (const release of releases.values()) release(running(packages[0]!.entry.integrity))
+  }
+  try {
+    const result = await pending
+    expect(result.rows?.map((row) => row.packageId)).toEqual(['acme/first', 'acme/second'])
+    expect(result.statuses.find((row) => row.packageId === 'acme/failed')).toMatchObject({
+      state: 'blocked',
+      reason: 'backend-revision-unavailable',
+    })
+  } finally {
+    registry.close()
+  }
+})
+
 function webArtifact(packageId: string, revision: string, disabled = false) {
   return encodeRuntimeTargetArtifact(
     buildRuntimeTarget({
@@ -108,6 +155,43 @@ function webArtifact(packageId: string, revision: string, disabled = false) {
 }
 
 describe('client module immutable snapshots', () => {
+  it('serves the actual AKA route configuration module through the production snapshot import closure', async () => {
+    const files = fixture()
+    const source = fileURLToPath(
+      new URL('../../../examples/packages/aka-robot-plugin/client/', import.meta.url),
+    )
+    cpSync(source, join(files.packageDirectory, 'client'), { recursive: true })
+    const row = installed({
+      directory: files.packageDirectory,
+      entry: './client/index.js',
+      styles: ['./client/index.css'],
+      slots: ['workbench.device', 'tool.call.toolview'],
+      slotCatalogVersion: 'dsh-client-slots/v1',
+    })
+    const registry = createClientModuleRegistry({ snapshotDirectory: () => files.snapshots })
+    const input = {
+      profile: 'local-dev',
+      profileDirectory: files.root,
+      inventory: inventory(row),
+      actual: async () => undefined,
+      refreshInventory: async () => inventory(row),
+    }
+    try {
+      const roster = await registry.list(input)
+      expect(roster.modules).toHaveLength(1)
+      const module = roster.modules[0]
+      if (!module) throw new Error('Missing AKA client snapshot')
+      for (const name of ['index.js', 'ground-settings.js', 'route-settings.js', 'manual-control.js']) {
+        const path = module.entryUrl.replace(/index\.js$/, name)
+        expect(await registry.read({ ...input, path })).toEqual({
+          found: true,
+          base64: readFileSync(join(source, name)).toString('base64'),
+        })
+      }
+    } finally {
+      registry.close()
+    }
+  })
   it('binds a row-owned client descriptor to its plugin service identity', async () => {
     const files = fixture()
     const base = installed({ directory: files.packageDirectory, backend: true })
@@ -120,7 +204,7 @@ describe('client module immutable snapshots', () => {
           id: owner,
           rowId: 'ext:acme/panel',
           path: './agnes.client.json',
-          client: { entry: './dist/index.js', services: ['panel.search'] },
+          client: { entry: './dist/index.js', services: ['panel.search', 'aka.media.ticket'] },
         },
       ],
     } as InstalledPackage
@@ -161,11 +245,81 @@ describe('client module immutable snapshots', () => {
       {
         moduleName: owner,
         extIds: [owner],
-        services: ['panel.search'],
+        services: ['panel.search', 'aka.media.ticket'],
         phase: 'ready',
       },
     ])
+    const readyRow = roster.rows?.[0]
+    if (!readyRow) throw new Error('missing ready row')
+    const mediaInput = {
+      profile: 'local-dev',
+      profileDirectory: files.root,
+      rowId: readyRow.rowId,
+      inventory: inventory(row),
+      actual: async () => running(row.entry.integrity),
+      refreshInventory: async () => inventory(row),
+    }
+    const mediaOwner = await registry.mediaOwner?.(mediaInput)
+    expect(mediaOwner).toMatchObject({ backendRowId: backend.id, revision: row.entry.integrity })
+    expect(Object.isFrozen(mediaOwner)).toBe(true)
+    expect(await registry.mediaOwner?.(mediaInput)).toEqual(mediaOwner)
+    expect(await registry.mediaOwner?.({ ...mediaInput, rowId: backend.id })).toBeNull()
+    const mediaEndpoint = {
+      found: true as const,
+      port: 12345,
+      authorization: `Bearer ${'a'.repeat(43)}`,
+      rowRevision: row.entry.integrity,
+      registrationId: '11111111-1111-4111-8111-111111111111',
+      workerGeneration: 1,
+      deviceId: 'robot',
+      bindingRevision: 1,
+      configRevision: 1,
+      rosterRevision: 'untrusted-callback-stamp',
+    }
+    const mediaDispatch = vi.fn(async () => mediaEndpoint)
+    const service = createPackageAdminService({
+      manager: { inventory: async () => inventory(row) } as unknown as PackageManager,
+      profileDirectory: async () => files.root,
+      operations: new FilePackageOperationStore(join(files.root, 'operations')),
+      clientModules: registry,
+      activation: { actual: async () => running(row.entry.integrity) } as never,
+      clientMediaResolve: mediaDispatch,
+    })
+    const grant = {
+      audience: 'admin' as const,
+      principalId: 'owner',
+      clientId: 'launcher',
+      permissions: ['packages.read' as const],
+    }
+    const params = { profile: 'local-dev', rowId: readyRow.rowId, sessionId: 'session' }
+    await expect(service.call('_agnes/v1/clientModules.resolveMedia', params, grant)).resolves.toEqual({
+      ...mediaEndpoint,
+      rosterRevision: mediaOwner?.rosterRevision,
+    })
+    expect(mediaDispatch).toHaveBeenCalledWith(
+      { ...params, backendRowId: backend.id, rosterRevision: mediaOwner?.rosterRevision },
+      grant,
+      expect.any(AbortSignal),
+    )
+    mediaDispatch.mockResolvedValueOnce({ ...mediaEndpoint, rowRevision: 'old-snapshot' })
+    await expect(service.call('_agnes/v1/clientModules.resolveMedia', params, grant)).rejects.toMatchObject({
+      message: 'CAPABILITY_DENIED',
+    })
+    mediaDispatch.mockImplementationOnce(async () => {
+      backendDisabled = true
+      return mediaEndpoint
+    })
+    await expect(service.call('_agnes/v1/clientModules.resolveMedia', params, grant)).rejects.toMatchObject({
+      message: 'CAPABILITY_DENIED',
+    })
+    backendDisabled = false
+    const cancelled = new AbortController()
+    cancelled.abort()
+    await expect(
+      service.call('_agnes/v1/clientModules.resolveMedia', params, grant, cancelled.signal),
+    ).rejects.toBeDefined()
     backendDisabled = true
+    expect(await registry.mediaOwner?.(mediaInput)).toBeNull()
     const disabled = await registry.list({
       profile: 'local-dev',
       profileDirectory: files.root,
@@ -174,7 +328,7 @@ describe('client module immutable snapshots', () => {
       refreshInventory: async () => inventory(row),
     })
     expect(disabled.rows).toEqual([])
-    registry.close()
+    service.closeClientModules()
   })
 
   it('projects desired, previous, and lastGood runtime artifacts for supervisor wiring', () => {
@@ -292,6 +446,21 @@ describe('client module immutable snapshots', () => {
     })
     expect((await restarted.list(input)).modules).toEqual(roster.modules)
     expect(restartedEvents).toEqual(['rebuilt'])
+    // A warmed verification must not serve changed bytes, even with the same length and restored mtime.
+    const copiedEntry = join(
+      files.snapshots,
+      'acme',
+      'panel',
+      encodeURIComponent(row.entry.integrity),
+      'dist',
+      'index.js',
+    )
+    const before = statSync(copiedEntry)
+    writeFileSync(copiedEntry, 'export const value = "v9"\n')
+    utimesSync(copiedEntry, before.atime, before.mtime)
+    const afterTamper = await registry.read({ ...input, path: module.entryUrl })
+    if (afterTamper.found)
+      expect(Buffer.from(afterTamper.base64, 'base64').toString()).toBe('export const value = "v1"\n')
     registry.close()
     restarted.close()
   })

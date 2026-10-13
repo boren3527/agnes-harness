@@ -21,6 +21,8 @@ export {
   type PermissionMode,
   type PermissionPickerState,
 } from './composer.js'
+// 输入框与宿主提交路径共用同一份「校验错误 → 词条」映射，避免各写一套后文案漂移。
+export { type AttachmentErrorNotice, attachmentErrorNotice } from './composer-errors.js'
 export {
   type ConversationAttachmentsRenderer,
   createConversationAttachmentsRenderer,
@@ -43,6 +45,7 @@ export {
   type ConversationHandle,
   type ConversationProps,
 } from './conversation.js'
+export { DeviceWorkbenchShell, type DeviceWorkbenchShellProps } from './device-workbench.js'
 export type {
   BrowserLog,
   BrowserLogEntry,
@@ -176,6 +179,7 @@ export const BUILTIN_WEB_UNITS: readonly WebUnitDefinition[] = Object.freeze([
   unit('@agnes/web-sidebar', './sidebar.js', ['ui:sidebar'], 'root'),
   unit('@agnes/web-transcript', './transcript.js', ['ui:transcript'], 'session-maybe'),
   unit('@agnes/web-conversation', './conversation.js', ['ui:conversation'], 'session-maybe'),
+  unit('@agnes/web-device', './device-workbench.js', ['workbench.device'], 'session'),
   unit('@agnes/web-topbar', './topbar.js', ['ui:topbar'], 'root'),
   unit('@agnes/web-approval', './approval.js', ['ui:approval'], 'session-maybe'),
   unit('@agnes/web-composer', './composer.js', ['ui:composer'], 'session-maybe'),

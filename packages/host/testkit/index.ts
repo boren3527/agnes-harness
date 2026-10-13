@@ -132,6 +132,16 @@ export type TestHostOptions = {
   /** Opt out of the production publisher view in tests that deliberately exercise raw Kernel ports. */
   currentRuntime?: import('@agnes/core').KernelOptions['currentRuntime']
   serviceAuthority?: import('../src/ext-host/service-invocation.js').ServiceAuthority
+  deviceSession?: (
+    sessionKey: string,
+    signal: AbortSignal,
+    view?: 'connection' | 'recognition',
+  ) => Promise<unknown>
+  deviceRecognitionExecute?: HostOptions['deviceRecognitionExecute']
+  deviceRecognitionBudget?: HostOptions['deviceRecognitionBudget']
+  deviceRecognitionAuthorization?: HostOptions['deviceRecognitionAuthorization']
+  deviceCaptureSelection?: HostOptions['deviceCaptureSelection']
+  deviceSessionRetain?: HostOptions['deviceSessionRetain']
   dataDir: string
   /** Builtin template loaded by the real resolver; omitted uses local-dev. */
   template?: string
@@ -148,6 +158,8 @@ export type TestHostOptions = {
   platformCaps?: Record<string, CapabilityLevel['level']>
   platform?: PlatformBackend
   seams?: Parameters<typeof fakeSeams>[0]
+  /** Fit selected real seam factories while retaining the fixture's other adapters and workspace fence. */
+  seamFactories?: PackageModule['seams']
   /**
    * The model this host runs on. A function is handed the resolved profile and the pair host
    * resolved for the model layer - its logger and the deployment's credit rate - which is the only
@@ -272,7 +284,7 @@ export async function createTestHost(o: TestHostOptions): Promise<TestHost> {
       degraded: false,
       confine: ({ argv }) => argv,
     }),
-    seams: Object.fromEntries(SEAM_KEYS.map((n) => [n, async () => seamsImpl[n]])),
+    seams: { ...Object.fromEntries(SEAM_KEYS.map((n) => [n, async () => seamsImpl[n]])), ...o.seamFactories },
     operations: BASE_OPERATIONS,
     presets: {
       base:
@@ -362,6 +374,14 @@ export async function createTestHost(o: TestHostOptions): Promise<TestHost> {
     agnesVersion: '0.1.0',
     env: o.env ?? { ...process.env },
     ...(o.serviceAuthority ? { serviceAuthority: o.serviceAuthority } : {}),
+    ...(o.deviceSession ? { deviceSession: o.deviceSession } : {}),
+    ...(o.deviceRecognitionExecute ? { deviceRecognitionExecute: o.deviceRecognitionExecute } : {}),
+    ...(o.deviceRecognitionBudget ? { deviceRecognitionBudget: o.deviceRecognitionBudget } : {}),
+    ...(o.deviceRecognitionAuthorization
+      ? { deviceRecognitionAuthorization: o.deviceRecognitionAuthorization }
+      : {}),
+    ...(o.deviceCaptureSelection ? { deviceCaptureSelection: o.deviceCaptureSelection } : {}),
+    ...(o.deviceSessionRetain ? { deviceSessionRetain: o.deviceSessionRetain } : {}),
     ...(o.runtimePluginCatalogue ? { runtimePluginCatalogue: o.runtimePluginCatalogue } : {}),
     ...(o.runtimePluginSources ? { runtimePluginSources: o.runtimePluginSources } : {}),
     ...(o.ordinaryStartTimeoutMs === undefined ? {} : { ordinaryStartTimeoutMs: o.ordinaryStartTimeoutMs }),

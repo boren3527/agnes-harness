@@ -2,7 +2,7 @@
 
 import { Context } from '@agnes/cordis'
 import type { UINode, UITurn } from '@agnes/protocol'
-import { SlotRegistry } from '@agnes/web-client'
+import { type ClientResourceService, SessionService, SlotRegistry } from '@agnes/web-client'
 import { createElement, useEffect, useLayoutEffect } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -26,6 +26,140 @@ function renderer() {
 }
 
 describe('timeline reader semantics', () => {
+  it('renders authorized saved artifact images and releases their URLs when removed', async () => {
+    const ctx = new Context(),
+      session = new SessionService(ctx, 'session-a')
+    const image = {
+      url: 'blob:https://example.test/saved',
+      artifact: { sha256: 'a'.repeat(64), size: 100, mime: 'image/jpeg' },
+      release: vi.fn(),
+    }
+    const load = vi.fn(async () => image)
+    const transcript = document.createElement('div'),
+      newContentButton = document.createElement('button')
+    const timeline = createTimelineRenderer({
+      transcript,
+      newContentButton,
+      locale: zhLocaleService(),
+      session,
+      resources: { images: { load } } as unknown as ClientResourceService,
+    })
+    const node: UINode = { kind: 'artifact', id: 'saved', seq: 1, name: 'photo', ref: image.artifact }
+    timeline.render([node])
+    await vi.waitFor(() => expect(transcript.querySelector('img')?.alt).toBe('留档图片：photo'))
+    expect(load).toHaveBeenCalledWith({
+      laneId: 'main',
+      artifact: image.artifact,
+      signal: expect.any(AbortSignal),
+    })
+    const previousImage = transcript.querySelector('img')
+    timeline.render([{ ...node, name: 'renamed' }])
+    previousImage?.dispatchEvent(new Event('error'))
+    expect(transcript.querySelector('img')?.alt).toBe('留档图片：renamed')
+    expect(image.release).not.toHaveBeenCalled()
+    expect(load).toHaveBeenCalledTimes(1)
+    const turn: UITurn = {
+      id: 'image-turn',
+      turn: 1,
+      startSeq: 1,
+      startedAt: '2026-10-13T00:00:00.000Z',
+      status: 'running',
+      nodeIds: ['saved'],
+      inherited: false,
+      forkable: true,
+      usage: {
+        totals: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+        reasoningComplete: true,
+        billingComplete: true,
+        calls: [],
+      },
+    }
+    timeline.render([node], [turn])
+    expect(transcript.querySelector('.turn-final img')).not.toBeNull()
+    const nextImage = { ...node, id: 'final-image', seq: 2 }
+    timeline.render(
+      [node, nextImage],
+      [{ ...turn, status: 'completed', endSeq: 3, nodeIds: ['saved', 'final-image'] }],
+    )
+    await vi.waitFor(() => expect(transcript.querySelector('.turn-final img')).not.toBeNull())
+    expect(transcript.querySelector('.turn-process-body img')).not.toBeNull()
+    expect(transcript.querySelector<HTMLDetailsElement>('.turn-process')?.open).toBe(false)
+    timeline.render([])
+    expect(image.release).toHaveBeenCalledTimes(2)
+    timeline.dispose?.()
+  })
+
+  it.each(['session-switch', 'dispose'])('discards late saved-image reads after %s', async (mode) => {
+    const ctx = new Context(),
+      session = new SessionService(ctx, 'session-a')
+    const image = { url: 'blob:https://example.test/late', release: vi.fn() }
+    let finish: ((value: typeof image) => void) | undefined
+    const load = vi.fn(
+      () =>
+        new Promise<typeof image>((resolve) => {
+          finish = resolve
+        }),
+    )
+    const transcript = document.createElement('div'),
+      newContentButton = document.createElement('button')
+    const timeline = createTimelineRenderer({
+      transcript,
+      newContentButton,
+      locale: zhLocaleService(),
+      session,
+      resources: { images: { load } } as unknown as ClientResourceService,
+    })
+    timeline.render([
+      {
+        kind: 'artifact',
+        id: 'saved',
+        seq: 1,
+        name: 'photo',
+        ref: { sha256: 'a'.repeat(64), size: 100, mime: 'image/jpeg' },
+      },
+    ])
+    if (mode === 'session-switch') session.setSession('session-b')
+    else timeline.dispose?.()
+    finish?.(image)
+    await vi.waitFor(() => expect(image.release).toHaveBeenCalledTimes(1))
+    expect(transcript.querySelector('img')).toBeNull()
+    expect(load).toHaveBeenCalledTimes(1)
+    timeline.dispose?.()
+  })
+
+  it('offers a saved-image read retry without issuing a capture command', async () => {
+    const ctx = new Context(),
+      session = new SessionService(ctx, 'session-a')
+    const image = { url: 'blob:https://example.test/retry', release: vi.fn() }
+    const load = vi.fn().mockRejectedValueOnce(new Error('private error')).mockResolvedValueOnce(image)
+    const transcript = document.createElement('div'),
+      newContentButton = document.createElement('button')
+    const timeline = createTimelineRenderer({
+      transcript,
+      newContentButton,
+      locale: zhLocaleService(),
+      session,
+      resources: { images: { load } } as unknown as ClientResourceService,
+    })
+    timeline.render([
+      {
+        kind: 'artifact',
+        id: 'saved',
+        seq: 1,
+        name: 'photo',
+        ref: { sha256: 'a'.repeat(64), size: 100, mime: 'image/jpeg' },
+      },
+    ])
+    await vi.waitFor(() =>
+      expect(transcript.querySelector('[role="alert"]')?.textContent).toBe('无法展示留档图片。'),
+    )
+    expect(transcript.textContent).not.toContain('private error')
+    transcript.querySelector<HTMLButtonElement>('.timeline-artifact-preview button')?.click()
+    await vi.waitFor(() => expect(transcript.querySelector('img')).not.toBeNull())
+    expect(load).toHaveBeenCalledTimes(2)
+    timeline.dispose?.()
+  })
+
   it('unsubscribes from locale changes when disposed', () => {
     const transcript = document.createElement('div')
     const newContentButton = document.createElement('button')

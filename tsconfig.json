@@ -2,6 +2,9 @@
   "files": [],
   "references": [
     {
+      "path": "examples/packages/aka-robot-plugin"
+    },
+    {
       "path": "tsconfig.config.json"
     },
     {
@@ -33,6 +36,12 @@
     },
     {
       "path": "packages/protocol-validation"
+    },
+    {
+      "path": "packages/mhs"
+    },
+    {
+      "path": "examples/mars-world"
     },
     {
       "path": "packages/package-admin-client-node"

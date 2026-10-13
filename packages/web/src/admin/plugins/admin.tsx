@@ -56,7 +56,6 @@ import {
   type AdminSurfaceLink,
   hasFeature,
   type PluginRuntimeSource,
-  type PluginTreeView,
 } from './types.js'
 
 const OPERATION_STORAGE_PREFIX = 'agnes-plugin-operation-ids:'
@@ -230,8 +229,8 @@ class PluginAdminPage {
   #api: PluginAdminApi | undefined
   #tab: 'installed' | 'discover' = 'installed'
   #query = ''
-  #queryRaw = ''
   #generation = 0
+  #disposed = false
   #pendingConfirm: PendingConfirm | undefined
   #confirmActionDisabled = false
   #confirmTrigger: HTMLElement | undefined
@@ -324,7 +323,6 @@ class PluginAdminPage {
       }
     })
     this.#search.addEventListener('input', () => {
-      this.#queryRaw = this.#search.value
       this.#query = this.#search.value.trim()
       if (this.#tab === 'installed') this.render()
       else void this.loadCatalog()
@@ -350,6 +348,7 @@ class PluginAdminPage {
   }
 
   async refresh(options: { preserveError?: boolean } = {}): Promise<void> {
+    if (this.#disposed) return
     const generation = ++this.#generation
     this.#state = {
       ...this.#state,
@@ -366,34 +365,31 @@ class PluginAdminPage {
       // Context remains useful even when inventory cannot be read: its recovery flag must still
       // disable effects, while read-only catalog calls may remain available.
       this.#state = { ...this.#state, context }
+      const api = this.#api
+      // Supplementary queries run alongside inventory, but never hold up its first paint.
+      const surfaceRead = api
+        .surfaceLinks()
+        .then((result) => result.surfaces)
+        .catch(() => [])
+      const treeRead = api.treeList().catch(() => undefined)
       const list = await this.#api.list()
-      if (generation !== this.#generation) return
-      let surfaceLinks: readonly AdminSurfaceLink[] = []
-      try {
-        surfaceLinks = (await this.#api.surfaceLinks()).surfaces
-      } catch {
-        // Surface links are supplementary. Never hide a valid installed inventory because the
-        // live route feed is unavailable, and never retain a stale link after it can no longer
-        // be confirmed.
-      }
-      if (generation !== this.#generation) return
-      let tree: PluginTreeView | undefined
-      try {
-        tree = await this.#api.treeList()
-      } catch {
-        // Tree actual is the qualified report view. A miss must not hide installed inventory.
-      }
       if (generation !== this.#generation) return
       this.#state = {
         ...this.#state,
         context,
         installed: list.packages,
-        surfaceLinks,
-        tree,
+        surfaceLinks: [],
+        tree: undefined,
         inventoryAuthoritative: true,
         loading: false,
         connection: 'connected',
       }
+      this.render()
+      // Never retain old links or qualified actual when supplementary reads fail.
+      const [surfaceLinks, tree] = await Promise.all([surfaceRead, treeRead])
+      if (generation !== this.#generation) return
+      this.#state = { ...this.#state, surfaceLinks, tree }
+      this.render()
       this.scheduleTreePoll()
       try {
         const { orphans } = await this.#api.pinsInspect()
@@ -437,7 +433,6 @@ class PluginAdminPage {
     if (this.#tab === tab) return
     this.#tab = tab
     this.#query = ''
-    this.#queryRaw = ''
     this.#state = {
       ...this.#state,
       selectedCatalog: undefined,
@@ -1110,6 +1105,9 @@ class PluginAdminPage {
   /** React 键控行会复用 DOM：键盘焦点跟随 data-plugin-id 保留，无需手工恢复。 */
 
   renderDetail(): void {
+    // A source check or confirmation owns the foreground until it closes. Reopening the
+    // selected detail here would close that dialog again during render or background refresh.
+    if (this.#sourceDialog.open || this.#confirmDialog.open) return
     const item =
       this.#tab === 'installed'
         ? this.#state.installed.find((candidate) => candidate.id === this.#state.selectedId)
@@ -1409,6 +1407,7 @@ class PluginAdminPage {
   }
 
   scheduleTreePoll(): void {
+    if (this.#disposed) return
     if (this.#treeTimer !== undefined) window.clearTimeout(this.#treeTimer)
     this.#treeTimer = window.setTimeout(() => {
       this.#treeTimer = undefined
@@ -1420,14 +1419,17 @@ class PluginAdminPage {
 
   async pollTree(): Promise<void> {
     const api = this.#api
-    if (!api || this.#state.connection !== 'connected') return
+    const generation = this.#generation
+    if (this.#disposed || !api || this.#state.connection !== 'connected') return
     try {
       const tree = await api.treeList()
+      if (this.#disposed || generation !== this.#generation) return
       this.#state = { ...this.#state, tree }
       this.render()
     } catch {
       // Lost tree_changed recovers by the next successful poll, not by inventing actual.
     }
+    if (generation !== this.#generation) return
     this.scheduleTreePoll()
   }
 
@@ -1560,7 +1562,6 @@ class PluginAdminPage {
   async chooseUpdateVersion(item: PackageInstalledDescriptor): Promise<void> {
     this.#tab = 'discover'
     this.#query = item.id
-    this.#queryRaw = item.id
     this.#state = {
       ...this.#state,
       selectedCatalog: undefined,
@@ -1829,8 +1830,10 @@ class PluginAdminPage {
   }
 
   dispose(): void {
+    if (this.#disposed) return
+    this.#disposed = true
+    this.#generation++
     this.#runtimeStop?.()
-    this.#runtimeStop = undefined
     this.#localeStop()
     this.#localeCleanup?.()
     if (this.#treeTimer !== undefined) window.clearTimeout(this.#treeTimer)

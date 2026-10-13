@@ -8,6 +8,8 @@ import {
   type AttachFilter,
   type ClientModuleEffectCallParams,
   type ClientModuleListResult,
+  type ClientModuleMediaResolveParams,
+  type ClientModuleMediaResolveResult,
   type ClientModuleReadResult,
   type ClientModuleRosterRow,
   type ClientModuleServiceCallParams,
@@ -21,6 +23,14 @@ import {
   type ConfigTestResult,
   type Credential,
   type Cursor,
+  type DeviceBindingsListResult,
+  type DeviceConnectionResult,
+  type DeviceConnectionSaveParams,
+  type DeviceRecognitionResult,
+  type DeviceRecognitionSaveParams,
+  type DeviceSessionResult,
+  type ImageGenerationSaveInput,
+  type ImageGenerationSettings,
   META_KEY,
   METHODS,
   type MethodName,
@@ -262,6 +272,11 @@ export class Client {
 
   /** Shared deployment configuration. Secrets are submitted only, never returned or journaled. */
   readonly config = {
+    imageGeneration: {
+      get: (): Promise<ImageGenerationSettings> => this.call('_agnes/v1/config.imageGeneration.get', {}),
+      save: (input: ImageGenerationSaveInput): Promise<ImageGenerationSettings> =>
+        this.call('_agnes/v1/config.imageGeneration.save', input),
+    },
     oauth: (input: ConfigOAuthInput): Promise<ConfigOAuthResult> =>
       this.call(
         '_agnes/v1/config.oauth',
@@ -295,6 +310,28 @@ export class Client {
     add: (path: string): Promise<WorkspaceAddResult> => this.call('_agnes/v1/workspace.add', { path }),
   }
 
+  readonly device = {
+    saveRecognition: (input: DeviceRecognitionSaveParams): Promise<DeviceRecognitionResult> =>
+      this.call('_agnes/v1/device.recognition.save', input),
+    recognition: (sessionId: string): Promise<DeviceRecognitionResult> =>
+      this.call('_agnes/v1/device.recognition.get', { sessionId }),
+    connection: (sessionId: string): Promise<DeviceConnectionResult> =>
+      this.call('_agnes/v1/device.connection.get', { sessionId }),
+    saveConnection: (input: DeviceConnectionSaveParams): Promise<DeviceConnectionResult> =>
+      this.call('_agnes/v1/device.connection.save', input),
+    bindings: (): Promise<DeviceBindingsListResult> => this.call('_agnes/v1/device.bindings.list', {}),
+    session: (sessionId: string): Promise<DeviceSessionResult> =>
+      this.call('_agnes/v1/device.session.get', { sessionId }),
+    bindSession: (
+      sessionId: string,
+      expectedRevision: number,
+      options?: { replaceInactiveDevice?: boolean },
+    ): Promise<DeviceSessionResult> =>
+      this.call('_agnes/v1/device.session.bind', { sessionId, expectedRevision, ...options }),
+    detachSession: (sessionId: string, expectedRevision: number): Promise<DeviceSessionResult> =>
+      this.call('_agnes/v1/device.session.detach', { sessionId, expectedRevision }),
+  }
+
   /**
    * The current Surface mount->endpoint table. This is how the CLI/Web OS process (`agnes serve`,
    * a separate process from `agnesd`) learns where each mounted Surface's loopback listener is, to
@@ -324,6 +361,9 @@ export class Client {
    * space and the daemon answers only from its immutable snapshots.
    */
   readonly clientModules = {
+    /** Private launcher only; contains endpoint credentials, never a browser service result. */
+    resolveMedia: (input: ClientModuleMediaResolveParams): Promise<ClientModuleMediaResolveResult> =>
+      this.call('_agnes/v1/clientModules.resolveMedia', input),
     /**
      * Returns the row-level browser projection. Older daemons may only send the compatibility
      * modules/statuses fields; normalize that response locally so callers get the same `rows`

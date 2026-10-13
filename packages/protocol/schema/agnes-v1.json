@@ -234,10 +234,23 @@
       "additionalProperties": false,
       "required": ["sessionId", "itemId", "commandId"],
       "properties": {
-        "sessionId": { "type": "string", "maxLength": 512 },
-        "itemId": { "type": "string", "minLength": 1, "maxLength": 512 },
-        "commandId": { "type": "string", "maxLength": 128 },
-        "generation": { "type": "integer", "minimum": 1 }
+        "sessionId": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "itemId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "commandId": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1
+        }
       }
     },
     "SessionRemoveQueuedParams": {
@@ -336,17 +349,26 @@
                   },
                   "input": {
                     "type": "array",
-                    "items": { "enum": ["text", "image"] }
+                    "items": {
+                      "enum": ["text", "image"]
+                    }
                   },
-                  "inputLimits": { "$ref": "model.json#/$defs/ModelInputLimits" },
+                  "inputLimits": {
+                    "$ref": "model.json#/$defs/ModelInputLimits"
+                  },
                   "thinkingLevelMap": {
                     "type": "object",
                     "additionalProperties": {
                       "type": "string"
                     }
                   },
-                  "contextWindow": { "type": "integer", "minimum": 1 },
-                  "defaultSettings": { "$ref": "model.json#/$defs/ModelSettings" }
+                  "contextWindow": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "defaultSettings": {
+                    "$ref": "model.json#/$defs/ModelSettings"
+                  }
                 }
               }
             },
@@ -467,8 +489,13 @@
           "additionalProperties": false,
           "required": ["state", "endSeq"],
           "properties": {
-            "state": { "const": "completed" },
-            "endSeq": { "type": "integer", "minimum": 1 }
+            "state": {
+              "const": "completed"
+            },
+            "endSeq": {
+              "type": "integer",
+              "minimum": 1
+            }
           }
         },
         {
@@ -476,8 +503,13 @@
           "additionalProperties": false,
           "required": ["state", "endSeq"],
           "properties": {
-            "state": { "const": "failed" },
-            "endSeq": { "type": "integer", "minimum": 1 }
+            "state": {
+              "const": "failed"
+            },
+            "endSeq": {
+              "type": "integer",
+              "minimum": 1
+            }
           }
         },
         {
@@ -485,7 +517,9 @@
           "additionalProperties": false,
           "required": ["state"],
           "properties": {
-            "state": { "const": "unknown" }
+            "state": {
+              "const": "unknown"
+            }
           }
         }
       ]
@@ -517,10 +551,26 @@
       "additionalProperties": false,
       "required": ["sessionId", "toolId", "scope", "policyVersion"],
       "properties": {
-        "sessionId": { "type": "string", "minLength": 1, "maxLength": 512 },
-        "toolId": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "scope": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "policyVersion": { "type": "string", "minLength": 1, "maxLength": 64 }
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "toolId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "scope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "policyVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
       }
     },
     "ApprovalGrantRecord": {
@@ -537,15 +587,48 @@
         "createdAt"
       ],
       "properties": {
-        "grantId": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "profileHash": { "type": "string", "pattern": "^sha256-[a-f0-9]{64}$" },
-        "actorId": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "actorOrg": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "toolId": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "scope": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "policyVersion": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "createdAt": { "type": "string", "format": "date-time" },
-        "revokedAt": { "type": "string", "format": "date-time" }
+        "grantId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "profileHash": {
+          "type": "string",
+          "pattern": "^sha256-[a-f0-9]{64}$"
+        },
+        "actorId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "actorOrg": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "toolId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "scope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "policyVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "revokedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
       }
     },
     "ApprovalGrantRevokeParams": {
@@ -553,11 +636,31 @@
       "additionalProperties": false,
       "required": ["sessionId", "toolId", "scope", "policyVersion", "grantId"],
       "properties": {
-        "sessionId": { "type": "string", "minLength": 1, "maxLength": 512 },
-        "toolId": { "type": "string", "minLength": 1, "maxLength": 128 },
-        "scope": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "policyVersion": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "grantId": { "type": "string", "minLength": 1, "maxLength": 128 }
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "toolId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "scope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "policyVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "grantId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
       }
     },
     "ApprovalGrantListResult": {
@@ -567,7 +670,9 @@
       "properties": {
         "grants": {
           "type": "array",
-          "items": { "$ref": "#/$defs/ApprovalGrantRecord" }
+          "items": {
+            "$ref": "#/$defs/ApprovalGrantRecord"
+          }
         }
       }
     },
@@ -581,8 +686,12 @@
       "additionalProperties": false,
       "required": ["activationReady", "recoveryReady", "blockers"],
       "properties": {
-        "activationReady": { "type": "boolean" },
-        "recoveryReady": { "type": "boolean" },
+        "activationReady": {
+          "type": "boolean"
+        },
+        "recoveryReady": {
+          "type": "boolean"
+        },
         "blockers": {
           "type": "array",
           "maxItems": 6,
@@ -607,15 +716,23 @@
           "additionalProperties": false,
           "required": ["schemaVersion", "status", "admission", "runtime", "blockers"],
           "properties": {
-            "schemaVersion": { "const": 1 },
-            "status": { "const": "blocked" },
+            "schemaVersion": {
+              "const": 1
+            },
+            "status": {
+              "const": "blocked"
+            },
             "admission": {
               "type": "object",
               "additionalProperties": false,
               "required": ["state", "reason"],
               "properties": {
-                "state": { "const": "blocked" },
-                "reason": { "enum": ["p0-evidence-incomplete", "runtime-unavailable"] }
+                "state": {
+                  "const": "blocked"
+                },
+                "reason": {
+                  "enum": ["p0-evidence-incomplete", "runtime-unavailable"]
+                }
               }
             },
             "runtime": {
@@ -623,8 +740,12 @@
               "additionalProperties": false,
               "required": ["state", "startAttempted"],
               "properties": {
-                "state": { "const": "not-started" },
-                "startAttempted": { "const": false }
+                "state": {
+                  "const": "not-started"
+                },
+                "startAttempted": {
+                  "const": false
+                }
               }
             },
             "blockers": {
@@ -644,7 +765,9 @@
                 ]
               }
             },
-            "lockedPackageMutations": { "$ref": "#/$defs/ComputerUseLockedPackageMutationStatus" }
+            "lockedPackageMutations": {
+              "$ref": "#/$defs/ComputerUseLockedPackageMutationStatus"
+            }
           }
         },
         {
@@ -652,14 +775,20 @@
           "additionalProperties": false,
           "required": ["schemaVersion", "status", "admission", "runtime", "blockers", "driver"],
           "properties": {
-            "schemaVersion": { "const": 1 },
-            "status": { "const": "ready" },
+            "schemaVersion": {
+              "const": 1
+            },
+            "status": {
+              "const": "ready"
+            },
             "admission": {
               "type": "object",
               "additionalProperties": false,
               "required": ["state", "reason"],
               "properties": {
-                "state": { "const": "ready" },
+                "state": {
+                  "const": "ready"
+                },
                 "reason": {
                   "enum": ["windows-verified-driver", "macos-verified-driver", "linux-verified-driver"]
                 }
@@ -670,23 +799,45 @@
               "additionalProperties": false,
               "required": ["state", "startAttempted", "activeSessions"],
               "properties": {
-                "state": { "enum": ["idle", "running"] },
-                "startAttempted": { "type": "boolean" },
-                "activeSessions": { "type": "integer", "minimum": 0 }
+                "state": {
+                  "enum": ["idle", "running"]
+                },
+                "startAttempted": {
+                  "type": "boolean"
+                },
+                "activeSessions": {
+                  "type": "integer",
+                  "minimum": 0
+                }
               }
             },
-            "blockers": { "type": "array", "maxItems": 0 },
+            "blockers": {
+              "type": "array",
+              "maxItems": 0
+            },
             "driver": {
               "type": "object",
               "additionalProperties": false,
               "required": ["platform", "version", "publisher"],
               "properties": {
-                "platform": { "enum": ["win32", "darwin", "linux"] },
-                "version": { "type": "string", "minLength": 1, "maxLength": 64 },
-                "publisher": { "type": "string", "minLength": 1, "maxLength": 256 }
+                "platform": {
+                  "enum": ["win32", "darwin", "linux"]
+                },
+                "version": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "publisher": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                }
               }
             },
-            "lockedPackageMutations": { "$ref": "#/$defs/ComputerUseLockedPackageMutationStatus" }
+            "lockedPackageMutations": {
+              "$ref": "#/$defs/ComputerUseLockedPackageMutationStatus"
+            }
           }
         }
       ]
@@ -698,15 +849,23 @@
           "additionalProperties": false,
           "required": ["schemaVersion", "status", "admission", "probe"],
           "properties": {
-            "schemaVersion": { "const": 1 },
-            "status": { "const": "unavailable" },
+            "schemaVersion": {
+              "const": 1
+            },
+            "status": {
+              "const": "unavailable"
+            },
             "admission": {
               "type": "object",
               "additionalProperties": false,
               "required": ["state", "reason"],
               "properties": {
-                "state": { "const": "blocked" },
-                "reason": { "const": "p0-evidence-incomplete" }
+                "state": {
+                  "const": "blocked"
+                },
+                "reason": {
+                  "const": "p0-evidence-incomplete"
+                }
               }
             },
             "probe": {
@@ -714,8 +873,12 @@
               "additionalProperties": false,
               "required": ["state", "reason"],
               "properties": {
-                "state": { "const": "not-run" },
-                "reason": { "const": "production-driver-admission-disabled" }
+                "state": {
+                  "const": "not-run"
+                },
+                "reason": {
+                  "const": "production-driver-admission-disabled"
+                }
               }
             }
           }
@@ -725,15 +888,23 @@
           "additionalProperties": false,
           "required": ["schemaVersion", "status", "admission", "probe"],
           "properties": {
-            "schemaVersion": { "const": 1 },
-            "status": { "const": "not-required" },
+            "schemaVersion": {
+              "const": 1
+            },
+            "status": {
+              "const": "not-required"
+            },
             "admission": {
               "type": "object",
               "additionalProperties": false,
               "required": ["state", "reason"],
               "properties": {
-                "state": { "const": "ready" },
-                "reason": { "const": "linux-verified-driver" }
+                "state": {
+                  "const": "ready"
+                },
+                "reason": {
+                  "const": "linux-verified-driver"
+                }
               }
             },
             "probe": {
@@ -741,8 +912,12 @@
               "additionalProperties": false,
               "required": ["state", "reason"],
               "properties": {
-                "state": { "const": "passed" },
-                "reason": { "const": "linux-no-os-grant-required" }
+                "state": {
+                  "const": "passed"
+                },
+                "reason": {
+                  "const": "linux-no-os-grant-required"
+                }
               }
             }
           }
@@ -752,15 +927,23 @@
           "additionalProperties": false,
           "required": ["schemaVersion", "status", "admission", "probe"],
           "properties": {
-            "schemaVersion": { "const": 1 },
-            "status": { "const": "not-required" },
+            "schemaVersion": {
+              "const": 1
+            },
+            "status": {
+              "const": "not-required"
+            },
             "admission": {
               "type": "object",
               "additionalProperties": false,
               "required": ["state", "reason"],
               "properties": {
-                "state": { "const": "ready" },
-                "reason": { "const": "windows-verified-driver" }
+                "state": {
+                  "const": "ready"
+                },
+                "reason": {
+                  "const": "windows-verified-driver"
+                }
               }
             },
             "probe": {
@@ -768,8 +951,12 @@
               "additionalProperties": false,
               "required": ["state", "reason"],
               "properties": {
-                "state": { "const": "passed" },
-                "reason": { "const": "windows-no-os-grant-required" }
+                "state": {
+                  "const": "passed"
+                },
+                "reason": {
+                  "const": "windows-no-os-grant-required"
+                }
               }
             }
           }
@@ -779,15 +966,23 @@
           "additionalProperties": false,
           "required": ["schemaVersion", "status", "admission", "probe"],
           "properties": {
-            "schemaVersion": { "const": 1 },
-            "status": { "const": "granted" },
+            "schemaVersion": {
+              "const": 1
+            },
+            "status": {
+              "const": "granted"
+            },
             "admission": {
               "type": "object",
               "additionalProperties": false,
               "required": ["state", "reason"],
               "properties": {
-                "state": { "const": "ready" },
-                "reason": { "const": "macos-verified-driver" }
+                "state": {
+                  "const": "ready"
+                },
+                "reason": {
+                  "const": "macos-verified-driver"
+                }
               }
             },
             "probe": {
@@ -795,10 +990,18 @@
               "additionalProperties": false,
               "required": ["state", "reason", "accessibility", "screenRecording"],
               "properties": {
-                "state": { "const": "passed" },
-                "reason": { "const": "macos-tcc-permissions-granted" },
-                "accessibility": { "const": true },
-                "screenRecording": { "const": true }
+                "state": {
+                  "const": "passed"
+                },
+                "reason": {
+                  "const": "macos-tcc-permissions-granted"
+                },
+                "accessibility": {
+                  "const": true
+                },
+                "screenRecording": {
+                  "const": true
+                }
               }
             }
           }
@@ -808,15 +1011,23 @@
           "additionalProperties": false,
           "required": ["schemaVersion", "status", "admission", "probe"],
           "properties": {
-            "schemaVersion": { "const": 1 },
-            "status": { "const": "required" },
+            "schemaVersion": {
+              "const": 1
+            },
+            "status": {
+              "const": "required"
+            },
             "admission": {
               "type": "object",
               "additionalProperties": false,
               "required": ["state", "reason"],
               "properties": {
-                "state": { "const": "ready" },
-                "reason": { "const": "macos-verified-driver" }
+                "state": {
+                  "const": "ready"
+                },
+                "reason": {
+                  "const": "macos-verified-driver"
+                }
               }
             },
             "probe": {
@@ -824,10 +1035,18 @@
               "additionalProperties": false,
               "required": ["state", "reason", "accessibility", "screenRecording"],
               "properties": {
-                "state": { "const": "passed" },
-                "reason": { "const": "macos-tcc-permissions-missing" },
-                "accessibility": { "const": false },
-                "screenRecording": { "type": "boolean" }
+                "state": {
+                  "const": "passed"
+                },
+                "reason": {
+                  "const": "macos-tcc-permissions-missing"
+                },
+                "accessibility": {
+                  "const": false
+                },
+                "screenRecording": {
+                  "type": "boolean"
+                }
               }
             }
           }
@@ -837,15 +1056,23 @@
           "additionalProperties": false,
           "required": ["schemaVersion", "status", "admission", "probe"],
           "properties": {
-            "schemaVersion": { "const": 1 },
-            "status": { "const": "required" },
+            "schemaVersion": {
+              "const": 1
+            },
+            "status": {
+              "const": "required"
+            },
             "admission": {
               "type": "object",
               "additionalProperties": false,
               "required": ["state", "reason"],
               "properties": {
-                "state": { "const": "ready" },
-                "reason": { "const": "macos-verified-driver" }
+                "state": {
+                  "const": "ready"
+                },
+                "reason": {
+                  "const": "macos-verified-driver"
+                }
               }
             },
             "probe": {
@@ -853,10 +1080,18 @@
               "additionalProperties": false,
               "required": ["state", "reason", "accessibility", "screenRecording"],
               "properties": {
-                "state": { "const": "passed" },
-                "reason": { "const": "macos-tcc-permissions-missing" },
-                "accessibility": { "const": true },
-                "screenRecording": { "const": false }
+                "state": {
+                  "const": "passed"
+                },
+                "reason": {
+                  "const": "macos-tcc-permissions-missing"
+                },
+                "accessibility": {
+                  "const": true
+                },
+                "screenRecording": {
+                  "const": false
+                }
               }
             }
           }
@@ -866,15 +1101,23 @@
           "additionalProperties": false,
           "required": ["schemaVersion", "status", "admission", "probe"],
           "properties": {
-            "schemaVersion": { "const": 1 },
-            "status": { "const": "unknown" },
+            "schemaVersion": {
+              "const": 1
+            },
+            "status": {
+              "const": "unknown"
+            },
             "admission": {
               "type": "object",
               "additionalProperties": false,
               "required": ["state", "reason"],
               "properties": {
-                "state": { "const": "ready" },
-                "reason": { "const": "macos-verified-driver" }
+                "state": {
+                  "const": "ready"
+                },
+                "reason": {
+                  "const": "macos-verified-driver"
+                }
               }
             },
             "probe": {
@@ -882,8 +1125,12 @@
               "additionalProperties": false,
               "required": ["state", "reason"],
               "properties": {
-                "state": { "const": "failed" },
-                "reason": { "const": "macos-tcc-probe-failed" }
+                "state": {
+                  "const": "failed"
+                },
+                "reason": {
+                  "const": "macos-tcc-probe-failed"
+                }
               }
             }
           }
@@ -899,14 +1146,20 @@
           "minItems": 1,
           "maxItems": 32,
           "uniqueItems": true,
-          "items": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$" }
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+          }
         },
         "skip": {
           "type": "array",
           "minItems": 1,
           "maxItems": 32,
           "uniqueItems": true,
-          "items": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$" }
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+          }
         }
       }
     },
@@ -959,15 +1212,23 @@
           "additionalProperties": false,
           "required": ["schemaVersion", "status", "admission", "checks"],
           "properties": {
-            "schemaVersion": { "const": 1 },
-            "status": { "const": "ready" },
+            "schemaVersion": {
+              "const": 1
+            },
+            "status": {
+              "const": "ready"
+            },
             "admission": {
               "type": "object",
               "additionalProperties": false,
               "required": ["state", "reason"],
               "properties": {
-                "state": { "const": "ready" },
-                "reason": { "const": "linux-verified-driver" }
+                "state": {
+                  "const": "ready"
+                },
+                "reason": {
+                  "const": "linux-verified-driver"
+                }
               }
             },
             "checks": {
@@ -975,8 +1236,12 @@
               "additionalProperties": false,
               "required": ["state", "reason"],
               "properties": {
-                "state": { "const": "passed" },
-                "reason": { "const": "linux-driver-health-and-identity-verified" }
+                "state": {
+                  "const": "passed"
+                },
+                "reason": {
+                  "const": "linux-driver-health-and-identity-verified"
+                }
               }
             },
             "lockedPackageMutations": {
@@ -1031,15 +1296,23 @@
           "additionalProperties": false,
           "required": ["schemaVersion", "status", "admission", "checks"],
           "properties": {
-            "schemaVersion": { "const": 1 },
-            "status": { "const": "failed" },
+            "schemaVersion": {
+              "const": 1
+            },
+            "status": {
+              "const": "failed"
+            },
             "admission": {
               "type": "object",
               "additionalProperties": false,
               "required": ["state", "reason"],
               "properties": {
-                "state": { "const": "ready" },
-                "reason": { "const": "linux-verified-driver" }
+                "state": {
+                  "const": "ready"
+                },
+                "reason": {
+                  "const": "linux-verified-driver"
+                }
               }
             },
             "checks": {
@@ -1047,8 +1320,12 @@
               "additionalProperties": false,
               "required": ["state", "reason"],
               "properties": {
-                "state": { "const": "failed" },
-                "reason": { "const": "linux-driver-health-or-identity-failed" }
+                "state": {
+                  "const": "failed"
+                },
+                "reason": {
+                  "const": "linux-driver-health-or-identity-failed"
+                }
               }
             },
             "lockedPackageMutations": {
@@ -1231,14 +1508,19 @@
       "additionalProperties": false,
       "required": ["kind"],
       "properties": {
-        "kind": { "enum": ["install", "update", "restart"] }
+        "kind": {
+          "enum": ["install", "update", "restart"]
+        }
       }
     },
     "ComputerUseOperationStatusParams": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "operationId": { "type": "string", "pattern": "^cu-[a-zA-Z0-9-]{1,128}$" }
+        "operationId": {
+          "type": "string",
+          "pattern": "^cu-[a-zA-Z0-9-]{1,128}$"
+        }
       }
     },
     "ComputerUseOperationIdParams": {
@@ -1246,7 +1528,10 @@
       "additionalProperties": false,
       "required": ["operationId"],
       "properties": {
-        "operationId": { "type": "string", "pattern": "^cu-[a-zA-Z0-9-]{1,128}$" }
+        "operationId": {
+          "type": "string",
+          "pattern": "^cu-[a-zA-Z0-9-]{1,128}$"
+        }
       }
     },
     "ComputerUseOperationResult": {
@@ -1256,8 +1541,12 @@
           "additionalProperties": false,
           "required": ["schemaVersion", "status"],
           "properties": {
-            "schemaVersion": { "const": 1 },
-            "status": { "const": "not-found" }
+            "schemaVersion": {
+              "const": 1
+            },
+            "status": {
+              "const": "not-found"
+            }
           }
         },
         {
@@ -1274,14 +1563,33 @@
             "updatedAtMs"
           ],
           "properties": {
-            "schemaVersion": { "const": 1 },
-            "status": { "const": "found" },
-            "operationId": { "type": "string", "pattern": "^cu-[a-zA-Z0-9-]{1,128}$" },
-            "kind": { "enum": ["install", "update", "restart"] },
-            "state": { "const": "queued" },
-            "phase": { "const": "queued" },
-            "startedAtMs": { "type": "integer", "minimum": 0 },
-            "updatedAtMs": { "type": "integer", "minimum": 0 }
+            "schemaVersion": {
+              "const": 1
+            },
+            "status": {
+              "const": "found"
+            },
+            "operationId": {
+              "type": "string",
+              "pattern": "^cu-[a-zA-Z0-9-]{1,128}$"
+            },
+            "kind": {
+              "enum": ["install", "update", "restart"]
+            },
+            "state": {
+              "const": "queued"
+            },
+            "phase": {
+              "const": "queued"
+            },
+            "startedAtMs": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "updatedAtMs": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         },
         {
@@ -1298,14 +1606,33 @@
             "updatedAtMs"
           ],
           "properties": {
-            "schemaVersion": { "const": 1 },
-            "status": { "const": "found" },
-            "operationId": { "type": "string", "pattern": "^cu-[a-zA-Z0-9-]{1,128}$" },
-            "kind": { "enum": ["install", "update"] },
-            "state": { "enum": ["running", "cancelling"] },
-            "phase": { "enum": ["installing", "restarting"] },
-            "startedAtMs": { "type": "integer", "minimum": 0 },
-            "updatedAtMs": { "type": "integer", "minimum": 0 }
+            "schemaVersion": {
+              "const": 1
+            },
+            "status": {
+              "const": "found"
+            },
+            "operationId": {
+              "type": "string",
+              "pattern": "^cu-[a-zA-Z0-9-]{1,128}$"
+            },
+            "kind": {
+              "enum": ["install", "update"]
+            },
+            "state": {
+              "enum": ["running", "cancelling"]
+            },
+            "phase": {
+              "enum": ["installing", "restarting"]
+            },
+            "startedAtMs": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "updatedAtMs": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         },
         {
@@ -1322,14 +1649,33 @@
             "updatedAtMs"
           ],
           "properties": {
-            "schemaVersion": { "const": 1 },
-            "status": { "const": "found" },
-            "operationId": { "type": "string", "pattern": "^cu-[a-zA-Z0-9-]{1,128}$" },
-            "kind": { "const": "restart" },
-            "state": { "enum": ["running", "cancelling"] },
-            "phase": { "const": "restarting" },
-            "startedAtMs": { "type": "integer", "minimum": 0 },
-            "updatedAtMs": { "type": "integer", "minimum": 0 }
+            "schemaVersion": {
+              "const": 1
+            },
+            "status": {
+              "const": "found"
+            },
+            "operationId": {
+              "type": "string",
+              "pattern": "^cu-[a-zA-Z0-9-]{1,128}$"
+            },
+            "kind": {
+              "const": "restart"
+            },
+            "state": {
+              "enum": ["running", "cancelling"]
+            },
+            "phase": {
+              "const": "restarting"
+            },
+            "startedAtMs": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "updatedAtMs": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         },
         {
@@ -1347,15 +1693,36 @@
             "outcome"
           ],
           "properties": {
-            "schemaVersion": { "const": 1 },
-            "status": { "const": "found" },
-            "operationId": { "type": "string", "pattern": "^cu-[a-zA-Z0-9-]{1,128}$" },
-            "kind": { "enum": ["install", "update"] },
-            "state": { "const": "succeeded" },
-            "phase": { "const": "complete" },
-            "startedAtMs": { "type": "integer", "minimum": 0 },
-            "updatedAtMs": { "type": "integer", "minimum": 0 },
-            "outcome": { "enum": ["installed", "already-current", "repaired", "lkg-restored"] }
+            "schemaVersion": {
+              "const": 1
+            },
+            "status": {
+              "const": "found"
+            },
+            "operationId": {
+              "type": "string",
+              "pattern": "^cu-[a-zA-Z0-9-]{1,128}$"
+            },
+            "kind": {
+              "enum": ["install", "update"]
+            },
+            "state": {
+              "const": "succeeded"
+            },
+            "phase": {
+              "const": "complete"
+            },
+            "startedAtMs": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "updatedAtMs": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "outcome": {
+              "enum": ["installed", "already-current", "repaired", "lkg-restored"]
+            }
           }
         },
         {
@@ -1373,15 +1740,36 @@
             "outcome"
           ],
           "properties": {
-            "schemaVersion": { "const": 1 },
-            "status": { "const": "found" },
-            "operationId": { "type": "string", "pattern": "^cu-[a-zA-Z0-9-]{1,128}$" },
-            "kind": { "const": "restart" },
-            "state": { "const": "succeeded" },
-            "phase": { "const": "complete" },
-            "startedAtMs": { "type": "integer", "minimum": 0 },
-            "updatedAtMs": { "type": "integer", "minimum": 0 },
-            "outcome": { "const": "restarted" }
+            "schemaVersion": {
+              "const": 1
+            },
+            "status": {
+              "const": "found"
+            },
+            "operationId": {
+              "type": "string",
+              "pattern": "^cu-[a-zA-Z0-9-]{1,128}$"
+            },
+            "kind": {
+              "const": "restart"
+            },
+            "state": {
+              "const": "succeeded"
+            },
+            "phase": {
+              "const": "complete"
+            },
+            "startedAtMs": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "updatedAtMs": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "outcome": {
+              "const": "restarted"
+            }
           }
         },
         {
@@ -1399,15 +1787,36 @@
             "failure"
           ],
           "properties": {
-            "schemaVersion": { "const": 1 },
-            "status": { "const": "found" },
-            "operationId": { "type": "string", "pattern": "^cu-[a-zA-Z0-9-]{1,128}$" },
-            "kind": { "enum": ["install", "update", "restart"] },
-            "state": { "const": "failed" },
-            "phase": { "const": "complete" },
-            "startedAtMs": { "type": "integer", "minimum": 0 },
-            "updatedAtMs": { "type": "integer", "minimum": 0 },
-            "failure": { "const": "operation-failed" }
+            "schemaVersion": {
+              "const": 1
+            },
+            "status": {
+              "const": "found"
+            },
+            "operationId": {
+              "type": "string",
+              "pattern": "^cu-[a-zA-Z0-9-]{1,128}$"
+            },
+            "kind": {
+              "enum": ["install", "update", "restart"]
+            },
+            "state": {
+              "const": "failed"
+            },
+            "phase": {
+              "const": "complete"
+            },
+            "startedAtMs": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "updatedAtMs": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "failure": {
+              "const": "operation-failed"
+            }
           }
         },
         {
@@ -1424,14 +1833,33 @@
             "updatedAtMs"
           ],
           "properties": {
-            "schemaVersion": { "const": 1 },
-            "status": { "const": "found" },
-            "operationId": { "type": "string", "pattern": "^cu-[a-zA-Z0-9-]{1,128}$" },
-            "kind": { "enum": ["install", "update", "restart"] },
-            "state": { "const": "cancelled" },
-            "phase": { "const": "complete" },
-            "startedAtMs": { "type": "integer", "minimum": 0 },
-            "updatedAtMs": { "type": "integer", "minimum": 0 }
+            "schemaVersion": {
+              "const": 1
+            },
+            "status": {
+              "const": "found"
+            },
+            "operationId": {
+              "type": "string",
+              "pattern": "^cu-[a-zA-Z0-9-]{1,128}$"
+            },
+            "kind": {
+              "enum": ["install", "update", "restart"]
+            },
+            "state": {
+              "const": "cancelled"
+            },
+            "phase": {
+              "const": "complete"
+            },
+            "startedAtMs": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "updatedAtMs": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         }
       ]
@@ -1557,7 +1985,9 @@
           "additionalProperties": false,
           "required": ["kind", "detail", "at"],
           "properties": {
-            "kind": { "const": "packages_changed" },
+            "kind": {
+              "const": "packages_changed"
+            },
             "detail": {
               "type": "object",
               "additionalProperties": false,
@@ -1569,7 +1999,11 @@
                   "maxLength": 64,
                   "pattern": "^[a-z][a-z0-9.-]{0,63}$"
                 },
-                "revision": { "type": "string", "minLength": 1, "maxLength": 128 },
+                "revision": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
                 "reason": {
                   "enum": ["inventory", "activation", "trust", "resources", "rebuilt"]
                 },
@@ -1581,7 +2015,9 @@
                 }
               }
             },
-            "at": { "type": "string" }
+            "at": {
+              "type": "string"
+            }
           }
         },
         {
@@ -1589,7 +2025,9 @@
           "additionalProperties": false,
           "required": ["kind", "detail", "at"],
           "properties": {
-            "kind": { "const": "tree_changed" },
+            "kind": {
+              "const": "tree_changed"
+            },
             "detail": {
               "type": "object",
               "additionalProperties": false,
@@ -1614,14 +2052,25 @@
                   "additionalProperties": false,
                   "required": ["treeHash", "resourceRevision", "compositeRevision"],
                   "properties": {
-                    "treeHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-                    "resourceRevision": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-                    "compositeRevision": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+                    "treeHash": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "resourceRevision": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    },
+                    "compositeRevision": {
+                      "type": "string",
+                      "pattern": "^[0-9a-f]{64}$"
+                    }
                   }
                 }
               }
             },
-            "at": { "type": "string" }
+            "at": {
+              "type": "string"
+            }
           }
         },
         {
@@ -1640,9 +2089,16 @@
                 "shutting_down"
               ]
             },
-            "sessionId": { "type": "string", "maxLength": 512 },
-            "detail": { "$ref": "#/$defs/JsonValue" },
-            "at": { "type": "string" }
+            "sessionId": {
+              "type": "string",
+              "maxLength": 512
+            },
+            "detail": {
+              "$ref": "#/$defs/JsonValue"
+            },
+            "at": {
+              "type": "string"
+            }
           }
         }
       ]
@@ -1806,11 +2262,30 @@
       "additionalProperties": false,
       "required": ["sessionId", "callSeq"],
       "properties": {
-        "sessionId": { "type": "string", "minLength": 1, "maxLength": 512 },
-        "callSeq": { "type": "integer", "minimum": 1 },
-        "resultSeq": { "type": "integer", "minimum": 1 },
-        "offset": { "type": "integer", "minimum": 0, "default": 0 },
-        "maxBytes": { "type": "integer", "minimum": 1, "maximum": 262144, "default": 262144 }
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "callSeq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "resultSeq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        },
+        "maxBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144,
+          "default": 262144
+        }
       }
     },
     "SessionReadToolDetailResult": {
@@ -1819,11 +2294,27 @@
       "additionalProperties": false,
       "required": ["sessionId", "callSeq", "offset", "totalBytes", "data", "nextOffset"],
       "properties": {
-        "sessionId": { "type": "string", "minLength": 1, "maxLength": 512 },
-        "callSeq": { "type": "integer", "minimum": 1 },
-        "resultSeq": { "type": "integer", "minimum": 1 },
-        "offset": { "type": "integer", "minimum": 0 },
-        "totalBytes": { "type": "integer", "minimum": 0 },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "callSeq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "resultSeq": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "totalBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
         "data": {
           "description": "Canonical standard base64 for at most 262144 response bytes.",
           "type": "string",
@@ -1831,7 +2322,15 @@
           "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
         },
         "nextOffset": {
-          "anyOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }]
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },
@@ -2353,7 +2852,9 @@
           "additionalProperties": false,
           "required": ["route", "id", "thinking"],
           "properties": {
-            "settings": { "$ref": "model.json#/$defs/ModelSettings" },
+            "settings": {
+              "$ref": "model.json#/$defs/ModelSettings"
+            },
             "route": {
               "type": "string",
               "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
@@ -2788,8 +3289,13 @@
       "additionalProperties": false,
       "required": ["itemId", "preview"],
       "properties": {
-        "itemId": { "type": "string" },
-        "preview": { "type": "string", "maxLength": 2000 }
+        "itemId": {
+          "type": "string"
+        },
+        "preview": {
+          "type": "string",
+          "maxLength": 2000
+        }
       }
     },
     "UITimeline": {
@@ -2800,7 +3306,9 @@
         "pendingInputs": {
           "description": "Authoritative next-turn inbox order at this projection cut. Omitted by older servers.",
           "type": "array",
-          "items": { "$ref": "#/$defs/UIPendingInput" }
+          "items": {
+            "$ref": "#/$defs/UIPendingInput"
+          }
         },
         "yolo": {
           "description": "Current session full-access mode, independent of the projected history cut. Omitted by older servers.",
@@ -3096,7 +3604,9 @@
         "pendingInputs": {
           "description": "Full replacement of next-turn inbox order, including an empty array when drained. Omission preserves known input for older-server compatibility.",
           "type": "array",
-          "items": { "$ref": "#/$defs/UIPendingInput" }
+          "items": {
+            "$ref": "#/$defs/UIPendingInput"
+          }
         },
         "yolo": {
           "description": "Current session full-access mode. Omission preserves the client's known mode for older-server compatibility.",
@@ -3208,6 +3718,464 @@
         "childKey": {
           "type": "string",
           "maxLength": 512
+        }
+      }
+    },
+    "DeviceWorkspaceBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspaceId", "deviceId", "revision", "active"],
+      "properties": {
+        "workspaceId": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "deviceId": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "active": {
+          "type": "boolean"
+        }
+      }
+    },
+    "DeviceSessionBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "workspaceId", "deviceId", "bindingRevision", "active"],
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "workspaceId": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "deviceId": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$"
+        },
+        "bindingRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "active": {
+          "type": "boolean"
+        }
+      }
+    },
+    "DeviceSessionGetParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId"],
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    },
+    "DeviceSessionBindParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "expectedRevision"],
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740990
+        },
+        "replaceInactiveDevice": {
+          "type": "boolean"
+        }
+      }
+    },
+    "DeviceSessionDetachParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "expectedRevision"],
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "DeviceConnectionProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["driver", "ip", "port", "macAddress", "configRevision"],
+      "properties": {
+        "driver": {
+          "const": "aka-00"
+        },
+        "ip": {
+          "type": "string",
+          "pattern": "^(?:10\\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])|192\\.168|172\\.(?:1[6-9]|2[0-9]|3[01]))\\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])$"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "macAddress": {
+          "type": "string",
+          "pattern": "^(?!00:00:00:00:00:00$|[fF][fF]:[fF][fF]:[fF][fF]:[fF][fF]:[fF][fF]:[fF][fF]$)(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$"
+        },
+        "configRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "DeviceConnectionSaveParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sessionId",
+        "expectedBindingRevision",
+        "expectedConfigRevision",
+        "ip",
+        "port",
+        "macAddress"
+      ],
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "expectedBindingRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "expectedConfigRevision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740990
+        },
+        "ip": {
+          "type": "string",
+          "pattern": "^(?:10\\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])|192\\.168|172\\.(?:1[6-9]|2[0-9]|3[01]))\\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])\\.(?:0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])$"
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "macAddress": {
+          "type": "string",
+          "pattern": "^(?!00:00:00:00:00:00$|[fF][fF]:[fF][fF]:[fF][fF]:[fF][fF]:[fF][fF]:[fF][fF]$)(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$"
+        }
+      }
+    },
+    "DeviceConnectionResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deviceId", "bindingRevision", "profile"],
+      "properties": {
+        "deviceId": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+        },
+        "bindingRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "profile": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeviceConnectionProfile"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "DeviceRecognitionSaveParams": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "expectedBindingRevision", "expectedConfigRevision", "settings"],
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "expectedBindingRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "expectedConfigRevision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740990
+        },
+        "settings": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["provider", "frequency", "requestBudget", "credentials"],
+              "properties": {
+                "provider": {
+                  "const": "aliyun"
+                },
+                "frequency": {
+                  "enum": [0.5, 1, 2]
+                },
+                "requestBudget": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 100000
+                },
+                "credentials": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["action"],
+                      "properties": {
+                        "action": {
+                          "const": "keep"
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["action", "accessKeyId", "accessKeySecret"],
+                      "properties": {
+                        "action": {
+                          "const": "replace"
+                        },
+                        "accessKeyId": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256,
+                          "pattern": "^[!-~]+$"
+                        },
+                        "accessKeySecret": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256,
+                          "pattern": "^[!-~]+$"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["provider", "frequency", "requestBudget", "baseUrl", "credentials"],
+              "properties": {
+                "provider": {
+                  "const": "local-yolo"
+                },
+                "frequency": {
+                  "enum": [0.5, 1, 2]
+                },
+                "requestBudget": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 100000
+                },
+                "baseUrl": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048
+                },
+                "credentials": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["action"],
+                      "properties": {
+                        "action": {
+                          "const": "keep"
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["action"],
+                      "properties": {
+                        "action": {
+                          "const": "clear"
+                        }
+                      }
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["action", "token"],
+                      "properties": {
+                        "action": {
+                          "const": "replace"
+                        },
+                        "token": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 4096,
+                          "pattern": "^[!-~]+$"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "DeviceRecognitionResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deviceId", "bindingRevision", "configRevision", "settings"],
+      "properties": {
+        "deviceId": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+        },
+        "bindingRevision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "configRevision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "settings": {
+          "anyOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["provider", "frequency", "requestBudget", "credentialConfigured"],
+              "properties": {
+                "provider": {
+                  "const": "aliyun"
+                },
+                "frequency": {
+                  "enum": [0.5, 1, 2]
+                },
+                "requestBudget": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 100000
+                },
+                "credentialConfigured": {
+                  "const": true
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["provider", "frequency", "requestBudget", "credentialConfigured", "baseUrl"],
+              "properties": {
+                "provider": {
+                  "const": "local-yolo"
+                },
+                "frequency": {
+                  "enum": [0.5, 1, 2]
+                },
+                "requestBudget": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 100000
+                },
+                "credentialConfigured": {
+                  "type": "boolean"
+                },
+                "baseUrl": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 2048
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "DeviceSessionResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspace", "session"],
+      "properties": {
+        "workspace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeviceWorkspaceBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "session": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DeviceSessionBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "DeviceBindingsListResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 10000,
+          "items": {
+            "$ref": "#/$defs/DeviceWorkspaceBinding"
+          }
         }
       }
     },
@@ -3394,13 +4362,19 @@
       "additionalProperties": false,
       "required": ["collectedAt", "agh", "runtime", "logs"],
       "properties": {
-        "collectedAt": { "type": "string", "format": "date-time" },
+        "collectedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
         "agh": {
           "type": "object",
           "additionalProperties": false,
           "required": ["version"],
           "properties": {
-            "version": { "type": "string", "maxLength": 128 }
+            "version": {
+              "type": "string",
+              "maxLength": 128
+            }
           }
         },
         "runtime": {
@@ -3408,12 +4382,30 @@
           "additionalProperties": false,
           "required": ["platform", "arch", "osRelease", "node", "pid", "uptimeMs"],
           "properties": {
-            "platform": { "type": "string", "maxLength": 64 },
-            "arch": { "type": "string", "maxLength": 64 },
-            "osRelease": { "type": "string", "maxLength": 256 },
-            "node": { "type": "string", "maxLength": 64 },
-            "pid": { "type": "integer", "minimum": 0 },
-            "uptimeMs": { "type": "integer", "minimum": 0 }
+            "platform": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "arch": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "osRelease": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "node": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "pid": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "uptimeMs": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         },
         "logs": {
@@ -3424,11 +4416,22 @@
             "additionalProperties": false,
             "required": ["name", "size", "text", "truncated", "missing"],
             "properties": {
-              "name": { "enum": ["daemon.jsonl", "host.jsonl"] },
-              "size": { "type": "integer", "minimum": 0 },
-              "text": { "type": "string" },
-              "truncated": { "type": "boolean" },
-              "missing": { "type": "boolean" }
+              "name": {
+                "enum": ["daemon.jsonl", "host.jsonl"]
+              },
+              "size": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "text": {
+                "type": "string"
+              },
+              "truncated": {
+                "type": "boolean"
+              },
+              "missing": {
+                "type": "boolean"
+              }
             }
           }
         }
@@ -3439,10 +4442,25 @@
       "additionalProperties": false,
       "required": ["sessionId", "afterSeq", "limit", "maxBytes"],
       "properties": {
-        "sessionId": { "type": "string", "minLength": 1, "maxLength": 512 },
-        "afterSeq": { "type": "integer", "minimum": 0 },
-        "limit": { "type": "integer", "minimum": 1, "maximum": 500 },
-        "maxBytes": { "type": "integer", "minimum": 1, "maximum": 2097152 }
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "afterSeq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500
+        },
+        "maxBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2097152
+        }
       }
     },
     "DiagnosticsEventsResult": {
@@ -3453,11 +4471,24 @@
         "events": {
           "type": "array",
           "maxItems": 500,
-          "items": { "$ref": "session-v1.json#/$defs/EventEnvelope" }
+          "items": {
+            "$ref": "session-v1.json#/$defs/EventEnvelope"
+          }
         },
-        "lastSeq": { "type": "integer", "minimum": 0 },
+        "lastSeq": {
+          "type": "integer",
+          "minimum": 0
+        },
         "nextAfterSeq": {
-          "anyOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }]
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },
@@ -3490,8 +4521,13 @@
           "type": "string",
           "maxLength": 256
         },
-        "archived": { "type": "boolean" },
-        "titleSource": { "const": "user", "type": "string" },
+        "archived": {
+          "type": "boolean"
+        },
+        "titleSource": {
+          "const": "user",
+          "type": "string"
+        },
         "cwd": {
           "type": "string"
         }
@@ -3578,7 +4614,14 @@
           "type": "string"
         },
         "thinking": {
-          "anyOf": [{ "$ref": "model.json#/$defs/ThinkingLevel" }, { "type": "null" }]
+          "anyOf": [
+            {
+              "$ref": "model.json#/$defs/ThinkingLevel"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "contextWindow": {
           "type": ["integer", "null"],
@@ -3592,8 +4635,12 @@
       "additionalProperties": false,
       "required": ["sessionId", "enabled"],
       "properties": {
-        "sessionId": { "type": "string" },
-        "enabled": { "type": "boolean" }
+        "sessionId": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        }
       }
     },
     "EffectiveFromResult": {
@@ -3755,7 +4802,9 @@
       "additionalProperties": false,
       "required": ["action"],
       "properties": {
-        "defaultSettings": { "$ref": "model.json#/$defs/ModelSettings" },
+        "defaultSettings": {
+          "$ref": "model.json#/$defs/ModelSettings"
+        },
         "action": {
           "enum": ["start", "poll", "answer", "test", "commit", "cancel"]
         },
@@ -3887,19 +4936,25 @@
       "additionalProperties": false,
       "required": ["id", "label", "api", "baseUrl"],
       "properties": {
-        "authType": { "enum": ["api-key", "oauth"] },
+        "authType": {
+          "enum": ["api-key", "oauth"]
+        },
         "authMethods": {
           "type": "array",
           "minItems": 1,
           "maxItems": 2,
           "uniqueItems": true,
-          "items": { "enum": ["api-key", "oauth"] }
+          "items": {
+            "enum": ["api-key", "oauth"]
+          }
         },
         "loginMethods": {
           "type": "array",
           "maxItems": 2,
           "uniqueItems": true,
-          "items": { "enum": ["browser", "device_code"] }
+          "items": {
+            "enum": ["browser", "device_code"]
+          }
         },
         "id": {
           "type": "string",
@@ -3928,10 +4983,22 @@
       "additionalProperties": false,
       "required": ["id", "name"],
       "properties": {
-        "reasoning": { "type": "boolean" },
-        "thinkingLevelMap": { "type": "object", "additionalProperties": { "type": "string" } },
-        "contextWindow": { "type": "integer", "minimum": 1 },
-        "defaultSettings": { "$ref": "model.json#/$defs/ModelSettings" },
+        "reasoning": {
+          "type": "boolean"
+        },
+        "thinkingLevelMap": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "contextWindow": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "defaultSettings": {
+          "$ref": "model.json#/$defs/ModelSettings"
+        },
         "id": {
           "type": "string",
           "minLength": 1,
@@ -4056,7 +5123,11 @@
           "minLength": 1,
           "maxLength": 65536
         },
-        "model": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
         "accountId": {
           "type": "string",
           "pattern": "^[a-z0-9][a-z0-9-]{0,47}$",
@@ -4069,7 +5140,9 @@
       "additionalProperties": false,
       "required": ["providerId", "model"],
       "properties": {
-        "defaultSettings": { "$ref": "model.json#/$defs/ModelSettings" },
+        "defaultSettings": {
+          "$ref": "model.json#/$defs/ModelSettings"
+        },
         "providerId": {
           "type": "string",
           "minLength": 1,
@@ -4356,9 +5429,15 @@
           "additionalProperties": false,
           "required": ["ok", "status", "code"],
           "properties": {
-            "ok": { "const": false },
-            "status": { "const": 400 },
-            "code": { "const": "invalid_request" }
+            "ok": {
+              "const": false
+            },
+            "status": {
+              "const": 400
+            },
+            "code": {
+              "const": "invalid_request"
+            }
           }
         },
         {
@@ -4366,9 +5445,15 @@
           "additionalProperties": false,
           "required": ["ok", "status", "code"],
           "properties": {
-            "ok": { "const": false },
-            "status": { "const": 401 },
-            "code": { "const": "authentication_required" }
+            "ok": {
+              "const": false
+            },
+            "status": {
+              "const": 401
+            },
+            "code": {
+              "const": "authentication_required"
+            }
           }
         },
         {
@@ -4376,9 +5461,15 @@
           "additionalProperties": false,
           "required": ["ok", "status", "code"],
           "properties": {
-            "ok": { "const": false },
-            "status": { "const": 403 },
-            "code": { "const": "artifact_forbidden" }
+            "ok": {
+              "const": false
+            },
+            "status": {
+              "const": 403
+            },
+            "code": {
+              "const": "artifact_forbidden"
+            }
           }
         },
         {
@@ -4386,9 +5477,15 @@
           "additionalProperties": false,
           "required": ["ok", "status", "code"],
           "properties": {
-            "ok": { "const": false },
-            "status": { "const": 404 },
-            "code": { "const": "artifact_not_found" }
+            "ok": {
+              "const": false
+            },
+            "status": {
+              "const": 404
+            },
+            "code": {
+              "const": "artifact_not_found"
+            }
           }
         },
         {
@@ -4396,9 +5493,15 @@
           "additionalProperties": false,
           "required": ["ok", "status", "code"],
           "properties": {
-            "ok": { "const": false },
-            "status": { "const": 409 },
-            "code": { "const": "artifact_identity_mismatch" }
+            "ok": {
+              "const": false
+            },
+            "status": {
+              "const": 409
+            },
+            "code": {
+              "const": "artifact_identity_mismatch"
+            }
           }
         },
         {
@@ -4406,9 +5509,15 @@
           "additionalProperties": false,
           "required": ["ok", "status", "code"],
           "properties": {
-            "ok": { "const": false },
-            "status": { "const": 410 },
-            "code": { "const": "artifact_reclaimed" }
+            "ok": {
+              "const": false
+            },
+            "status": {
+              "const": 410
+            },
+            "code": {
+              "const": "artifact_reclaimed"
+            }
           }
         },
         {
@@ -4416,9 +5525,15 @@
           "additionalProperties": false,
           "required": ["ok", "status", "code"],
           "properties": {
-            "ok": { "const": false },
-            "status": { "const": 413 },
-            "code": { "const": "artifact_too_large" }
+            "ok": {
+              "const": false
+            },
+            "status": {
+              "const": 413
+            },
+            "code": {
+              "const": "artifact_too_large"
+            }
           }
         },
         {
@@ -4426,9 +5541,15 @@
           "additionalProperties": false,
           "required": ["ok", "status", "code"],
           "properties": {
-            "ok": { "const": false },
-            "status": { "const": 416 },
-            "code": { "const": "range_not_satisfiable" }
+            "ok": {
+              "const": false
+            },
+            "status": {
+              "const": 416
+            },
+            "code": {
+              "const": "range_not_satisfiable"
+            }
           }
         },
         {
@@ -4436,9 +5557,15 @@
           "additionalProperties": false,
           "required": ["ok", "status", "code"],
           "properties": {
-            "ok": { "const": false },
-            "status": { "const": 500 },
-            "code": { "const": "artifact_unavailable" }
+            "ok": {
+              "const": false
+            },
+            "status": {
+              "const": 500
+            },
+            "code": {
+              "const": "artifact_unavailable"
+            }
           }
         },
         {
@@ -4446,10 +5573,18 @@
           "additionalProperties": false,
           "required": ["ok", "status", "artifact", "acceptRanges", "contentLength", "etag", "base64"],
           "properties": {
-            "ok": { "const": true },
-            "status": { "const": 200 },
-            "artifact": { "$ref": "#/$defs/ArtifactRef" },
-            "acceptRanges": { "const": "bytes" },
+            "ok": {
+              "const": true
+            },
+            "status": {
+              "const": 200
+            },
+            "artifact": {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            "acceptRanges": {
+              "const": "bytes"
+            },
             "contentLength": {
               "type": "integer",
               "minimum": 0,
@@ -4481,10 +5616,18 @@
             "base64"
           ],
           "properties": {
-            "ok": { "const": true },
-            "status": { "const": 206 },
-            "artifact": { "$ref": "#/$defs/ArtifactRef" },
-            "acceptRanges": { "const": "bytes" },
+            "ok": {
+              "const": true
+            },
+            "status": {
+              "const": 206
+            },
+            "artifact": {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            "acceptRanges": {
+              "const": "bytes"
+            },
             "contentLength": {
               "type": "integer",
               "minimum": 0,
@@ -4525,6 +5668,58 @@
         "expectedRevision": {
           "type": "integer",
           "minimum": 0
+        }
+      }
+    },
+    "ImageGenerationSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["revision", "enabled", "size", "model", "endpoint", "credentialConfigured"],
+      "properties": {
+        "revision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "size": {
+          "enum": ["1K", "2K"]
+        },
+        "model": {
+          "enum": ["agnes-image-2.5-flash", "qwen-image-2.1-pro"]
+        },
+        "endpoint": {
+          "enum": [
+            "https://api.agnes-ai.cn/v1/images/generations",
+            "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+          ]
+        },
+        "credentialConfigured": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ImageGenerationSaveInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expectedRevision", "enabled", "size"],
+      "properties": {
+        "expectedRevision": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "size": {
+          "enum": ["1K", "2K"]
+        },
+        "model": { "enum": ["agnes-image-2.5-flash", "qwen-image-2.1-pro"] },
+        "apiKey": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
         }
       }
     }

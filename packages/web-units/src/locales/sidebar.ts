@@ -5,6 +5,7 @@ export const sidebarLocaleCatalog: LocaleCatalog = {
   en: {
     'sidebar.closeNav': 'Close navigation',
     'sidebar.newSession': 'New session',
+    'sidebar.newDevice': 'New device',
     'sidebar.sectionHeading': 'Workspaces and sessions',
     'sidebar.addWorkspace': 'Add workspace',
     'sidebar.sessionsNav': 'Task list',
@@ -14,6 +15,7 @@ export const sidebarLocaleCatalog: LocaleCatalog = {
   'zh-CN': {
     'sidebar.closeNav': '关闭导航',
     'sidebar.newSession': '新会话',
+    'sidebar.newDevice': '新设备',
     'sidebar.sectionHeading': '工作区与会话',
     'sidebar.addWorkspace': '添加工作区',
     'sidebar.sessionsNav': '任务列表',

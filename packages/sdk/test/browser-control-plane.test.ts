@@ -36,6 +36,13 @@ it('rejects raw admin and Extension Service calls from the browser client before
     }),
   ).rejects.toMatchObject({ kind: 'unsupported' })
   await expect(
+    client.clientModules.resolveMedia({
+      profile: 'local-dev',
+      rowId: 'web:example/service',
+      sessionId: 'session-a',
+    }),
+  ).rejects.toMatchObject({ kind: 'unsupported' })
+  await expect(
     client.clientModules.callEffect({
       profile: 'local-dev',
       rowId: 'web:example/service',

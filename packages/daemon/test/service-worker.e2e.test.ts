@@ -17,6 +17,7 @@ import { CommandQueue } from '../src/local/command-queue.js'
 import { LocalEndpoint } from '../src/local/endpoint.js'
 import { registerExtensions } from '../src/local/methods/extensions.js'
 import { MemoryJournal } from '../src/local/ports.js'
+import { workerDeviceMediaReader } from '../src/supervisor/device-media-read.js'
 import type { CommandFrame } from '../src/supervisor/frames.js'
 import { workerServiceCaller, workerServiceInspector } from '../src/supervisor/service-worker.js'
 import { listenUnix } from '../src/supervisor/socket.js'
@@ -24,7 +25,7 @@ import { daemonSocketPaths } from '../src/supervisor/socket-paths.js'
 import { WorkerPool } from '../src/supervisor/worker-pool.js'
 import { handleServiceCommand } from '../src/worker/commands.js'
 import { createWorkerServiceAuthority } from '../src/worker/service-authority.js'
-import { serviceOwner, servicePackageId, serviceRowId } from './service-row-fixture.js'
+import { serviceOwner, servicePackageId, serviceRowId, serviceSnapshotId } from './service-row-fixture.js'
 
 const grant = { extension: serviceOwner, name: 'sales.list', range: '^1.0.0' }
 const effectGrant = { extension: serviceOwner, name: 'sales.create', range: '^1.0.0' }
@@ -128,7 +129,7 @@ describe('S5 service worker boundary', () => {
       requestId: '1',
       method: 'callService',
       params: {
-        callId: 'call-1',
+        callId: 'a'.repeat(32),
         sessionKey: 'session-1',
         call: {
           sessionId: 'session-1',
@@ -146,6 +147,7 @@ describe('S5 service worker boundary', () => {
     })
     expect(callService).toHaveBeenCalledWith(frame.params.call, credential, expect.any(AbortSignal), {
       commandId: 'effect-1',
+      callId: 'a'.repeat(32),
     })
 
     const forged = structuredClone(frame)
@@ -155,6 +157,19 @@ describe('S5 service worker boundary', () => {
       data: { code: 'CAPABILITY_DENIED' },
     })
     expect(callService).toHaveBeenCalledTimes(1)
+    const recovery = structuredClone(frame)
+    recovery.params.effectRecoverOnly = true
+    await expect(handleServiceCommand(host, recovery, new Map())).resolves.toEqual({ output: { ok: true } })
+    expect(callService).toHaveBeenLastCalledWith(recovery.params.call, credential, expect.any(AbortSignal), {
+      commandId: 'effect-1',
+      callId: 'a'.repeat(32),
+      recoverOnly: true,
+    })
+    recovery.params.effectRecoverOnly = false
+    await expect(handleServiceCommand(host, recovery, new Map())).rejects.toMatchObject({
+      data: { code: 'CAPABILITY_DENIED' },
+    })
+    expect(callService).toHaveBeenCalledTimes(2)
   })
 
   it('uses one profile-hash worker namespace and aborts through a parallel control command', async () => {
@@ -282,13 +297,21 @@ describe('S5 service worker boundary', () => {
         type: 'module',
         exports: './index.mjs',
         agnes: {
-          plugins: [{ id: serviceRowId, export: 'main', services: [capability.name, effectCapability.name] }],
+          plugins: [
+            {
+              id: serviceRowId,
+              export: 'main',
+              inject: ['extension'],
+              services: [capability.name, effectCapability.name],
+            },
+          ],
         },
       }),
     )
     writeFileSync(
       join(pkg, 'index.mjs'),
-      `export const main = { apply(ctx) {
+      `export const main = { inject: ['extension'], apply(ctx) {
+        ctx.extension().deviceMedia.register({ port: 12345, authorization: ${JSON.stringify(`Bearer ${'m'.repeat(43)}`)} });
         ctx.services.register({ ...${JSON.stringify(capability)},
           async handler(input, serviceCtx) {
             if (!serviceCtx.actor.id) throw new Error('missing actor');
@@ -336,6 +359,16 @@ describe('S5 service worker boundary', () => {
       await server.close()
     })
     const link = await pool.acquireSharedWorker()
+    const readMedia = workerDeviceMediaReader(pool, () => profile)
+    const media = await readMedia(serviceRowId, new AbortController().signal)
+    expect(media).toMatchObject({
+      port: 12345,
+      authorization: `Bearer ${'m'.repeat(43)}`,
+      rowRevision: serviceSnapshotId,
+      workerGeneration: pool.businessWorker()?.generation,
+    })
+    expect(media?.registrationId).toMatch(/^[0-9a-f-]{36}$/)
+    await expect(readMedia('ext:missing', new AbortController().signal)).resolves.toBeNull()
     await link.openSession('session-1', {
       binding: {
         version: 1,
@@ -385,21 +418,30 @@ describe('S5 service worker boundary', () => {
         credential,
       }),
     ).resolves.toEqual({ kind: 'effect' })
-    await expect(
-      link.command('callService', {
-        callId: 'real-effect-call',
-        sessionKey: 'session-1',
-        call: {
-          sessionId: 'session-1',
-          extension: serviceOwner,
-          service: 'sales.create',
-          input: { region: 'west' },
-          commandId: 'create-west',
-        },
-        credential,
-        effectCommandId: 'create-west',
-      }),
-    ).resolves.toEqual({ output: { region: 'west' } })
+    const effectCallId = 'c'.repeat(32)
+    const effectCall = link.command('callService', {
+      callId: effectCallId,
+      sessionKey: 'session-1',
+      call: {
+        sessionId: 'session-1',
+        extension: serviceOwner,
+        service: 'sales.create',
+        input: { region: 'west' },
+        commandId: 'create-west',
+      },
+      credential,
+      effectCommandId: 'create-west',
+    })
+    const effectScope = link.serviceEffect('session-1', effectCallId)
+    expect(effectScope).toMatchObject({
+      extension: serviceOwner,
+      service: 'sales.create',
+      commandId: 'create-west',
+    })
+    expect(effectScope?.revoked.aborted).toBe(false)
+    await expect(effectCall).resolves.toEqual({ output: { region: 'west' } })
+    expect(effectScope?.revoked.aborted).toBe(true)
+    expect(link.serviceEffect('session-1', effectCallId)).toBeUndefined()
     // A service worker refuses every session method; it has no HostSession or writer lease.
     const uncheckedCommand = link.command.bind(link) as unknown as (
       method: string,

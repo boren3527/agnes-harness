@@ -12,6 +12,7 @@ import { SessionPrincipalOwnershipIndex } from '../storage/session-ownership.js'
 import {
   type ArtifactAuthorityProjectionWriter,
   createArtifactAuthorityProjection,
+  type TrustedArtifactInspector,
   type TrustedArtifactOwnership,
 } from './artifact-authority-projection.js'
 
@@ -156,6 +157,7 @@ export function composeProductionProjectedArtifactRead(
   rpc: ArtifactReadRpcOptions
   projection: ReturnType<typeof createArtifactAuthorityProjection>
   workerRead: TrustedSessionArtifactRead
+  inspector: TrustedArtifactInspector
 }> {
   try {
     if (
@@ -230,6 +232,14 @@ export function composeProductionProjectedArtifactRead(
       rpc: composeProductionArtifactReadWithStore(dataDir, legacy, projection.scope, artifacts),
       projection,
       workerRead,
+      inspector: Object.freeze({
+        async inspect(identity: Readonly<{ sha256: string; mime: string }>, signal: AbortSignal) {
+          const ref = await artifacts.inspect(identity, signal)
+          // Historical projection accepts retention tombstones; capture storage requires bytes.
+          await artifacts.get(ref, signal)
+          return ref
+        },
+      }),
     })
   } catch {
     throw new TypeError('production artifact projection configuration is invalid')

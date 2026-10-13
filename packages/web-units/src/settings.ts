@@ -1,4 +1,11 @@
-import { mountSettingsSelectOptions, SettingsAccountDialog, SettingsModelPane } from '@agnes/web-ui'
+import {
+  mountSettingsSelectOptions,
+  renderRegion,
+  SettingsAccountDialog,
+  SettingsImageModel,
+  SettingsModelPane,
+  unmountRegion,
+} from '@agnes/web-ui'
 import {
   createElement,
   forwardRef,
@@ -296,6 +303,10 @@ function SettingsBuiltinImpl(
 export function renderSettingsMarkup(container: HTMLElement): () => void {
   container.innerHTML = SETTINGS_MARKUP
   const dispose: Array<() => void> = []
+  const imageMount = document.createElement('div')
+  container.querySelector('#model-settings-pane .config-workspace')?.appendChild(imageMount)
+  renderRegion(imageMount, createElement(SettingsImageModel))
+  dispose.push(() => unmountRegion(imageMount))
   for (const id of ['config-provider', 'config-auth-method', 'config-model', 'config-thinking']) {
     const select = container.querySelector<HTMLSelectElement>(`#${id}`)
     if (!select) throw new Error(`missing settings select #${id}`)

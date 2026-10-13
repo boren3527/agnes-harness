@@ -1,9 +1,11 @@
 import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { setImmediate } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { afterEach, expect, it } from 'vitest'
 import { emptyLock, hashDirectory, packageDir, readInventory, writeLock } from '../src/index.js'
+import { readInventoryYielding } from '../src/inventory.js'
 
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), 'fixtures')
 const roots: string[] = []
@@ -12,7 +14,7 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
-it('keeps a legacy web-row package in inventory as a deletable blocker', () => {
+it('keeps a legacy web-row package in inventory as a deletable blocker', async () => {
   const root = mkdtempSync(join(tmpdir(), 'agnes-inventory-legacy-web-'))
   roots.push(root)
   const profileDir = join(root, 'profiles', 'local-dev')
@@ -69,4 +71,36 @@ it('keeps a legacy web-row package in inventory as a deletable blocker', () => {
     { code: 'incompatible', references: ['reserved-row-id:web:'] },
   ])
   expect(inventory.packages[0]?.verifiedRollbackTarget).toBeNull()
+
+  let completed = false
+  let responsiveTurns = 0
+  const observe = async () => {
+    while (!completed) {
+      await setImmediate()
+      if (!completed) responsiveTurns++
+    }
+  }
+  const observing = observe()
+  const otherRequest = setImmediate().then(() => {
+    expect(completed).toBe(false)
+  })
+  const reading = readInventoryYielding(lock, { dataDir: root, profileDir, ceiling: [] }).then((value) => {
+    completed = true
+    return value
+  })
+  expect(completed).toBe(false)
+  await otherRequest
+  expect(await reading).toEqual(inventory)
+  expect(Object.isFrozen(await reading)).toBe(true)
+  await observing
+  // Even a single package must yield while scanning its entries, not just after the scan.
+  expect(responsiveTurns).toBeGreaterThan(1)
+
+  // A subsequent read must inspect changed bytes, rather than reuse the preceding result.
+  writeFileSync(join(directory, 'index.mjs'), 'export default () => ({ changed: true })\n')
+  await expect(readInventoryYielding(lock, { dataDir: root, profileDir, ceiling: [] })).rejects.toMatchObject(
+    {
+      code: 'E_PACKAGE_INTEGRITY',
+    },
+  )
 })

@@ -1,8 +1,10 @@
 import { EventEmitter } from 'node:events'
 import type { Socket } from 'node:net'
+import { pluginRowSource } from '@agnes/host'
 import { rpcError } from '@agnes/protocol'
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { SharedSessionChannel } from '../../worker-runtime/src/shared-session-channel.js'
+import { workerRecognitionAuthorization } from '../src/supervisor/device-recognition-authorization.js'
 import { encodeFrame } from '../src/supervisor/framing.js'
 import { WorkerLink } from '../src/supervisor/worker-link.js'
 
@@ -347,5 +349,291 @@ describe('WorkerLink preview frames', () => {
       encodeFrame({ kind: 'preview', lane: 'main', effectId: 'e1', stream: 'text', offset: 0, delta: 'x' }),
     )
     await vi.waitFor(() => expect(link.alive).toBe(false))
+  })
+})
+
+describe('daemon-dispatched service effect continuity', () => {
+  const input = (callId = 'a'.repeat(32)) => ({
+    callId,
+    sessionKey: 'device',
+    effectCommandId: 'command-1',
+    credential: { private: 'not-in-scope' },
+    call: {
+      sessionId: 'device',
+      extension: 'plugin/aka-test',
+      service: 'aka.recognition.test',
+      commandId: 'command-1',
+      input: {},
+    },
+  })
+  it('binds staged recognition checks to the same pending dispatch and refuses retired scopes', async () => {
+    const { link, socket } = setup()
+    const params = input()
+    params.call.extension = pluginRowSource('ext:agnes-examples/aka-robot')
+    const pending = link.command('callService', params)
+    const scope = link.serviceEffect('device', params.callId)
+    if (!scope) throw new Error('missing actual pending scope')
+    const authority = workerRecognitionAuthorization(link, scope, new AbortController().signal)
+    for (const stage of ['upload-authorize', 'upload', 'detect'] as const) {
+      const checking = authority.assertIOAuthorized(stage, authority.revoked)
+      const frame = JSON.parse(socket.writes.at(-1)?.toString() ?? 'null')
+      expect(frame).toMatchObject({
+        kind: 'command',
+        method: 'deviceRecognition.authorize',
+        params: { sessionKey: 'device', callId: params.callId, stage },
+      })
+      socket.reply(frame.requestId, { result: { authorized: true } })
+      await expect(checking).resolves.toBeUndefined()
+    }
+    // A JSON copy cannot stand in for the exact daemon-owned view.
+    expect(() => workerRecognitionAuthorization(link, { ...scope }, authority.revoked)).toThrow()
+    socket.reply('s1', { result: {} })
+    await pending
+    expect(authority.revoked.aborted).toBe(true)
+    const writes = socket.writes.length
+    await expect(authority.assertAuthorized()).rejects.toMatchObject({ data: { code: 'CAPABILITY_DENIED' } })
+    expect(socket.writes).toHaveLength(writes)
+  })
+  it.each(['other-plugin', 'other-service', 'recover-only'] as const)(
+    'refuses recognition admission for %s without sending a Host check',
+    async (mode) => {
+      const { link, socket } = setup()
+      const params = {
+        ...input(),
+        ...(mode === 'recover-only' ? { effectRecoverOnly: true } : {}),
+      }
+      params.call.extension =
+        mode === 'other-plugin'
+          ? pluginRowSource('ext:another-plugin')
+          : pluginRowSource('ext:agnes-examples/aka-robot')
+      if (mode === 'other-service') params.call.service = 'aka.recognition.round.start'
+      const pending = link.command('callService', params)
+      const scope = link.serviceEffect('device', params.callId)
+      if (!scope) throw new Error('missing actual pending scope')
+      expect(() => workerRecognitionAuthorization(link, scope, scope.revoked)).toThrow()
+      expect(socket.writes).toHaveLength(1)
+      socket.reply('s1', { result: {} })
+      await pending
+    },
+  )
+  it('refuses an unsupported stage before sending any backcheck', async () => {
+    const { link, socket } = setup()
+    const params = input()
+    params.call.extension = pluginRowSource('ext:agnes-examples/aka-robot')
+    const pending = link.command('callService', params)
+    const scope = link.serviceEffect('device', params.callId)
+    if (!scope) throw new Error('missing actual pending scope')
+    const authority = workerRecognitionAuthorization(link, scope, scope.revoked)
+    await expect(authority.assertIOAuthorized('redirect' as never, scope.revoked)).rejects.toMatchObject({
+      data: { code: 'CAPABILITY_DENIED' },
+    })
+    expect(socket.writes).toHaveLength(1)
+    socket.reply('s1', { result: {} })
+    await pending
+  })
+  it.each([undefined, false, { authorized: false }, { authorized: true, extra: true }])(
+    'refuses malformed Host recognition response %j',
+    async (result) => {
+      const { link, socket } = setup()
+      const params = input()
+      params.call.extension = pluginRowSource('ext:agnes-examples/aka-robot')
+      const pending = link.command('callService', params)
+      const scope = link.serviceEffect('device', params.callId)
+      if (!scope) throw new Error('missing actual pending scope')
+      const authority = workerRecognitionAuthorization(link, scope, scope.revoked)
+      const checking = authority.assertAuthorized()
+      socket.reply('s2', { result })
+      await expect(checking).rejects.toMatchObject({ data: { code: 'CAPABILITY_DENIED' } })
+      socket.reply('s1', { result: {} })
+      await pending
+    },
+  )
+  it.each(['stage-cancel', 'effect-finished', 'host-error', 'timeout'] as const)(
+    'does not grant recognition after %s during the Host check',
+    async (reason) => {
+      vi.useFakeTimers()
+      const { link, socket } = setup()
+      const params = input()
+      params.call.extension = pluginRowSource('ext:agnes-examples/aka-robot')
+      const pending = link.command('callService', params)
+      const scope = link.serviceEffect('device', params.callId)
+      if (!scope) throw new Error('missing actual pending scope')
+      const authority = workerRecognitionAuthorization(link, scope, scope.revoked)
+      const stage = new AbortController()
+      const checking = authority.assertIOAuthorized('upload', stage.signal)
+      const refused = expect(checking).rejects.toMatchObject({ data: { code: 'CAPABILITY_DENIED' } })
+      if (reason === 'stage-cancel') stage.abort()
+      if (reason === 'effect-finished') {
+        socket.reply('s1', { result: {} })
+        await pending
+      }
+      if (reason === 'timeout') await vi.advanceTimersByTimeAsync(2000)
+      socket.reply(
+        's2',
+        reason === 'host-error'
+          ? { error: { code: 'error', message: 'private signed-url credential' } }
+          : { result: { authorized: true } },
+      )
+      await refused
+      if (reason !== 'effect-finished') {
+        socket.reply('s1', { result: {} })
+        await pending
+      }
+    },
+  )
+  it('copies only the trusted dispatch identity and revokes it on the actual reply', async () => {
+    const { link, socket } = setup()
+    const params = input()
+    const pending = link.command('callService', params)
+    const scope = link.serviceEffect('device', params.callId)
+    expect(scope).toMatchObject({
+      sessionKey: 'device',
+      callId: params.callId,
+      commandId: 'command-1',
+      extension: params.call.extension,
+      service: params.call.service,
+    })
+    expect(Object.isFrozen(scope)).toBe(true)
+    expect(Object.keys(scope ?? {}).sort()).toEqual([
+      'callId',
+      'commandId',
+      'extension',
+      'revoked',
+      'service',
+      'sessionKey',
+    ])
+    expect(link.serviceEffect('other', params.callId)).toBeUndefined()
+    expect(link.serviceEffect('device', 'b'.repeat(32))).toBeUndefined()
+    params.call.service = 'other'
+    params.sessionKey = 'other'
+    expect(scope?.service).toBe('aka.recognition.test')
+    socket.reply('s1', { result: {} })
+    await pending
+    expect(scope?.revoked.aborted).toBe(true)
+    expect(link.serviceEffect('device', 'a'.repeat(32))).toBeUndefined()
+  })
+  it('copies trusted recovery scope and revokes it on completion', async () => {
+    const { link, socket } = setup()
+    const params = { ...input(), effectRecoverOnly: true }
+    const pending = link.command('callService', params)
+    const scope = link.serviceEffect('device', params.callId)
+    expect(scope?.recoverOnly).toBe(true)
+    params.effectRecoverOnly = false
+    expect(scope?.recoverOnly).toBe(true)
+    socket.reply('s1', { result: {} })
+    await pending
+    expect(scope?.revoked.aborted).toBe(true)
+  })
+  it.each(['inspect', 'query', 'mismatch', 'wrong-session', 'malformed', 'bad-recovery'] as const)(
+    'does not grant continuity for %s input',
+    async (mode) => {
+      const { link, socket } = setup()
+      const params = input()
+      if (mode === 'query') delete (params as Partial<typeof params>).effectCommandId
+      if (mode === 'mismatch') params.effectCommandId = 'another-command'
+      if (mode === 'wrong-session') params.sessionKey = 'other'
+      if (mode === 'malformed') Object.assign(params.call, { extra: 'selector' })
+      if (mode === 'bad-recovery') Object.assign(params, { effectRecoverOnly: false })
+      const pending = link.command(mode === 'inspect' ? 'inspectService' : 'callService', params)
+      expect(link.serviceEffect('device', params.callId)).toBeUndefined()
+      socket.reply('s1', { result: {} })
+      await pending
+    },
+  )
+  it('revokes before an abort acknowledgement, without settling the unknown service outcome', async () => {
+    const { link, socket } = setup()
+    const pending = link.command('callService', input())
+    const scope = link.serviceEffect('device', 'a'.repeat(32))
+    const aborted = link.command('abortService', { callId: 'a'.repeat(32) })
+    expect(scope?.revoked.aborted).toBe(true)
+    expect(link.serviceEffect('device', 'a'.repeat(32))).toBeUndefined()
+    socket.reply('s2', { result: {} })
+    await aborted
+    socket.reply('s1', { result: { possiblyDispatched: true } })
+    await expect(pending).resolves.toEqual({ possiblyDispatched: true })
+  })
+  it('revokes on timeout and never revives the scope on a late reply', async () => {
+    vi.useFakeTimers()
+    try {
+      const { link, socket } = setup()
+      const pending = link.command('callService', input(), { timeoutMs: 20 })
+      const scope = link.serviceEffect('device', 'a'.repeat(32))
+      const failed = expect(pending).rejects.toThrow('timed out')
+      await vi.advanceTimersByTimeAsync(20)
+      await failed
+      expect(scope?.revoked.aborted).toBe(true)
+      socket.reply('s1', { result: {} })
+      await Promise.resolve()
+      expect(link.serviceEffect('device', 'a'.repeat(32))).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+  it('revokes on worker error, failed session and explicit session close', async () => {
+    for (const reason of ['error', 'failed', 'close'] as const) {
+      const { link, socket } = setup()
+      const pending = link.command('callService', input())
+      const scope = link.serviceEffect('device', 'a'.repeat(32))
+      if (reason === 'error') {
+        const failed = expect(pending).rejects.toThrow('worker link closed')
+        socket.emit('error', new Error('transport failure'))
+        await failed
+      } else if (reason === 'failed') {
+        socket.emit(
+          'data',
+          encodeFrame({ kind: 'session.interrupted', sessionKey: 'device', reason: 'failed' }),
+        )
+        await vi.waitFor(() => expect(scope?.revoked.aborted).toBe(true))
+        socket.reply('s1', { result: {} })
+        await pending
+      } else {
+        const closed = link.closeSession('device', 'retired')
+        expect(scope?.revoked.aborted).toBe(true)
+        socket.emit('data', encodeFrame({ kind: 'reply', sessionKey: 'device', requestId: 's2', result: {} }))
+        await closed
+        socket.reply('s1', { result: {} })
+        await pending
+      }
+      expect(scope?.revoked.aborted).toBe(true)
+      expect(link.serviceEffect('device', 'a'.repeat(32))).toBeUndefined()
+    }
+  })
+  it('refuses ambiguous duplicate call IDs and bounds scopes without granting a fallback', async () => {
+    const { link, socket } = setup()
+    const first = link.command('callService', input())
+    const scope = link.serviceEffect('device', 'a'.repeat(32))
+    const duplicate = link.command('callService', input())
+    expect(scope?.revoked.aborted).toBe(true)
+    expect(link.serviceEffect('device', 'a'.repeat(32))).toBeUndefined()
+    socket.reply('s1', { result: {} })
+    socket.reply('s2', { result: {} })
+    await Promise.all([first, duplicate])
+    const all: Promise<unknown>[] = []
+    for (let i = 0; i < 129; i++)
+      all.push(link.command('callService', input(i.toString(16).padStart(32, '0'))))
+    expect(link.serviceEffect('device', '7f'.padStart(32, '0'))).toBeDefined()
+    expect(link.serviceEffect('device', '80'.padStart(32, '0'))).toBeUndefined()
+    all.forEach((_, i) => {
+      socket.reply(`s${i + 3}`, { result: {} })
+    })
+    await Promise.all(all)
+  })
+  it('cleans a scope if the command write throws instead of leaving admission alive', async () => {
+    const { link, socket } = setup()
+    vi.spyOn(socket, 'write').mockImplementationOnce(() => {
+      throw new Error('write unavailable')
+    })
+    await expect(link.command('callService', input())).rejects.toThrow('write unavailable')
+    expect(link.serviceEffect('device', 'a'.repeat(32))).toBeUndefined()
+    const running = link.command('callService', input())
+    const scope = link.serviceEffect('device', 'a'.repeat(32))
+    const failed = expect(running).rejects.toThrow('worker link closed')
+    vi.spyOn(socket, 'write').mockImplementationOnce(() => {
+      throw new Error('close write unavailable')
+    })
+    expect(() => link.close('retired')).toThrow('close write unavailable')
+    await failed
+    expect(scope?.revoked.aborted).toBe(true)
+    expect(link.alive).toBe(false)
   })
 })

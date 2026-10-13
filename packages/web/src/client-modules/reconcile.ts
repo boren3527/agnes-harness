@@ -455,7 +455,33 @@ export function createReconciler(options: ReconcilerOptions): ClientReconciler {
         }
         await lifecycle('invalidate', rowId)
         await lifecycle('prefetch', rowId)
-        mod = await withTimeout(importer(target.entryUrl), timeouts.import, `import ${rowId}`)
+        // Different rows already load concurrently. Fetch this row's JS and inactive CSS together,
+        // then keep teardown/activation on its existing serial lane. Settle both to reclaim CSS
+        // even when import fails; an unobserved late stylesheet must never leak into the page.
+        const [moduleResult, styleResult] = await Promise.allSettled([
+          Promise.resolve().then(() =>
+            withTimeout(importer(target.entryUrl), timeouts.import, `import ${rowId}`),
+          ),
+          Promise.resolve().then(() => prepareStyles(target, timeouts.styles)),
+        ])
+        if (styleResult.status === 'fulfilled') stagedStyles = styleResult.value
+        if (moduleResult.status === 'rejected' || styleResult.status === 'rejected') {
+          stagedStyles?.dispose()
+          const failed =
+            moduleResult.status === 'rejected' ? moduleResult : (styleResult as PromiseRejectedResult)
+          if (epoch === state.epoch)
+            fail(
+              rowId,
+              state,
+              failed.reason instanceof Error && failed.reason.message.includes('timeout')
+                ? 'timeout'
+                : moduleResult.status === 'rejected'
+                  ? 'import'
+                  : 'styles',
+            )
+          return
+        }
+        mod = moduleResult.value
       } catch (error) {
         if (epoch === state.epoch)
           fail(
@@ -465,18 +491,7 @@ export function createReconciler(options: ReconcilerOptions): ClientReconciler {
           )
         return
       }
-      try {
-        stagedStyles = await prepareStyles(target, timeouts.styles)
-      } catch (error) {
-        stagedStyles?.dispose()
-        if (epoch === state.epoch)
-          fail(
-            rowId,
-            state,
-            error instanceof Error && error.message.includes('timeout') ? 'timeout' : 'styles',
-          )
-        return
-      }
+      if (!stagedStyles) return
       try {
         if (
           typeof mod !== 'object' ||

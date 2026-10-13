@@ -42,6 +42,7 @@ import {
 import { createPackageManager } from '@agnes/package-manager'
 import { LocalGate, type RuntimeConvergenceReport } from '@agnes/plugin-runtime/host'
 import {
+  inspectJsonData,
   workerGeneration as parseWorkerGeneration,
   type RpcError,
   rpcError,
@@ -57,6 +58,8 @@ import {
   scanWorkspaceSkills,
   type WorkerResourceSlot,
 } from './commands.js'
+import { DeviceBindingLifetimes } from './device-binding-lifetimes.js'
+import { DeviceRecognitionAuthorizations } from './device-recognition-authorizations.js'
 import type {
   SessionCommandFrame,
   SessionOpenFrame,
@@ -81,6 +84,12 @@ import { createMcpStatusFrameBuffer } from './status-frame-buffer.js'
 
 /** Runtime capabilities already bootstrapped for this worker; reuse them without reconnecting. */
 export type WorkerHostSkillResources = Readonly<{
+  deviceSession?: NonNullable<HostOptions['deviceSession']>
+  deviceRecognitionBudget?: NonNullable<HostOptions['deviceRecognitionBudget']>
+  deviceRecognitionAuthorization?: NonNullable<HostOptions['deviceRecognitionAuthorization']>
+  deviceRecognitionExecute?: NonNullable<HostOptions['deviceRecognitionExecute']>
+  deviceCaptureSelection?: NonNullable<HostOptions['deviceCaptureSelection']>
+  deviceSessionRetain?: NonNullable<HostOptions['deviceSessionRetain']>
   mcpManage?: NonNullable<HostOptions['mcpManage']>
   pluginManage?: NonNullable<HostOptions['pluginManage']>
   skillInstall?: NonNullable<HostOptions['skillInstall']>
@@ -220,6 +229,62 @@ export async function runWorker(
   }
 
   const sharedChannel = new SharedSessionChannel(send)
+  const deviceSession: NonNullable<HostOptions['deviceSession']> = async (sessionKey, signal, view) => {
+    if (sessionKey !== sharedChannel.currentSessionKey()) throw new Error('Device session mismatch')
+    return sharedChannel.request('device-session-read', view ? { view } : {}, signal)
+  }
+  const deviceRecognitionBudget: NonNullable<HostOptions['deviceRecognitionBudget']> = async (
+    sessionKey,
+    callId,
+    input,
+    signal,
+  ) => {
+    if (sessionKey !== sharedChannel.currentSessionKey())
+      throw new Error('Device recognition session mismatch')
+    return sharedChannel.request('device-recognition-budget', { ...input, callId }, signal)
+  }
+  const deviceCaptureSelection: NonNullable<HostOptions['deviceCaptureSelection']> = async (
+    sessionKey,
+    callId,
+    input,
+    signal,
+  ) => {
+    if (sessionKey !== sharedChannel.currentSessionKey()) throw new Error('Device capture session mismatch')
+    const checked = inspectJsonData(input, 8192)
+    if (!checked.ok || !checked.value || typeof checked.value !== 'object' || Array.isArray(checked.value))
+      throw new Error('Device capture selection unavailable')
+    return sharedChannel.request('device-capture-selection', { ...checked.value, callId }, signal)
+  }
+  const deviceRecognitionExecute: NonNullable<HostOptions['deviceRecognitionExecute']> = async (
+    sessionKey,
+    callId,
+    input,
+    signal,
+  ) => {
+    if (sessionKey !== sharedChannel.currentSessionKey())
+      throw new Error('Device recognition session mismatch')
+    const checked = inspectJsonData(input, 4 * Math.ceil((2.5 * 1024 * 1024) / 3) + 4096)
+    if (
+      !checked.ok ||
+      !checked.value ||
+      typeof checked.value !== 'object' ||
+      Array.isArray(checked.value) ||
+      Object.hasOwn(checked.value, 'callId')
+    )
+      throw new Error('Device recognition request unavailable')
+    return sharedChannel.request('device-recognition-execute', { ...checked.value, callId }, signal)
+  }
+  const deviceLifetimes = new DeviceBindingLifetimes(
+    deviceSession,
+    (key, signal) => deviceSession(key, signal, 'connection'),
+    (key, signal) => deviceSession(key, signal, 'recognition'),
+  )
+  const deviceSessionRetain: NonNullable<HostOptions['deviceSessionRetain']> = (
+    key,
+    signal,
+    lifetime,
+    scope,
+  ) => deviceLifetimes.retain(key, signal, lifetime, scope === 'recognition')
   const skillInstall: NonNullable<HostOptions['skillInstall']> = async (input, signal) => {
     if (input.sessionKey !== sharedChannel.currentSessionKey())
       throw new Error('Skill install session mismatch')
@@ -309,6 +374,7 @@ export async function runWorker(
   const closeResources = async (): Promise<void> => {
     if (resourcesClosed) return
     resourcesClosed = true
+    deviceLifetimes.close()
 
     await idleResourcePreparation
     await hostedSessions?.closeAll().catch(() => undefined)
@@ -342,6 +408,7 @@ export async function runWorker(
   // browser surface-service calls. Pass this through both default and packaged/custom Host assembly
   // paths; otherwise a packaged launcher silently drops the authority at its buildHost boundary.
   const workerServiceAuthority = workerKind === 'session' ? createWorkerServiceAuthority() : undefined
+  const recognitionAuthorizations = new DeviceRecognitionAuthorizations()
   const dimension = computerUse.capture.maxImageDimension
   const imageBytes = computerUse.capture.maxBytesPerImage
   const requestMedia = composeProductionRequestMedia({
@@ -396,6 +463,12 @@ export async function runWorker(
     ? Promise.resolve(undefined)
     : deps.buildHost
       ? deps.buildHost(profile, prompter, {
+          deviceSession,
+          deviceRecognitionBudget,
+          deviceRecognitionAuthorization: recognitionAuthorizations.register,
+          deviceRecognitionExecute,
+          deviceCaptureSelection,
+          deviceSessionRetain,
           skillInstall,
           mcpManage,
           pluginManage,
@@ -419,6 +492,12 @@ export async function runWorker(
                 }
               : createLoader({ cacheDir: profile.cacheDir, hostRoot, agnesVersion: '0.0.0' }))
           return createHost(profile, {
+            deviceSession,
+            deviceRecognitionBudget,
+            deviceRecognitionAuthorization: recognitionAuthorizations.register,
+            deviceRecognitionExecute,
+            deviceCaptureSelection,
+            deviceSessionRetain,
             dataDir: profile.dataDir,
             profileDir,
             workspaceRoot: cwd,
@@ -588,6 +667,18 @@ export async function runWorker(
       }
       return
     }
+    if (frame.kind === 'device.binding.changed') {
+      deviceLifetimes.changed(frame.binding)
+      return
+    }
+    if (frame.kind === 'device.recognition.changed') {
+      deviceLifetimes.recognitionChanged(frame.recognition)
+      return
+    }
+    if (frame.kind === 'device.connection.changed') {
+      deviceLifetimes.connectionChanged(frame.connection)
+      return
+    }
     if (frame.kind === 'reply') {
       sharedChannel.settle(frame)
       return
@@ -609,6 +700,7 @@ export async function runWorker(
         }
         if (frame.kind === 'session.close') {
           if (!hostedSessions) throw new Error('session.close is unavailable in this worker')
+          deviceLifetimes.closeSession(frame.sessionKey)
           await hostedSessions.close(frame.sessionKey)
           return {}
         }
@@ -618,6 +710,10 @@ export async function runWorker(
         }
         const resources = resourceSlot.generation
         const command = frame as WorkerCommandFrame
+        if (command.method === 'deviceRecognition.authorize') {
+          if (workerKind !== 'session') throw new Error('recognition authority unavailable')
+          return recognitionAuthorizations.authorize(command.params)
+        }
         if (command.method === 'resource.stale') {
           resourceSlot.staleMarks++
           // Acknowledge promptly; use idle time instead of deferring startup scans to the first prompt.
@@ -770,6 +866,9 @@ export async function runWorker(
   const dispatchFrames = async (frames: SupervisorToWorker[]): Promise<void> => {
     for (const raw of frames) {
       if ('type' in raw) void dispatch(raw).catch(() => shutdown(1))
+      else if (raw.kind === 'device.binding.changed') await dispatch(raw)
+      else if (raw.kind === 'device.connection.changed') await dispatch(raw)
+      else if (raw.kind === 'device.recognition.changed') await dispatch(raw)
       else if (raw.kind === 'command' && raw.method === 'resource.stale') await dispatch(raw)
       else void dispatch(raw).catch(() => shutdown(1))
     }

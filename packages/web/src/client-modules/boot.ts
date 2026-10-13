@@ -28,6 +28,7 @@ import { BuiltinWebUnitRegistry, WEB_UNITS_LOCALE_NAMESPACE, webUnitsLocaleCatal
 import { diagnosticsCatalog } from '@agnes/web-units/diagnostics-locale'
 import { traceCatalog } from '@agnes/web-units/trace-locale'
 import { createElement } from 'react'
+import { type DeviceWorkbenchMount, mountDeviceWorkbench } from '../device-workbench.js'
 import { WEB_LOCALE_NAMESPACE, webLocaleCatalog } from '../locale-catalog.js'
 import {
   applyDocumentLocale,
@@ -88,9 +89,11 @@ export interface ClientModulesRuntime {
     close(): void
     dismiss(): void
     focusNew(): void
+    focusNewDevice?(): void
     dispose(): void
   }
   conversation?: ConversationRegionMount
+  deviceWorkbench?: DeviceWorkbenchMount
   approval?: ApprovalRegionMount
   composer?: ComposerRegionMount
   topbar?: TopbarRegionMount
@@ -128,6 +131,9 @@ export async function startClientModules(options: {
     onFork?: (turn: import('@agnes/protocol').UITurn) => Promise<void>
   }
   conversationContainer?: HTMLElement | undefined
+  deviceWorkbenchContainer?: HTMLElement | undefined
+  deviceWorkbenchLayout?: HTMLElement | undefined
+  onDeviceBindingChanged?: (() => void) | undefined
   topbarContainer?: HTMLElement | undefined
   approvalContainer?: HTMLElement | undefined
   composerContainer?: HTMLElement | undefined
@@ -347,6 +353,19 @@ export async function startClientModules(options: {
     ? mountSidebarRegion(registry, options.sidebarContainer, options.sidebar, locale)
     : undefined
   if (sidebar) builtinUnits.mount('@agnes/web-sidebar', () => sidebar.dispose())
+  const deviceWorkbench =
+    options.deviceWorkbenchContainer && options.deviceWorkbenchLayout
+      ? mountDeviceWorkbench({
+          client: options.agnes,
+          session,
+          locale,
+          registry,
+          container: options.deviceWorkbenchContainer,
+          layout: options.deviceWorkbenchLayout,
+          ...(options.onDeviceBindingChanged ? { onBindingChanged: options.onDeviceBindingChanged } : {}),
+        })
+      : undefined
+  if (deviceWorkbench) builtinUnits.mount('@agnes/web-device', () => deviceWorkbench.dispose())
   const transcript =
     !conversation && options.transcriptContainer
       ? mountTranscriptRegion(registry, options.transcriptContainer, {
@@ -398,6 +417,7 @@ export async function startClientModules(options: {
     },
     ...(sidebar ? { sidebar } : {}),
     ...(conversation ? { conversation } : {}),
+    ...(deviceWorkbench ? { deviceWorkbench } : {}),
     ...(approval ? { approval } : {}),
     ...(composer ? { composer } : {}),
     ...(topbar ? { topbar } : {}),

@@ -1024,6 +1024,58 @@ it.each([
   }
 })
 
+it('shows installed plugins before supplementary surface and tree queries finish', async () => {
+  document.documentElement.innerHTML = html
+  history.replaceState(null, '', '/admin/plugins#fast-list-token')
+  const item = catalog()[0]
+  if (!item) throw new Error('Missing package fixture')
+  const installed: PackageInstalledDescriptor = {
+    id: item.id,
+    version: item.version,
+    source: item.source,
+    integrity: item.integrity,
+    contributions: item.contributions,
+    trusted: true,
+    desired: 'enabled',
+    actual: 'running',
+    cleanupPending: false,
+    rollbackTarget: null,
+    blockers: [],
+  }
+  let release!: () => void
+  const supplementary = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const fetcher = vi.fn<typeof fetch>(async (input) => {
+    const url = String(input)
+    if (url.endsWith('/session')) return Response.json({})
+    if (url.endsWith('/context')) return Response.json(pinsContext())
+    if (url.endsWith('/surfaces') || url.endsWith('/tree/list')) {
+      await supplementary
+      return url.endsWith('/surfaces')
+        ? Response.json({ surfaces: [] })
+        : Response.json({ actual: true, pending: false })
+    }
+    if (url.endsWith('/list')) return Response.json({ packages: [installed] })
+    if (url.endsWith('/pins/inspect')) return Response.json({ orphans: [] })
+    return Response.json({}, { status: 500 })
+  })
+  vi.stubGlobal('fetch', fetcher)
+  vi.resetModules()
+  const mounting = mountAdmin()
+  try {
+    await vi.waitFor(() => expect(document.getElementById('plugin-list')?.textContent).toContain(item.id), {
+      timeout: 10_000,
+    })
+    expect(fetcher.mock.calls.some(([url]) => String(url).endsWith('/surfaces'))).toBe(true)
+    expect(fetcher.mock.calls.some(([url]) => String(url).endsWith('/tree/list'))).toBe(true)
+  } finally {
+    release()
+    const mounted = await mounting
+    mounted.dispose()
+  }
+})
+
 // Finding 5 of the whole-branch review: refresh() used to swallow a pins/inspect failure with no
 // visible signal and no clearing of a previously-shown (now unverified) orphan list.
 it('surfaces a status message and clears a stale list when packages.pins.inspect fails', async () => {
@@ -1502,6 +1554,46 @@ it('recovers a dropped tree_changed notice by polling tree/list without a page r
   expect(treeCalls).toBeGreaterThan(1)
   expect(reloads).toEqual([])
   Object.defineProperty(location, 'reload', { configurable: true, value: originalReload })
+})
+
+it('does not restart tree polling when a pending query finishes after disposal', async () => {
+  document.documentElement.innerHTML = html
+  history.replaceState(null, '', '/admin/plugins#disposed-tree-token')
+  let release!: (value: Response) => void
+  const pending = new Promise<Response>((resolve) => {
+    release = resolve
+  })
+  let polls = 0
+  const fetcher = vi.fn<typeof fetch>(async (input) => {
+    const url = String(input)
+    if (url.endsWith('/session')) return Response.json({})
+    if (url.endsWith('/context')) return Response.json(pinsContext())
+    if (url.endsWith('/tree/list')) {
+      if (++polls > 1) return pending
+      return Response.json({ actual: true, pending: false })
+    }
+    if (url.endsWith('/list')) return Response.json({ packages: [] })
+    if (url.endsWith('/surfaces')) return Response.json({ surfaces: [] })
+    if (url.endsWith('/pins/inspect')) return Response.json({ orphans: [] })
+    return Response.json({}, { status: 500 })
+  })
+  vi.stubGlobal('fetch', fetcher)
+  vi.useFakeTimers()
+  const mounted = await mountAdmin()
+  try {
+    await vi.advanceTimersByTimeAsync(1200)
+    expect(polls).toBe(2)
+    mounted.dispose()
+    release(Response.json({ actual: true, pending: false }))
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(polls).toBe(2)
+    await mounted.reload()
+    expect(polls).toBe(2)
+  } finally {
+    release(Response.json({ actual: true, pending: false }))
+    mounted.dispose()
+    vi.useRealTimers()
+  }
 })
 
 it('closes an open detail dialog so disable and rollback confirms can show', async () => {

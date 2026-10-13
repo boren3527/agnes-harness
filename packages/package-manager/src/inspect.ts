@@ -17,7 +17,7 @@ import type { LockEntry } from './lockfile.js'
 import { isReservedPluginRowIdError, parseAgnesPluginEntries } from './plugin-manifest.js'
 import { checkCancelled } from './ports.js'
 import { resolveSkins } from './skin-assets.js'
-import { type FetchedSource, hashDirectory, type PackageSource } from './sources.js'
+import { type FetchedSource, hashDirectorySteps, type PackageSource } from './sources.js'
 
 function invalid(reason: string): never {
   throw new PackageError('E_EXT_LOAD', 'package static metadata is invalid', { detail: { reason } })
@@ -111,8 +111,18 @@ export function inspectStaged(input: {
   ceiling: readonly string[]
   signal?: AbortSignal
 }): { preview: PackagePreview; treeIntegrity: string } {
+  const steps = inspectStagedSteps(input)
+  for (;;) {
+    const step = steps.next()
+    if (step.done) return step.value
+  }
+}
+
+export function* inspectStagedSteps(
+  input: Parameters<typeof inspectStaged>[0],
+): Generator<undefined, ReturnType<typeof inspectStaged>> {
   checkCancelled(input.signal)
-  const treeIntegrity = hashDirectory(input.dir, {
+  const treeIntegrity = yield* hashDirectorySteps(input.dir, {
     exclude: [],
     ...(input.signal ? { signal: input.signal } : {}),
   })

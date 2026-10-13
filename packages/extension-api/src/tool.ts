@@ -51,6 +51,7 @@ export const MAX_OUTPUT_MAX_BYTES = 1048576
 // the last three are required keys typed `T | undefined` rather than optional `?:` members —
 // with exactOptionalPropertyTypes on, that is what forces the author to type the word. The
 // runtime check in checkToolMeta enforces the same rule for tools that arrive as plain data.
+// `returnsImages` is the one optional key: leaving it out keeps every tool written before it as it was.
 export interface ToolMeta {
   isReadOnly: boolean
   isDestructive: boolean
@@ -60,6 +61,8 @@ export interface ToolMeta {
   costHint: { credits?: number; wallMs?: number } | undefined
   deferLoading: boolean | undefined
   requiresApproval: RiskClass | undefined
+  /** The results carry pictures for the model; they reach it only from a closed-world tool. */
+  returnsImages?: boolean
 }
 export const TOOL_META_KEYS = [
   'isReadOnly',
@@ -171,6 +174,28 @@ export interface CodeRuntime {
 }
 
 export interface ToolContext {
+  /** Host-owned subject image generation. No credential or arbitrary endpoint access. */
+  readonly imageGeneration?: Readonly<{
+    /** Non-secret saved configuration identity for caches; absent on older Hosts. */
+    configuration?(): Promise<{ revision: number; model: string; size: '1K' | '2K'; enabled: boolean }>
+    subject(input: {
+      images: readonly { bytes: Uint8Array; mime: 'image/jpeg' | 'image/png' }[]
+      /** Requested object in the first image, normalized [x1,y1,x2,y2]; otherwise its main subject. */
+      subjectBox?: readonly number[]
+      /** Appearance observations, quoted as data by Host; required for synthesized modeling views. */
+      description?: string
+      view?: 'front' | 'right' | 'back' | 'left'
+    }): Promise<{
+      bytes: Uint8Array
+      mime: 'image/png'
+      model: string
+      width: number
+      height: number
+      background: 'model-alpha' | 'white-border'
+    }>
+  }>
+  /** Fresh readonly enrollment for this invocation; absent on older or unsupported hosts. */
+  readonly device?: Readonly<import('./common.js').DeviceSessionPort>
   /** Active main-conversation request only; Host owns validation and native approval. */
   readonly mcpManage?: Readonly<{ request(input: unknown): Promise<unknown> }>
   readonly pluginManage?: Readonly<{ request(input: unknown): Promise<unknown> }>
@@ -324,6 +349,8 @@ export function checkToolMeta(meta: unknown): CheckResult {
     problems.push('deferLoading: expected boolean | undefined')
   if (m.requiresApproval !== undefined && !RISK.has(String(m.requiresApproval)))
     problems.push('requiresApproval: expected never | destructive | always | undefined')
+  if (m.returnsImages !== undefined && typeof m.returnsImages !== 'boolean')
+    problems.push('returnsImages: expected boolean | undefined')
   return problems.length ? { ok: false, problems } : { ok: true }
 }
 

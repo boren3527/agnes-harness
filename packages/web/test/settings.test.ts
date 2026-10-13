@@ -115,6 +115,66 @@ function client(
 }
 
 describe('settings controller', () => {
+  it('saves image generation separately, reports readback and clears the secret input', async () => {
+    installDom()
+    const c = client()
+    const image = {
+      revision: 2,
+      enabled: true,
+      size: '1K' as const,
+      model: 'agnes-image-2.5-flash' as const,
+      endpoint: 'https://api.agnes-ai.cn/v1/images/generations' as const,
+      credentialConfigured: true,
+    }
+    const save = vi.fn(async () => ({ ...image, revision: 3 }))
+    c.config.imageGeneration = { get: vi.fn(async () => image), save }
+    const onSaved = vi.fn(async () => {})
+    const controller = createSettingsController({ client: c, onSaved, onError: vi.fn() })
+    await controller.open()
+    await vi.waitFor(() => expect(node('image-model-status').textContent).toBe('已配置'))
+    node('image-model-key').value = 'fixture-only-key'
+    node('image-model-save').dispatch('click')
+    expect(node('image-model-key').value).toBe('')
+    await vi.waitFor(() => expect(node('image-model-message').textContent).toContain('已保存'))
+    expect(save).toHaveBeenCalledWith({
+      expectedRevision: 2,
+      model: 'agnes-image-2.5-flash',
+      enabled: true,
+      size: '1K',
+      apiKey: ['fixture', 'only', 'key'].join('-'),
+    })
+    expect(onSaved).not.toHaveBeenCalled()
+    node('image-model-key').value = 'unsaved-key'
+    controller.close()
+    expect(node('image-model-key').value).toBe('')
+  })
+  it('leaves image settings retryable after a read error and ignores late reads after closing', async () => {
+    installDom()
+    const c = client(),
+      waiting = deferred<Awaited<ReturnType<Client['config']['imageGeneration']['get']>>>()
+    const image = {
+      revision: 1,
+      enabled: true,
+      size: '1K' as const,
+      model: 'agnes-image-2.5-flash' as const,
+      endpoint: 'https://api.agnes-ai.cn/v1/images/generations' as const,
+      credentialConfigured: true,
+    }
+    c.config.imageGeneration = {
+      get: vi.fn().mockRejectedValueOnce(new Error('read failure')).mockReturnValueOnce(waiting.promise),
+      save: vi.fn(),
+    }
+    const controller = createSettingsController({ client: c, onSaved: vi.fn(), onError: vi.fn() })
+    await controller.open()
+    await vi.waitFor(() => expect(node('image-model-message').textContent).toContain('请重试'))
+    expect(node('image-model-save').disabled).toBe(true)
+    node('image-model-reload').dispatch('click')
+    controller.close()
+    waiting.resolve(image)
+    await Promise.resolve()
+    expect(node('image-model-status').textContent).not.toBe('已配置')
+    expect(c.config.imageGeneration.save).not.toHaveBeenCalled()
+  })
   it('keeps locale markers on account form labels and hints in the static settings markup', () => {
     installDom()
     expect(
@@ -368,7 +428,19 @@ describe('settings controller', () => {
     expect((reported as Error).message).toBe('provider rejected [redacted]')
   })
 
-  it('translates known configuration reasons into an actionable settings error', async () => {
+  it.each([
+    [
+      'CONFIG_CREDENTIAL_PERMISSIONS',
+      '凭据存储权限不符合要求。请确认 AGH_HOME 及 secrets/auth 目录属于当前用户，目录权限为 0700、文件权限为 0600；具体路径见 data/audit/configuration.jsonl。',
+    ],
+    ['CONFIG_CREDENTIAL_READ_ONLY', '凭据存储位于只读文件系统。请将 AGH_HOME 移至可写的本地目录并重启。'],
+    [
+      'CONFIG_CREDENTIAL_INVALID',
+      '凭据存储存在不安全路径或无效数据。请检查 data/audit/configuration.jsonl，恢复私有的普通目录和文件。',
+    ],
+    ['CONFIG_CREDENTIAL_NO_SPACE', '凭据存储所在磁盘空间不足。请释放 AGH_HOME 所在磁盘的空间后重试。'],
+    ['CONFIG_REVISION_CONFLICT', '配置已被其他客户端修改，请重新打开设置后再试。'],
+  ])('translates %s into an actionable settings error', async (reason, message) => {
     installDom()
     const onError = vi.fn()
     const settings = createSettingsController({

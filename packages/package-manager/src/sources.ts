@@ -137,6 +137,18 @@ function contained(root: string, candidate: string): boolean {
 }
 
 export function hashDirectory(dir: string, opts: { exclude?: string[]; signal?: AbortSignal } = {}): string {
+  const steps = hashDirectorySteps(dir, opts)
+  for (;;) {
+    const step = steps.next()
+    if (step.done) return step.value
+  }
+}
+
+/** Shared tree verification; async inventory yields between filesystem entries and file hashes. */
+export function* hashDirectorySteps(
+  dir: string,
+  opts: { exclude?: string[]; signal?: AbortSignal } = {},
+): Generator<undefined, string> {
   checkCancelled(opts.signal)
   let root: string
   try {
@@ -154,8 +166,9 @@ export function hashDirectory(dir: string, opts: { exclude?: string[]; signal?: 
   }
   const rules = normalizedExcludes(opts.exclude ?? [...DEFAULT_EXCLUDES])
   const files: Array<{ rel: string; file: string }> = []
-  const walk = (current: string): void => {
+  function* walk(current: string): Generator<undefined> {
     for (const entry of readdirSync(current, { withFileTypes: true })) {
+      yield undefined
       checkCancelled(opts.signal)
       const file = join(current, entry.name)
       const rel = relative(root, file).split(sep).join('/')
@@ -163,7 +176,7 @@ export function hashDirectory(dir: string, opts: { exclude?: string[]; signal?: 
       const stat = lstatSync(file)
       if (stat.isSymbolicLink()) throw sourceError('package tree contains a symbolic link', 'symlink')
       if (stat.isDirectory()) {
-        walk(file)
+        yield* walk(file)
         continue
       }
       if (!stat.isFile()) throw sourceError('package tree contains a special entry', 'special-entry')
@@ -177,9 +190,11 @@ export function hashDirectory(dir: string, opts: { exclude?: string[]; signal?: 
       files.push({ rel, file })
     }
   }
-  walk(root)
+  yield* walk(root)
   const outer = createHash('sha256')
   for (const { rel, file } of files.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))) {
+    checkCancelled(opts.signal)
+    yield undefined
     checkCancelled(opts.signal)
     const inner = createHash('sha256').update(rel).update('\0').update(readFileSync(file)).digest()
     outer.update(inner)

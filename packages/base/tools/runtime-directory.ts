@@ -3,7 +3,7 @@ import { dirname, join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 
 async function move(from: string, to: string): Promise<void> {
-  const deadline = performance.now() + 1_000
+  const deadline = performance.now() + 10_000
   for (;;) {
     try {
       await rename(from, to)
@@ -11,11 +11,15 @@ async function move(from: string, to: string): Promise<void> {
     } catch (error) {
       if (
         process.platform !== 'win32' || // guards-allow-platform: Windows build artifacts can remain briefly held after exit.
-        !['EPERM', 'EACCES', 'EBUSY'].includes((error as NodeJS.ErrnoException).code ?? '') ||
-        performance.now() >= deadline
+        !['EPERM', 'EACCES', 'EBUSY'].includes((error as NodeJS.ErrnoException).code ?? '')
       )
         throw error
-      await delay(20)
+      if (performance.now() >= deadline)
+        throw new Error(
+          `Runtime directory rename remained blocked after 10 seconds: ${from} -> ${to}. Check file holders and directory permissions. ${(error as Error).message}`,
+          { cause: error },
+        )
+      await delay(50)
     }
   }
 }

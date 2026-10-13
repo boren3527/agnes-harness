@@ -8,6 +8,7 @@ export const WEB_CLIENT_MODULE_SLOT_NAMES = Object.freeze([
   'tool.card.inline',
   'client.card',
   'workbench.panel',
+  'workbench.device',
   'conversation.approval.detail',
   'conversation.chat.assistant-actions',
   'conversation.chat.node',
@@ -369,6 +370,12 @@ export const PACKAGE_ADMIN_METHODS = Object.freeze({
     'read',
     'packages.read',
   ),
+  '_agnes/v1/clientModules.resolveMedia': contract(
+    P.ClientModuleMediaResolveParams,
+    P.ClientModuleMediaResolveResult,
+    'read',
+    'packages.read',
+  ),
   // Effects use a separate private BFF/RPC path. The browser first passes the host-owned command
   // authorizer; the daemon then rechecks the live row and applies durable command semantics.
   '_agnes/v1/clientModules.callEffect': contract(
@@ -549,6 +556,8 @@ export type PackageAdminDataName =
   | 'PluginTreeRollbackResult'
   | 'ClientModuleRosterRow'
   | 'ClientModuleEffectCallParams'
+  | 'ClientModuleMediaResolveParams'
+  | 'ClientModuleMediaResolveResult'
 const DATA_SCHEMAS: Record<PackageAdminDataName, TSchema> = {
   PackageAdminPermission: P.PackageAdminPermission,
   PackageSource: P.PackageSource,
@@ -600,6 +609,8 @@ const DATA_SCHEMAS: Record<PackageAdminDataName, TSchema> = {
   PluginTreeRollbackResult: P.PluginTreeRollbackResult,
   ClientModuleRosterRow: P.ClientModuleRosterRow,
   ClientModuleEffectCallParams: P.ClientModuleEffectCallParams,
+  ClientModuleMediaResolveParams: P.ClientModuleMediaResolveParams,
+  ClientModuleMediaResolveResult: P.ClientModuleMediaResolveResult,
 }
 function check(schema: TSchema, value: unknown): ValidationResult<unknown> {
   const inspected = inspectJsonData(value, 1048576)

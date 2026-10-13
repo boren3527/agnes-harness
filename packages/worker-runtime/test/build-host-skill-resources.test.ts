@@ -129,6 +129,24 @@ it('does not expose AGNES_WORKER_ROOT as a shared session worker workspace Skill
   expect(received?.skillResources).toBeDefined()
   expect(received?.requestMedia).toBeDefined()
   expect(received?.skillInstall).toBeDefined()
+  expect(received?.deviceCaptureSelection).toBeDefined()
+  expect(received?.deviceRecognitionExecute).toBeDefined()
+  await expect(
+    received?.deviceRecognitionExecute?.(
+      'forged-session',
+      'a'.repeat(32),
+      { operation: 'begin' },
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow('session context')
+  await expect(
+    received?.deviceCaptureSelection?.(
+      'forged-session',
+      'a'.repeat(32),
+      { operation: 'read' },
+      new AbortController().signal,
+    ),
+  ).rejects.toThrow('session context')
   expect(received?.skillResources?.list()).toMatchObject([
     {
       resourceId: fixture.userCandidate.resourceId,
@@ -168,6 +186,12 @@ it('still calls buildHost when bootstrap produced no Skill resources', async () 
     ),
   ).rejects.toThrow('stop-after-empty')
   expect(received).toEqual({
+    deviceSession: expect.any(Function),
+    deviceRecognitionBudget: expect.any(Function),
+    deviceRecognitionAuthorization: expect.any(Function),
+    deviceRecognitionExecute: expect.any(Function),
+    deviceCaptureSelection: expect.any(Function),
+    deviceSessionRetain: expect.any(Function),
     skillInstall: expect.any(Function),
     requestMedia: expect.any(Object),
     runtimePluginSources: expect.any(Function),

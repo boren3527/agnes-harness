@@ -21,6 +21,8 @@ import { decodeRuntimeTargetArtifact, type RuntimeTargetArtifact } from '@agnes/
 import {
   type ClientModuleEffectCallParams,
   type ClientModuleListResult,
+  type ClientModuleMediaResolveParams,
+  type ClientModuleMediaResolveResult,
   type ClientModuleReadResult,
   type ClientModuleServiceCallParams,
   type ExtensionCallResult,
@@ -121,6 +123,7 @@ export type PackageAdminService = Readonly<{
     method: PackageAdminMethodName,
     params: unknown,
     authority: PackageAdminAuthority | undefined,
+    signal?: AbortSignal,
   ): Promise<unknown>
   recover(): Promise<void>
   rebuildClientModules(profile: string): Promise<void>
@@ -350,6 +353,11 @@ class Service implements PackageAdminService {
       /** Production publisher: validates in an isolated probe before changing desired state. */
       pluginTreePublisher?: (artifact: RuntimeTargetArtifact) => Promise<void>
       workerGeneration?: () => number | undefined
+      clientMediaResolve?: (
+        input: ClientModuleMediaResolveParams & { backendRowId: string; rosterRevision: string },
+        authority: PackageAdminAuthority,
+        signal: AbortSignal,
+      ) => Promise<ClientModuleMediaResolveResult>
       /** Private launcher BFF dispatch. The registry performs row/snapshot authority checks first. */
       clientServiceCall?: (
         input: ClientModuleServiceCallParams & Readonly<{ packageId: string; extension: string }>,
@@ -391,6 +399,7 @@ class Service implements PackageAdminService {
 
   closeClientModules(): void {
     this.clientModules.close()
+    this.options.manager.closeRuntimeInventory?.()
   }
 
   async recover(): Promise<void> {
@@ -412,6 +421,7 @@ class Service implements PackageAdminService {
     method: PackageAdminMethodName,
     params: unknown,
     authority: PackageAdminAuthority | undefined,
+    signal = new AbortController().signal,
   ): Promise<unknown> {
     const granted = requirePackageAdmin(method, authority)
     const checked = validatePackageAdminCall(method, 'params', params)
@@ -450,6 +460,7 @@ class Service implements PackageAdminService {
         // recovery risk.
         method === '_agnes/v1/clientModules.callService' ||
         method === '_agnes/v1/clientModules.callEffect' ||
+        method === '_agnes/v1/clientModules.resolveMedia' ||
         method === '_agnes/v1/packages.operation.get' ||
         method === '_agnes/v1/packages.operation.cancel' ||
         // packages.trustWorkspace: unlike pins.*, this destructively rewrites the profile lock
@@ -485,6 +496,8 @@ class Service implements PackageAdminService {
         return await this.clientModulesCallService(data as ClientModuleServiceCallParams)
       if (method === '_agnes/v1/clientModules.callEffect')
         return await this.clientModulesCallEffect(data as ClientModuleEffectCallParams, granted)
+      if (method === '_agnes/v1/clientModules.resolveMedia')
+        return await this.clientModulesResolveMedia(data as ClientModuleMediaResolveParams, granted, signal)
       if (method === '_agnes/v1/packages.operation.get')
         return await this.operationGet(data as { profile: string; operationId: string }, granted)
       if (method === '_agnes/v1/packages.operation.cancel')
@@ -632,7 +645,7 @@ class Service implements PackageAdminService {
 
   private async list(params: { profile: string }): Promise<{ packages: PackageInstalledDescriptor[] }> {
     const directory = await this.options.profileDirectory(params.profile)
-    const inventory = await this.options.manager.inventory(directory)
+    const inventory = await this.runtimeInventory(directory)
     return { packages: await this.projectInventory(params.profile, inventory) }
   }
 
@@ -698,7 +711,7 @@ class Service implements PackageAdminService {
 
   private async clientModulesList(params: { profile: string }): Promise<ClientModuleListResult> {
     const directory = await this.options.profileDirectory(params.profile)
-    const inventory = await this.options.manager.inventory(directory)
+    const inventory = await this.runtimeInventory(directory)
     const result = await this.clientModules.list({
       profile: params.profile,
       profileDirectory: directory,
@@ -717,7 +730,7 @@ class Service implements PackageAdminService {
     path: string
   }): Promise<ClientModuleReadResult> {
     const directory = await this.options.profileDirectory(params.profile)
-    const inventory = await this.options.manager.inventory(directory)
+    const inventory = await this.runtimeInventory(directory)
     return await this.clientModules.read({
       profile: params.profile,
       profileDirectory: directory,
@@ -733,14 +746,14 @@ class Service implements PackageAdminService {
 
   /**
    * The browser never reaches this typed call directly. The local launcher BFF is the sole caller,
-   * but revalidate against a freshly reconciled roster so stale rows, disabled packages, untrust,
+   * but revalidate live roster authority so stale rows, disabled packages, untrust,
    * rollback and a removed backend cannot retain authority between page frames.
    */
   private async clientModulesCallService(
     params: ClientModuleServiceCallParams,
   ): Promise<ExtensionCallResult> {
     const directory = await this.options.profileDirectory(params.profile)
-    const inventory = await this.options.manager.inventory(directory)
+    const inventory = await this.runtimeInventory(directory)
     const roster = await this.clientModules.list({
       profile: params.profile,
       profileDirectory: directory,
@@ -772,12 +785,57 @@ class Service implements PackageAdminService {
     return result
   }
 
+  private async clientModulesResolveMedia(
+    params: ClientModuleMediaResolveParams,
+    authority: PackageAdminAuthority,
+    signal: AbortSignal,
+  ): Promise<ClientModuleMediaResolveResult> {
+    signal.throwIfAborted()
+    const directory = await this.options.profileDirectory(params.profile)
+    const mapping = async () => {
+      if (!this.clientModules.mediaOwner) throw rpcError('CAPABILITY_DENIED')
+      return await this.clientModules.mediaOwner({
+        profile: params.profile,
+        rowId: params.rowId,
+        profileDirectory: directory,
+        inventory: await this.runtimeInventory(directory),
+        actual: async (id) =>
+          this.options.activation
+            ? normalizeObservation(await this.options.activation.actual(params.profile, id))
+            : undefined,
+        refreshInventory: () => this.options.manager.inventory(directory),
+      })
+    }
+    const owner = await mapping()
+    if (!owner || !this.options.clientMediaResolve) throw rpcError('CAPABILITY_DENIED')
+    signal.throwIfAborted()
+    const result = await this.options.clientMediaResolve(
+      { ...params, backendRowId: owner.backendRowId, rosterRevision: owner.rosterRevision },
+      authority,
+      signal,
+    )
+    const current = await mapping()
+    signal.throwIfAborted()
+    if (
+      !current ||
+      current.backendRowId !== owner.backendRowId ||
+      current.revision !== owner.revision ||
+      current.rosterRevision !== owner.rosterRevision
+    )
+      throw rpcError('CAPABILITY_DENIED')
+    const output = result.found ? { ...result, rosterRevision: owner.rosterRevision } : result
+    if (output.found && output.rowRevision !== owner.revision) throw rpcError('CAPABILITY_DENIED')
+    if (!validatePackageAdminCall('_agnes/v1/clientModules.resolveMedia', 'result', output).ok)
+      throw rpcError('INTERNAL_ERROR')
+    return output
+  }
+
   private async clientModulesCallEffect(
     params: ClientModuleEffectCallParams,
     authority: PackageAdminAuthority,
   ): Promise<ExtensionCallResult> {
     const directory = await this.options.profileDirectory(params.profile)
-    const inventory = await this.options.manager.inventory(directory)
+    const inventory = await this.runtimeInventory(directory)
     const roster = await this.clientModules.list({
       profile: params.profile,
       profileDirectory: directory,
@@ -804,6 +862,24 @@ class Service implements PackageAdminService {
     if (!validatePackageAdminCall('_agnes/v1/clientModules.callEffect', 'result', result).ok)
       throw rpcError('INTERNAL_ERROR')
     return result
+  }
+
+  private async runtimeInventory(directory: string): Promise<InstalledInventory> {
+    try {
+      return await (this.options.manager.runtimeInventory?.(directory) ??
+        this.options.manager.inventory(directory))
+    } catch (error) {
+      // A lifecycle transition can invalidate a scan before it is cached. Re-read
+      // once through full verification; integrity and policy failures stay closed.
+      if (
+        error &&
+        typeof error === 'object' &&
+        'detail' in error &&
+        (error.detail as { reason?: unknown } | undefined)?.reason === 'runtime-inventory-stale'
+      )
+        return this.options.manager.inventory(directory)
+      throw error
+    }
   }
 
   /** Rebuild after a durable package transition; failure is observable through a blocked roster
@@ -1470,19 +1546,26 @@ class Service implements PackageAdminService {
     profile: string,
     inventory: InstalledInventory,
   ): Promise<PackageInstalledDescriptor[]> {
-    const entries: PackageInstalledDescriptor[] = []
-    for (const row of inventory.packages) {
-      let observation: PackageActivationObservation = { actual: 'unavailable' }
-      if (this.options.activation) {
-        try {
-          const observed = await this.options.activation.actual(profile, row.id)
-          observation = normalizeObservation(observed) ?? observation
-        } catch {
-          // No adapter result is less misleading than a guessed running state.
+    const entries: PackageInstalledDescriptor[] = new Array(inventory.packages.length)
+    let cursor = 0
+    const observe = async () => {
+      while (cursor < inventory.packages.length) {
+        const index = cursor++
+        const row = inventory.packages[index]!
+        let observation: PackageActivationObservation = { actual: 'unavailable' }
+        if (this.options.activation) {
+          try {
+            const observed = await this.options.activation.actual(profile, row.id)
+            observation = normalizeObservation(observed) ?? observation
+          } catch {
+            // No adapter result is less misleading than a guessed running state.
+          }
         }
+        entries[index] = projectPackage(row, observation)
       }
-      entries.push(projectPackage(row, observation))
     }
+    // These are independent read projections; mutations still use the package operation lane.
+    await Promise.all(Array.from({ length: Math.min(4, inventory.packages.length) }, observe))
     return entries
   }
 
@@ -1631,6 +1714,11 @@ export function createPackageAdminService(options: {
   revokeRuntimePackage?: (packageId: string) => Promise<void>
   pluginTreePublisher?: (artifact: RuntimeTargetArtifact) => Promise<void>
   workerGeneration?: () => number | undefined
+  clientMediaResolve?: (
+    input: ClientModuleMediaResolveParams & { backendRowId: string; rosterRevision: string },
+    authority: PackageAdminAuthority,
+    signal: AbortSignal,
+  ) => Promise<ClientModuleMediaResolveResult>
   clientServiceCall?: (
     input: ClientModuleServiceCallParams & Readonly<{ packageId: string; extension: string }>,
   ) => Promise<ExtensionCallResult>
@@ -1679,10 +1767,16 @@ export function registerPackageAdmin(
   endpoint: LocalEndpoint,
   service: PackageAdminService,
   authority: PackageAdminAuthorityResolver,
+  privateMedia = false,
 ): void {
   for (const method of Object.keys(PACKAGE_ADMIN_METHODS) as PackageAdminMethodName[])
     endpoint.register(method, async (params, context) => {
-      const result = await service.call(method, params, authority(context))
+      if (
+        method === '_agnes/v1/clientModules.resolveMedia' &&
+        (!privateMedia || context.conn.authKind !== 'local' || context.conn.credentialKind !== 'local')
+      )
+        throw rpcError('CAPABILITY_DENIED')
+      const result = await service.call(method, params, authority(context), context.signal)
       // Successful roster authorization enrolls this exact connection for profile-scoped invalidation
       // notices. Transport/auth kind alone is insufficient: Unix launchers and denied remote clients
       // can share the same profile but must not receive browser roster events.

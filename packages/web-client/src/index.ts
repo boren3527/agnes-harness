@@ -88,6 +88,7 @@ export type {
   ChainRenderOpts,
   ChainSelect,
   ClientCardProps,
+  DeviceWorkbenchProps,
   DshOwnerMap,
   DshSlotProps,
   DshSlotPropsFor,

@@ -13,9 +13,10 @@ export const WEB_UI_LOCALE_NAMESPACE = '@agnes/web-ui'
 export const fallbackT: Translate = (key) => key
 
 import { conversationLocaleCatalog } from './conversation.js'
+import { imageModelLocaleCatalog } from './image-model.js'
 import { modelSettingsLocaleCatalog } from './model-settings.js'
 
-const DICTS = [conversationLocaleCatalog, modelSettingsLocaleCatalog] as const
+const DICTS = [conversationLocaleCatalog, modelSettingsLocaleCatalog, imageModelLocaleCatalog] as const
 
 export const webUiLocaleCatalog: LocaleCatalog = {
   en: Object.fromEntries(DICTS.flatMap((dict) => Object.entries(dict.en))),

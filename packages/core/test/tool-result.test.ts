@@ -18,8 +18,20 @@ describe('toLedgerContent', () => {
       ]),
     ).toEqual([
       { type: 'text', text: 'hi' },
-      { type: 'resource_link', uri: `artifact://${'a'.repeat(64)}`, mimeType: 'image/png', name: 'image' },
-      { type: 'resource_link', uri: `artifact://${'a'.repeat(64)}`, mimeType: 'text/csv', name: 'artifact' },
+      {
+        type: 'resource_link',
+        uri: `artifact://${'a'.repeat(64)}`,
+        size: 3,
+        mimeType: 'image/png',
+        name: 'image',
+      },
+      {
+        type: 'resource_link',
+        uri: `artifact://${'a'.repeat(64)}`,
+        size: 3,
+        mimeType: 'text/csv',
+        name: 'artifact',
+      },
     ])
     expect(artifactUri(ref)).toBe(`artifact://${'a'.repeat(64)}`)
   })
@@ -29,7 +41,13 @@ describe('toLedgerContent', () => {
   // artifact handed back without restating its type.
   it('a ref block with no block-level mime takes the mime off the ref', () => {
     expect(toLedgerContent([{ type: 'ref', ref }])).toEqual([
-      { type: 'resource_link', uri: `artifact://${'a'.repeat(64)}`, mimeType: 'image/png', name: 'artifact' },
+      {
+        type: 'resource_link',
+        uri: `artifact://${'a'.repeat(64)}`,
+        size: 3,
+        mimeType: 'image/png',
+        name: 'artifact',
+      },
     ])
   })
 
@@ -38,7 +56,13 @@ describe('toLedgerContent', () => {
   // that read the ref first would look right in every other case.
   it('a block-level mime overrides the one on the ref', () => {
     expect(toLedgerContent([{ type: 'ref', ref, mime: 'text/csv' }])).toEqual([
-      { type: 'resource_link', uri: `artifact://${'a'.repeat(64)}`, mimeType: 'text/csv', name: 'artifact' },
+      {
+        type: 'resource_link',
+        uri: `artifact://${'a'.repeat(64)}`,
+        size: 3,
+        mimeType: 'text/csv',
+        name: 'artifact',
+      },
     ])
   })
 })
@@ -76,7 +100,13 @@ describe('the tools phase records converted blocks', () => {
     await session.run({ until: 'turn-end', signal: new AbortController().signal })
     const rows = await log.scan({ type: 'tool/result', limit: 5 })
     expect((rows[0]?.data as { content?: unknown })?.content).toEqual([
-      { type: 'resource_link', uri: `artifact://${'a'.repeat(64)}`, mimeType: 'text/csv', name: 'artifact' },
+      {
+        type: 'resource_link',
+        uri: `artifact://${'a'.repeat(64)}`,
+        size: 3,
+        mimeType: 'text/csv',
+        name: 'artifact',
+      },
     ])
   })
 

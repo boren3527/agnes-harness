@@ -144,6 +144,29 @@ function mergeManifest(
         out.presets = { ...(base.presets ?? {}), ...(v as RuntimeProfileManifest['presets']) }
         break
       case 'policy':
+        if (Object.hasOwn(v as object, 'recognitionNetworkAllow')) {
+          const hosts = (v as RuntimeProfileManifest['policy'])?.recognitionNetworkAllow
+          const supported = [
+            'openplatform.aliyuncs.com',
+            'oss-cn-shanghai.aliyuncs.com',
+            'objectdet.cn-shanghai.aliyuncs.com',
+          ]
+          if (
+            layer === 'workspace' ||
+            !Array.isArray(hosts) ||
+            hosts.length > 3 ||
+            hosts.some((host) => !supported.includes(host)) ||
+            new Set(hosts).size !== hosts.length
+          )
+            throw new HostError(
+              'E_PROFILE_FRAGMENT_KEY',
+              'invalid or unauthorized recognition network policy',
+              {
+                source: { layer },
+                detail: { field: 'policy.recognitionNetworkAllow' },
+              },
+            )
+        }
         if (layer === 'workspace') {
           const previous = new Set(base.policy?.capabilityCeiling ?? [])
           const added = (v as RuntimeProfileManifest['policy'])?.capabilityCeiling?.find(
@@ -485,6 +508,9 @@ function finalize(draft: Draft, inputs: ProfileInputs, env: ResolveEnv): Resolve
     policy: {
       capabilityCeiling: m.policy?.capabilityCeiling ?? [],
       workspacePackages: m.policy?.workspacePackages ?? 'require-project-trust',
+      ...(m.policy?.recognitionNetworkAllow !== undefined
+        ? { recognitionNetworkAllow: [...m.policy.recognitionNetworkAllow] }
+        : {}),
     },
     reconcile: resolveReconcilePolicy(m.reconcile ?? { point: 'immediate' }, 'builtin'),
     approvals: { mode: m.approvals?.mode ?? 'manual' },

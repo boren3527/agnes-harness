@@ -56,6 +56,69 @@ it('refreshes the mount table on each interval tick, not just once at boot', asy
   await vi.advanceTimersByTimeAsync(50)
   expect(feed.lookup('/demo/version')).toMatchObject({ port: 2222 })
   await feed.close()
+  expect(vi.mocked(sdk.createClient).mock.results[0]?.value.close).toHaveBeenCalledOnce()
+  // Healthy refreshes share one transport, avoiding a new initialize on every poll.
+  expect(sdk.createClient).toHaveBeenCalledOnce()
+})
+
+it('keeps a slow refresh single-flight and drains it when closed', async () => {
+  let release!: () => void
+  const pending = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let connected = 0
+  let peak = 0
+  let round = 0
+  vi.mocked(sdk.createClient).mockImplementation(() => {
+    connected++
+    peak = Math.max(peak, connected)
+    return {
+      initialize: vi.fn(async () => undefined),
+      surfaces: {
+        mounts: vi.fn(async () => {
+          if (++round > 1) await pending
+          return { mounts: [surface(round === 1 ? 1111 : 2222)] }
+        }),
+      },
+      close: vi.fn(async () => {
+        connected--
+      }),
+    } as never
+  })
+  const feed = await fetchSurfaceMountLookup(fakeBackend, { intervalMs: 50 })
+  await vi.advanceTimersByTimeAsync(200)
+  expect(peak).toBe(1)
+  expect(feed.lookup('/demo/version')).toMatchObject({ port: 1111 })
+  let closed = false
+  const closing = feed.close().then(() => {
+    closed = true
+  })
+  await vi.advanceTimersByTimeAsync(100)
+  expect(closed).toBe(false)
+  release()
+  await closing
+  expect(connected).toBe(0)
+  expect(feed.lookup('/demo/version')).toMatchObject({ port: 1111 })
+})
+
+it('can serve the web page while the first mount-table request is still pending', async () => {
+  let release!: () => void
+  const pending = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  vi.mocked(sdk.createClient).mockReturnValue({
+    initialize: vi.fn(async () => {
+      await pending
+    }),
+    surfaces: { mounts: vi.fn(async () => ({ mounts: [surface(1111)] })) },
+    close: vi.fn(async () => undefined),
+  } as never)
+  const feed = await fetchSurfaceMountLookup(fakeBackend, { intervalMs: 50, waitForInitial: false })
+  expect(feed.lookup('/demo/version')).toBeUndefined()
+  release()
+  await vi.advanceTimersByTimeAsync(0)
+  expect(feed.lookup('/demo/version')).toMatchObject({ port: 1111 })
+  await feed.close()
 })
 
 it('M3: a later poll failure keeps serving the last successful table (must NOT clear it)', async () => {
@@ -136,4 +199,44 @@ it('drops mounts under the reserved /plugins, /admin and /skins prefixes (design
   expect(second.lookup('/pluginshelf/version')).toMatchObject({ port: 8888 })
   await feed.close()
   await second.close()
+})
+
+it('backs off failed refreshes, preserves the table and resumes after recovery', async () => {
+  const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+  const recovered = vi.spyOn(console, 'info').mockImplementation(() => {})
+  let unavailable = false
+  const read = vi.fn(async () => {
+    if (unavailable) throw new Error('daemon unavailable')
+    return { mounts: [surface(1234)] }
+  })
+  vi.mocked(sdk.createClient).mockImplementation(
+    () =>
+      ({
+        initialize: async () => undefined,
+        surfaces: { mounts: read },
+        close: async () => undefined,
+      }) as never,
+  )
+  const feed = await fetchSurfaceMountLookup(fakeBackend, { intervalMs: 50 })
+  try {
+    unavailable = true
+    await vi.advanceTimersByTimeAsync(50)
+    expect(feed.lookup('/demo')).toMatchObject({ port: 1234 })
+    const attempts = read.mock.calls.length
+    await vi.advanceTimersByTimeAsync(99)
+    expect(read.mock.calls.length).toBe(attempts)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(log).toHaveBeenCalledOnce()
+    unavailable = false
+    await vi.advanceTimersByTimeAsync(200)
+    expect(recovered).toHaveBeenCalledOnce()
+    expect(feed.lookup('/demo')).toMatchObject({ port: 1234 })
+    const resumed = read.mock.calls.length
+    await vi.advanceTimersByTimeAsync(50)
+    expect(read.mock.calls.length).toBeGreaterThan(resumed)
+  } finally {
+    await feed.close()
+    log.mockRestore()
+    recovered.mockRestore()
+  }
 })

@@ -108,6 +108,17 @@ export function createRowServiceHost(
                 owner,
                 version,
                 signal: ac.signal,
+                // Host-owned grants for these fixed device effects; authors cannot supply row authority.
+                ...(origin.rowId === 'ext:agnes-examples/aka-robot' &&
+                ['aka.capture', 'aka.recognition.test'].includes(def.name) &&
+                def.kind === 'effect'
+                  ? { artifacts: true as const }
+                  : {}),
+                ...(origin.rowId === 'ext:agnes-examples/aka-robot' &&
+                def.kind === 'effect' &&
+                ['aka.recognition.test', 'aka.recognition.enable'].includes(def.name)
+                  ? { recognitionNetwork: true as const }
+                  : {}),
                 assertAlive: alive,
                 assertRunning: alive,
                 consume() {},

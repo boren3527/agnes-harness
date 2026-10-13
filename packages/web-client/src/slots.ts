@@ -1,6 +1,6 @@
 /** Public slot contracts. The ledger implementation lives in @agnes/web-slots. */
 
-import type { UINode, WebClientModuleSlotName } from '@agnes/protocol'
+import type { DeviceSessionBinding, UINode, WebClientModuleSlotName } from '@agnes/protocol'
 import type {
   ChainSelection,
   SlotSpec as CoreSlotSpec,
@@ -28,6 +28,14 @@ export interface ClientCardProps {
 export interface WorkbenchPanelProps {
   sessionId?: string
 }
+/** Host-read enrollment and explicit preparation callbacks; backend services authorize each call. */
+export interface DeviceWorkbenchProps {
+  sessionId: string
+  binding: Readonly<DeviceSessionBinding>
+  /** Available for inactive enrollment only; invoke on explicit connection submission. */
+  prepareConnection?(): Promise<Readonly<DeviceSessionBinding>>
+  connectionConfigured?(): void
+}
 export interface SlotFillView {
   slot: string
   extId: string
@@ -42,6 +50,7 @@ export interface LegacySlotMap {
   'tool.card.inline': ToolCardInlineProps
   'client.card': ClientCardProps
   'workbench.panel': WorkbenchPanelProps
+  'workbench.device': DeviceWorkbenchProps
 }
 
 /**
@@ -168,6 +177,7 @@ export const SLOT_TABLE: Readonly<Record<LegacyWebClientModuleSlotName, SlotDecl
   'tool.card.inline': { kind: 'list', scope: 'root' },
   'client.card': { kind: 'list', scope: 'root' },
   'workbench.panel': { kind: 'list', scope: 'session-maybe' },
+  'workbench.device': { kind: 'single', scope: 'session' },
 }
 
 /** A React-facing view of the React-free kernel entry. */

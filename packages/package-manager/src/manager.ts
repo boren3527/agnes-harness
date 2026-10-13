@@ -1,6 +1,16 @@
 import { randomUUID } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import {
+  existsSync,
+  type FSWatcher,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  watch,
+} from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { setImmediate } from 'node:timers/promises'
 import { type ExtensionManifest, satisfiesApiRange } from '@agnes/extension-api'
 import { type PackagePreview, validatePackageAdminData } from '@agnes/protocol'
 import type { PackageAuditSink } from './audit.js'
@@ -8,7 +18,7 @@ import { copyPackageTreeSync } from './copy-tree.js'
 import { PackageError } from './errors.js'
 import { inspectStaged } from './inspect.js'
 import { canonical } from './integrity.js'
-import { type InstalledInventory, readInventory } from './inventory.js'
+import { type InstalledInventory, readInventoryYielding } from './inventory.js'
 import {
   assertNoReferences,
   assertNoRuntimePins,
@@ -77,6 +87,9 @@ export interface PackageManager {
   trust(profileDir: string, id: string, decision?: TrustDecision): Promise<LockEntry>
   untrust(profileDir: string, id: string, decision: TrustDecision): Promise<LockEntry>
   inventory(profileDir: string): Promise<InstalledInventory>
+  /** Reuse a verified runtime inventory until package bytes or lock policy change. */
+  runtimeInventory?(profileDir: string): Promise<InstalledInventory>
+  closeRuntimeInventory?(): void
   /** Lock-free, validated snapshot read for a worker while daemon package effects hold the lock. */
   runtimePluginSnapshots(profileDir: string): Promise<readonly RuntimePluginSnapshot[]>
   recover(profileDir: string): Promise<void>
@@ -388,12 +401,31 @@ export function createPackageManager(options: ManagerOptions): PackageManager {
     ...(options.checkpoint ? { checkpoint: options.checkpoint } : {}),
     ...(options.runtimeCheckpoint ? { runtimeCheckpoint: options.runtimeCheckpoint } : {}),
   })
+  const runtimeInventories = new Map<
+    string,
+    {
+      watcher: FSWatcher
+      epoch: number
+      rootIdentity: string
+      lock?: string
+      value?: InstalledInventory
+    }
+  >()
+  const invalidateRuntimeInventory = (profileDir: string) => {
+    const cached = runtimeInventories.get(resolve(profileDir))
+    if (cached) {
+      cached.epoch++
+      delete cached.value
+    }
+  }
   const locked = <T>(
     profileDir: string,
     fn: () => Promise<T>,
-    op: { signal?: AbortSignal } = {},
-  ): Promise<T> =>
-    withLock(
+    op: { signal?: AbortSignal; readOnly?: boolean } = {},
+  ): Promise<T> => {
+    // Revoke cached authority before a mutation starts, including failed/cancelled mutations.
+    if (!op.readOnly) invalidateRuntimeInventory(profileDir)
+    return withLock(
       profileDir,
       async () => {
         recoverPackageStore(storeFor(profileDir))
@@ -403,6 +435,7 @@ export function createPackageManager(options: ManagerOptions): PackageManager {
       },
       op,
     )
+  }
   if (options.auditActor !== undefined && !/^[a-zA-Z0-9_.-]{1,128}$/.test(options.auditActor))
     throw new TypeError('invalid audit actor')
   const commitLegacyStage = async (
@@ -431,28 +464,106 @@ export function createPackageManager(options: ManagerOptions): PackageManager {
       }
     commitPackage(storeFor(profileDir), lock, id, entry, operation, stage)
   }
+  // Share only an in-flight read, never a completed inventory. Package mutations
+  // still acquire the same profile lock; the next read verifies the new bytes.
+  const inventoryReads = new Map<string, Promise<InstalledInventory>>()
   const manager: PackageManager = {
     async recover(profileDir) {
       if (!existsSync(profileDir)) return
       await locked(profileDir, async () => {})
     },
     async inventory(profileDir) {
+      const key = resolve(profileDir)
+      const pending = inventoryReads.get(key)
+      if (pending) return pending
       const read = () => {
         const lock = load(profileDir)
-        return readInventory(lock, { ...storeFor(profileDir), ceiling: ceiling(lock) })
+        return readInventoryYielding(lock, { ...storeFor(profileDir), ceiling: ceiling(lock) })
       }
-      if (!existsSync(profileDir)) return read()
-      return locked(profileDir, async () => read())
+      const reading = (
+        existsSync(profileDir) ? locked(profileDir, async () => read(), { readOnly: true }) : read()
+      ).finally(() => {
+        inventoryReads.delete(key)
+      })
+      inventoryReads.set(key, reading)
+      return reading
+    },
+    async runtimeInventory(profileDir) {
+      const key = resolve(profileDir)
+      const lock = load(profileDir)
+      // Workspace trees have their own trust gate; retain the full verification path there.
+      if (lock.workspace) return manager.inventory(profileDir)
+      const root = dirname(packageDir(options.dataDir, profileName(profileDir), 'stage'))
+      let identity: string
+      try {
+        const info = lstatSync(root, { bigint: true })
+        if (!info.isDirectory() || info.isSymbolicLink()) return manager.inventory(profileDir)
+        identity = `${info.dev}:${info.ino}:${info.birthtimeNs}`
+      } catch {
+        return manager.inventory(profileDir)
+      }
+      let cached = runtimeInventories.get(key)
+      if (cached && cached.rootIdentity !== identity) {
+        cached.watcher.close()
+        runtimeInventories.delete(key)
+        cached = undefined
+      }
+      if (!cached) {
+        if (runtimeInventories.size >= 32) return manager.inventory(profileDir)
+        try {
+          const watcher = watch(root, { recursive: true, persistent: false }, () =>
+            invalidateRuntimeInventory(profileDir),
+          )
+          cached = { watcher, epoch: 0, rootIdentity: identity }
+          runtimeInventories.set(key, cached)
+          watcher.on('error', () => {
+            watcher.close()
+            if (runtimeInventories.get(key)?.watcher === watcher) {
+              invalidateRuntimeInventory(profileDir)
+              runtimeInventories.delete(key)
+            }
+          })
+        } catch {
+          // Unsupported or failed watchers must not grant an unchecked cache hit.
+          return manager.inventory(profileDir)
+        }
+      }
+      // Deliver queued filesystem invalidations before accepting the previous verification.
+      await setImmediate()
+      const stamp = canonical(load(profileDir))
+      if (runtimeInventories.get(key) !== cached) return manager.inventory(profileDir)
+      if (cached.value && cached.lock === stamp) return cached.value
+      const epoch = cached.epoch
+      const value = await manager.inventory(profileDir)
+      await setImmediate()
+      if (
+        runtimeInventories.get(key) !== cached ||
+        cached.epoch !== epoch ||
+        canonical(load(profileDir)) !== stamp
+      ) {
+        throw new PackageError('E_LOCK_MISMATCH', 'runtime inventory changed during verification', {
+          detail: { reason: 'runtime-inventory-stale' },
+        })
+      }
+      cached.value = value
+      cached.lock = stamp
+      return value
+    },
+    closeRuntimeInventory() {
+      for (const cached of runtimeInventories.values()) cached.watcher.close()
+      runtimeInventories.clear()
     },
     async runtimePluginSnapshots(profileDir) {
       const store = storeFor(profileDir)
       for (let attempt = 0; attempt < 3; attempt++) {
         const beforeLock = load(profileDir)
-        const before = readInventory(beforeLock, { ...store, ceiling: ceiling(beforeLock) })
+        const before = await readInventoryYielding(beforeLock, { ...store, ceiling: ceiling(beforeLock) })
         const pins = listRuntimePinsStore(store)
         const afterLock = load(profileDir)
-        const after = readInventory(afterLock, { ...store, ceiling: ceiling(afterLock) })
-        if (before.hash === after.hash) return runtimePluginSnapshotsFromPins(after, pins)
+        const after = await readInventoryYielding(afterLock, { ...store, ceiling: ceiling(afterLock) })
+        // The yielding read may overlap a package effect; recheck the lock after the last yield.
+        if (before.hash === after.hash && canonical(afterLock) === canonical(load(profileDir)))
+          return runtimePluginSnapshotsFromPins(after, pins)
       }
       throw new PackageError('E_LOCK_MISMATCH', 'runtime source changed during snapshot read', {
         detail: { reason: 'runtime-source-stale' },
@@ -477,7 +588,10 @@ export function createPackageManager(options: ManagerOptions): PackageManager {
       const frozen = { ...request }
       return locked(profileDir, async () => {
         const lock = load(profileDir)
-        const inventory = readInventory(lock, { ...storeFor(profileDir), ceiling: ceiling(lock) })
+        const inventory = await readInventoryYielding(lock, {
+          ...storeFor(profileDir),
+          ceiling: ceiling(lock),
+        })
         return resolveRuntimePinStore(storeFor(profileDir), frozen, lock, (id) => {
           const row = inventory.packages.find((candidate) => candidate.id === id)
           return row?.trusted === true && row.blockers.length === 0

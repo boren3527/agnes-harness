@@ -1,6 +1,11 @@
 // 跨文件共用的小类型：`tool.ts` / `extension.ts` 与 02 文件的 `hooks.ts` / `slots.ts` 都从这里 import，
 // 保证 `Seq` / `SessionRef` / `LeaseView` / `Logger` 全仓只有一处定义（计划 Self-Review「类型一致」）。
-import type { JsonValue } from '@agnes/protocol'
+import type {
+  DeviceConnectionResult,
+  DeviceRecognitionResult,
+  DeviceSessionBinding,
+  JsonValue,
+} from '@agnes/protocol'
 
 export type JsonSchema = { [key: string]: JsonValue }
 export type Seq = number
@@ -8,6 +13,36 @@ export type SessionKey = string
 export type Disposer = () => void
 export type Bytes = Uint8Array
 export type TelemetryConsent = 'DISABLED' | 'LOCAL' | 'ANON' | 'FULL'
+
+/** Invocation-scoped readonly enrollment data, never permission for physical operations. */
+export interface DeviceSessionPort {
+  binding(): Promise<Readonly<DeviceSessionBinding> | null>
+  /** Optional current endpoint metadata. Readonly; grants no IO or configuration lifetime. */
+  connection?(): Promise<Readonly<DeviceConnectionResult>>
+  /** Redacted settings only; configured does not grant inference or reveal secrets. */
+  recognition?(): Promise<Readonly<DeviceRecognitionResult>>
+  /** Service-only recognition-scoped lifetime; config changes revoke this, not video-only leases. */
+  retainRecognition?(): Promise<
+    Readonly<{
+      binding: Readonly<DeviceSessionBinding>
+      connection?: Readonly<DeviceConnectionResult>
+      recognition: Readonly<DeviceRecognitionResult>
+      revoked: AbortSignal
+      release(): void
+    }>
+  >
+  /** Service-only optional lifetime. Enrollment and returned configuration continuity, never physical permission.
+   * The returned signal may outlive this invocation; release it when the resource is retired.
+   */
+  retain?(): Promise<
+    Readonly<{
+      binding: Readonly<DeviceSessionBinding>
+      connection?: Readonly<DeviceConnectionResult>
+      revoked: AbortSignal
+      release(): void
+    }>
+  >
+}
 
 export interface SessionRef {
   readonly key: SessionKey

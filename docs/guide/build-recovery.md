@@ -14,6 +14,8 @@ A normal completed build leaves only `dist/agnes-runtime`. During a build, the s
 
 On a lock error, do not delete the directory based on its name or age. First confirm the build process for that output has exited. Preserve output, lock, and staging directories to avoid concurrent modification.
 
+On Windows, directory publication retries `EPERM`, `EACCES`, and `EBUSY` rename failures for up to 10 seconds. If renaming remains blocked, the error names both paths and retains the original cause. Check file holders and directory permissions; retrying does not resolve a permanent permission denial.
+
 - **Output exists and is complete:** Check file hashes in the aggregate manifest and the matching Node version, then determine whether preparation was interrupted or post-commit cleanup failed. In the latter case, `previous` may be incomplete and must not overwrite the current new package.
 - **Output missing, `previous` exists:** The build may have stopped after moving the old package, or rollback may have failed. Verify the backup before restoring it to the original output path on the same filesystem. Preserve evidence on permission or file-lock errors; do not delete the backup first.
 - **Output and backup both missing:** Cleaning the lock cannot restore the old package. Confirm the build process has exited, retain logs, fix permissions or disk problems, and rebuild from trusted source.

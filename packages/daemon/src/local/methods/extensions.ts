@@ -3,6 +3,7 @@ import {
   type ExtensionActivationBarrier,
   type Host,
   isServicePreDispatchFailure,
+  pluginRowSource,
 } from '@agnes/host'
 import {
   type ExtensionAckParams,
@@ -91,13 +92,54 @@ export async function executeJournaledEffect(input: {
   serviceId: string
   identity: JournalIdentity
   bindingKind: string
+  readbackOnly?: true
+  /** Trusted daemon archive reader only; never an author recovery callback. */
+  readRecognitionResult?: (
+    params: ExtensionCallParams & { commandId: string },
+    principalId: string,
+    signal: AbortSignal,
+  ) => Promise<ExtensionCallResult | undefined>
 }): Promise<ExtensionCallResult> {
+  if (
+    input.readbackOnly &&
+    (input.params.extension !== pluginRowSource('ext:agnes-examples/aka-robot') ||
+      !['aka.capture', 'aka.recognition.test'].includes(input.params.service))
+  )
+    throw rpcError('CAPABILITY_DENIED')
   const binding = commandBinding(input.bindingKind, input.serviceId, undefined, input.params)
-  const state = await input.journal.begin(input.identity, binding)
+  const state = await input.journal.begin(input.identity, binding, input.readbackOnly)
+  if (input.readbackOnly && state.state === 'new') throw rpcError('OUTCOME_UNKNOWN')
   if (state.state === 'complete') return checkedResult(state.result.result)
-  if (state.state === 'uncertain') throw rpcError('OUTCOME_UNKNOWN')
   if (state.state === 'conflict') throw rpcError('SEMANTIC_REJECTED', { code: 'ID_CONFLICT' })
   if (state.state === 'corrupt') throw rpcError('INTERNAL_ERROR')
+  const recoverOnly = state.state === 'uncertain'
+  if (
+    recoverOnly &&
+    input.readbackOnly &&
+    input.params.service === 'aka.recognition.test' &&
+    input.readRecognitionResult
+  ) {
+    try {
+      // Wait for the original effect to settle and revoke its worker scope before deciding
+      // that an absent capture proves recognition never started.
+      const readOriginal = input.readRecognitionResult
+      const restored = await runQueued(input.commandQueue, input.serviceId, input.signal, (signal) =>
+        readOriginal(input.params, input.identity.principalId, signal),
+      )
+      if (!restored || input.signal.aborted) throw rpcError('OUTCOME_UNKNOWN')
+      const result = checkedResult(restored)
+      await input.journal.complete(input.identity, { result })
+      return result
+    } catch {
+      throw rpcError('OUTCOME_UNKNOWN')
+    }
+  }
+  if (
+    recoverOnly &&
+    (input.params.extension !== pluginRowSource('ext:agnes-examples/aka-robot') ||
+      input.params.service !== 'aka.capture')
+  )
+    throw rpcError('OUTCOME_UNKNOWN')
 
   let result: ExtensionCallResult
   let dispatched = false
@@ -107,10 +149,13 @@ export async function executeJournaledEffect(input: {
         dispatched = true
         return input.callService(input.params, input.credential, signal, {
           commandId: input.params.commandId,
+          ...(recoverOnly ? { recoverOnly: true as const } : {}),
         })
       }),
     )
   } catch (error) {
+    // An original uncertain operation must never be abandoned into a fresh executable command.
+    if (recoverOnly) throw rpcError('OUTCOME_UNKNOWN')
     if (!dispatched) {
       await input.journal.abandon(input.identity)
       if (input.signal.aborted) throw rpcError('REQUEST_TIMEOUT')

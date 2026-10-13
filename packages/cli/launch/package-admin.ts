@@ -32,6 +32,7 @@ import { createClient, memoryJournal } from '@agnes/sdk'
 import type { PluginRebuiltEvent } from '@agnes/web/server'
 import { localPipeFactories } from '../src/boot/pipe-factory.js'
 import type { LocalBackend } from './backend.js'
+import { createDeviceMediaResolver } from './device-media.js'
 
 const CLIENT_SERVICE_PATH = '/api/client-modules/service'
 const CLIENT_EFFECT_PATH = '/api/client-modules/effect'
@@ -107,6 +108,14 @@ export function localPackageAdmin(backend: LocalBackend, origin: string) {
       ready = undefined
       throw error
     }))
+  const media = createDeviceMediaResolver(async (request) => {
+    await initialize()
+    return await client.clientModules.resolveMedia({
+      profile: backend.scope.profile,
+      rowId: request.rowId,
+      sessionId: request.sessionId,
+    })
+  })
   // createAdminSurface validates each schema before dispatching this fixed typed mapping.
   const invoke = async (action: AdminSurfaceAction, params: unknown): Promise<unknown> => {
     await initialize()
@@ -247,6 +256,7 @@ export function localPackageAdmin(backend: LocalBackend, origin: string) {
       await initialize()
       return await client.clientModules.callEffect(input)
     },
+    resolveDeviceMedia: media.resolve,
     async handleClientService(request: IncomingMessage, response: ServerResponse): Promise<boolean> {
       const url = new URL(request.url ?? '/', origin)
       if (url.pathname !== CLIENT_SERVICE_PATH) return false
@@ -306,6 +316,7 @@ export function localPackageAdmin(backend: LocalBackend, origin: string) {
             service: body.service,
             commandId: body.commandId,
             input: cleanValue(body.input ?? {}),
+            ...(body.readbackOnly === undefined ? {} : { readbackOnly: body.readbackOnly }),
           }
         : undefined
       if (!params || !validatePackageAdminCall('_agnes/v1/clientModules.callEffect', 'params', params).ok) {
@@ -321,6 +332,7 @@ export function localPackageAdmin(backend: LocalBackend, origin: string) {
       return true
     },
     async close(): Promise<void> {
+      media.close()
       surface.close()
       await client.close()
     },

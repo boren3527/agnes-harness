@@ -18,8 +18,9 @@ const docs = Object.fromEntries(
 )
 
 describe('delivered preset schema conformance', () => {
-  it('includes all six delivered recipes and validates exact YAML and merged documents', () => {
+  it('includes all delivered recipes and validates exact YAML and merged documents', () => {
     expect(Object.keys(docs).sort()).toEqual([
+      'aka-standard-windows',
       'base',
       'channel',
       'claw',

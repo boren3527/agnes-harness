@@ -1,11 +1,12 @@
 import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { setImmediate } from 'node:timers/promises'
 import type { PackageBlocker, PackageContributionSummary } from '@agnes/protocol'
 import { PackageError } from './errors.js'
-import { inspectStaged } from './inspect.js'
+import { type inspectStaged, inspectStagedSteps } from './inspect.js'
 import { canonical, capabilityHash, freezeData, snapshotHash } from './integrity.js'
 import type { LockEntry, Lockfile } from './lockfile.js'
-import { hashDirectory, packageDir, parseSource } from './sources.js'
+import { hashDirectorySteps, packageDir, parseSource } from './sources.js'
 import { previousPackageDir } from './store.js'
 import { verifyWorkspace } from './workspace.js'
 
@@ -69,20 +70,28 @@ export function verifyPackageDirectory(
   directory: string,
   ceiling: readonly string[],
 ): { capabilityHash: string; blockers: readonly PackageBlocker[] } {
+  const steps = verifyPackageDirectorySteps(id, entry, directory, ceiling)
+  for (;;) {
+    const step = steps.next()
+    if (step.done) return step.value
+  }
+}
+
+function* verifyPackageDirectorySteps(
+  id: string,
+  entry: LockEntry,
+  directory: string,
+  ceiling: readonly string[],
+): Generator<undefined, ReturnType<typeof verifyPackageDirectory>> {
   const hash = capabilityHash(entry)
-  if (
-    entry.contributions === undefined ||
-    entry.treeIntegrity === undefined ||
-    !existsSync(directory) ||
-    hashDirectory(directory, { exclude: [] }) !== entry.treeIntegrity
-  )
+  if (entry.contributions === undefined || entry.treeIntegrity === undefined || !existsSync(directory))
     throw new PackageError('E_LOCK_MISMATCH', 'installed inventory tree differs from lock', {
       detail: { id },
     })
   const source = parseSource(entry.source.ref)
   let checked: ReturnType<typeof inspectStaged>
   try {
-    checked = inspectStaged({
+    checked = yield* inspectStagedSteps({
       dir: directory,
       source,
       fetched: {
@@ -96,12 +105,22 @@ export function verifyPackageDirectory(
       ceiling,
     })
   } catch (error) {
+    // Inspection hashes the tree itself. Only a failed inspection needs another read
+    // to preserve the integrity refusal before reporting a metadata blocker.
+    if ((yield* hashDirectorySteps(directory, { exclude: [] })) !== entry.treeIntegrity)
+      throw new PackageError('E_LOCK_MISMATCH', 'installed inventory tree differs from lock', {
+        detail: { id },
+      })
     if (isReservedRowIdPackageError(error))
       return { capabilityHash: hash, blockers: [RESERVED_WEB_ROW_BLOCKER] }
     if (error instanceof PackageError && error.detail.reason === 'legacy-extension-format')
       return { capabilityHash: hash, blockers: [LEGACY_EXTENSION_BLOCKER] }
     throw error
   }
+  if (checked.treeIntegrity !== entry.treeIntegrity)
+    throw new PackageError('E_LOCK_MISMATCH', 'installed inventory tree differs from lock', {
+      detail: { id },
+    })
   if (
     checked.preview.id !== id ||
     canonical(checked.preview.contributions) !== canonical(entry.contributions) ||
@@ -112,11 +131,11 @@ export function verifyPackageDirectory(
     })
   return { capabilityHash: hash, blockers: checked.preview.blockers }
 }
-function verifiedRollbackTarget(
+function* verifiedRollbackTarget(
   id: string,
   entry: LockEntry,
   options: { dataDir: string; profile: string; ceiling: readonly string[] },
-): InstalledPackage['verifiedRollbackTarget'] {
+): Generator<undefined, InstalledPackage['verifiedRollbackTarget']> {
   if (entry.previous === null) return null
   const previous = entry.previous
   if (
@@ -134,7 +153,12 @@ function verifiedRollbackTarget(
   const snapshot = { ...structuredClone(previous), previous: null } as LockEntry
   let verified: ReturnType<typeof verifyPackageDirectory>
   try {
-    verified = verifyPackageDirectory(id, snapshot, previousPackageDir(options, id), options.ceiling)
+    verified = yield* verifyPackageDirectorySteps(
+      id,
+      snapshot,
+      previousPackageDir(options, id),
+      options.ceiling,
+    )
   } catch (error) {
     if (isReservedRowIdPackageError(error)) return null
     throw error
@@ -156,18 +180,18 @@ function verifiedRollbackTarget(
     contributions: snapshot.contributions ?? [],
   })
 }
-/** Reads and verifies installed bytes; it never fetches, imports modules, or mutates the store. */
-export function readInventory(
+type InventoryReadOptions = {
+  dataDir: string
+  profileDir: string
+  ceiling?: readonly string[]
+  builtinDirectory?: (id: string) => string | undefined
+}
+
+function* inventoryRows(
   lock: Lockfile,
-  options: {
-    dataDir: string
-    profileDir: string
-    ceiling?: readonly string[]
-    builtinDirectory?: (id: string) => string | undefined
-  },
-): InstalledInventory {
-  const packages: InstalledPackage[] = [],
-    paths = new Set<string>()
+  options: InventoryReadOptions,
+): Generator<InstalledPackage | undefined> {
+  const paths = new Set<string>()
   for (const [id, entry] of Object.entries(lock.packages).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
     let directory: string | null = packageDir(options.dataDir, lock.profile, id)
     if (paths.has(directory)) throw new PackageError('E_LOCK_MISMATCH', 'package store path collision')
@@ -188,7 +212,7 @@ export function readInventory(
         throw new PackageError('E_LOCK_MISMATCH', 'installed inventory tree differs from lock', {
           detail: { id },
         })
-      const verified = verifyPackageDirectory(
+      const verified = yield* verifyPackageDirectorySteps(
         id,
         entry,
         directory,
@@ -210,7 +234,7 @@ export function readInventory(
       throw new PackageError('E_WORKSPACE_UNTRUSTED', 'installed trust snapshot differs from lock', {
         detail: { id },
       })
-    packages.push({
+    yield {
       id,
       entry,
       directory,
@@ -219,21 +243,54 @@ export function readInventory(
       enabled: entry.state.enabled,
       contributions: entry.contributions ?? [],
       blockers,
-      verifiedRollbackTarget: verifiedRollbackTarget(id, entry, {
+      verifiedRollbackTarget: yield* verifiedRollbackTarget(id, entry, {
         dataDir: options.dataDir,
         profile: lock.profile,
         ceiling: options.ceiling ?? lock.policySnapshot.capabilityCeiling,
       }),
-    })
+    }
   }
+}
+
+function inventorySnapshot(profile: string, packages: InstalledPackage[]): InstalledInventory {
   // Store paths and derived manifest data stay out of the hash so it only changes with the lock.
   const stable = stableInventoryRows(packages)
   // Clone before freezing so callers cannot mutate the original lock through the snapshot.
   return freezeData(
     JSON.parse(
-      JSON.stringify({ profile: lock.profile, hash: `sha256-${snapshotHash(stable)}`, packages }),
+      JSON.stringify({ profile, hash: `sha256-${snapshotHash(stable)}`, packages }),
     ) as InstalledInventory,
   )
+}
+
+/** Reads and verifies installed bytes; it never fetches, imports modules, or mutates the store. */
+export function readInventory(lock: Lockfile, options: InventoryReadOptions): InstalledInventory {
+  return inventorySnapshot(
+    lock.profile,
+    [...inventoryRows(lock, options)].filter((row) => row !== undefined),
+  )
+}
+
+/** Yield within large package scans, while preserving the synchronous verification rules. */
+export async function readInventoryYielding(
+  lock: Lockfile,
+  options: InventoryReadOptions,
+): Promise<InstalledInventory> {
+  const packages: InstalledPackage[] = []
+  // Schedule the read before scanning, then bound each batch by both work and time.
+  // Yielding per file adds thousands of scheduler round trips to installed SDK trees.
+  await setImmediate()
+  let steps = 0
+  let deadline = performance.now() + 8
+  for (const row of inventoryRows(lock, options)) {
+    if (row) packages.push(row)
+    if (row || ++steps >= 32 || performance.now() >= deadline) {
+      await setImmediate()
+      steps = 0
+      deadline = performance.now() + 8
+    }
+  }
+  return inventorySnapshot(lock.profile, packages)
 }
 
 /**

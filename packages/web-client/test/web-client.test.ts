@@ -39,6 +39,7 @@ function mount(node: ReactNode): HTMLElement {
 }
 
 afterEach(() => {
+  sessionStorage.clear()
   for (const { root, el } of containers) {
     root.unmount()
     el.remove()
@@ -63,6 +64,72 @@ async function makeRegistry(
 }
 
 describe('SlotRegistry', () => {
+  it('Blender panel follows session opening and ignores the previous session readback', async () => {
+    const nodeFsEntry = 'node:fs',
+      nodePathEntry = 'node:path',
+      nodeUrlEntry = 'node:url'
+    const { cpSync, mkdtempSync, rmSync } = await import(nodeFsEntry)
+    const { dirname, join } = await import(nodePathEntry)
+    const { fileURLToPath, pathToFileURL } = await import(nodeUrlEntry)
+    let finishFirst!: (value: unknown) => void
+    const first = new Promise((resolve) => {
+      finishFirst = resolve
+    })
+    let firstStarted = false
+    const { ctx, registry } = await makeRegistry(undefined, async (_module, sessionId) => {
+      if (sessionId === 'first') {
+        firstStarted = true
+        return first
+      }
+      return { instance: { pid: 202, port: 9002, alive: true } }
+    })
+    // Browser import maps supply React to installed plugins. Resolve the unchanged
+    // example beside this test's existing React dependency in the test runner.
+    const folder = mkdtempSync(join(dirname(fileURLToPath(import.meta.url)), '.blender-panel-'))
+    let mod: Awaited<ReturnType<typeof importModule>>
+    async function importModule() {
+      return import(pathToFileURL(join(folder, 'index.js')).href)
+    }
+    try {
+      cpSync(
+        join(
+          dirname(fileURLToPath(import.meta.url)),
+          '../../../examples/packages/agh-blender/extensions/main/client/index.js',
+        ),
+        join(folder, 'index.js'),
+      )
+      mod = await importModule()
+    } finally {
+      rmSync(folder, { recursive: true, force: true })
+    }
+    await ctx.plugin(clientModule(mod), {
+      packageId: 'agh-blender',
+      revision: 'panel-test',
+      services: ['blender.status'],
+    })
+    const el = mount(
+      createElement(SlotsProvider, { registry }, createElement(SlotOutlet, { name: 'workbench.panel' })),
+    )
+    const session = (ctx as unknown as ClientContext).session
+    await vi.waitFor(
+      () => expect(el.textContent).toMatch(/select a session|requires an active session/),
+      committed,
+    )
+    session.setSession('first')
+    await vi.waitFor(() => expect(firstStarted).toBe(true), committed)
+    session.setSession('second')
+    await vi.waitFor(() => expect(el.textContent).toContain('pid 202'), committed)
+    finishFirst({ instance: { pid: 101, port: 9001, alive: true } })
+    await first
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(el.textContent).not.toContain('pid 101')
+    session.setSession(undefined)
+    await vi.waitFor(() => {
+      expect(el.textContent).toContain('select a session')
+      expect(el.textContent).not.toContain('pid 202')
+    }, committed)
+    await ctx.fiber.dispose()
+  })
   it('注册返回撤销函数，撤销后条目消失并通知订阅者', async () => {
     const { registry } = await makeRegistry()
     let notified = 0
@@ -249,6 +316,108 @@ describe('clientModule fiber 绑定', () => {
 })
 
 describe('ClientResourceService', () => {
+  it.each(['before-read', 'during-first-range'])('取消 %s 后不继续读取或发布图片 URL', async (when) => {
+    const ctx = new Context()
+    const session = new SessionService(ctx, 'session-a')
+    const abort = new AbortController()
+    const artifact = { sha256: 'f'.repeat(64), size: 1024 * 1024 + 1, mime: 'image/jpeg' }
+    const call = vi.fn(async () => {
+      abort.abort()
+      return {
+        ok: true,
+        status: 206,
+        artifact,
+        acceptRanges: 'bytes',
+        contentLength: 1024 * 1024,
+        etag: `"${artifact.sha256}"`,
+        contentRange: 'bytes 0-1048575/1048577',
+        base64: btoa('\0'.repeat(1024 * 1024)),
+      }
+    })
+    const service = new ClientResourceService(ctx, { call } as never, session)
+    const create = vi.spyOn(URL, 'createObjectURL')
+    if (when === 'before-read') abort.abort()
+    await expect(service.images.load({ laneId: 'main', artifact, signal: abort.signal })).rejects.toThrow()
+    expect(call).toHaveBeenCalledTimes(when === 'before-read' ? 0 : 1)
+    expect(create).not.toHaveBeenCalled()
+    create.mockRestore()
+  })
+
+  it('通过逐段授权读取大图，在完整组装后才生成 URL', async () => {
+    const ctx = new Context()
+    const session = new SessionService(ctx, 'session-a')
+    const size = 1024 * 1024 + 7
+    const artifact = { sha256: 'e'.repeat(64), size, mime: 'image/jpeg' }
+    const bytes = new Uint8Array(size).fill(42)
+    bytes[size - 1] = 99
+    const call = vi.fn(async (_method, request) => {
+      const match = /^bytes=(\d+)-(\d+)$/.exec(request.range)
+      if (!match) throw new Error('range required')
+      const start = Number(match[1]),
+        end = Number(match[2])
+      return {
+        ok: true,
+        status: 206,
+        artifact,
+        acceptRanges: 'bytes',
+        contentLength: end - start + 1,
+        etag: `"${artifact.sha256}"`,
+        contentRange: `bytes ${start}-${end}/${size}`,
+        base64: btoa('*'.repeat(end - start) + (end === size - 1 ? 'c' : '*')),
+      }
+    })
+    const service = new ClientResourceService(ctx, { call } as never, session)
+    let blob: Blob | undefined
+    const create = vi.spyOn(URL, 'createObjectURL').mockImplementation((value) => {
+      blob = value as Blob
+      return 'blob:large-image'
+    })
+    const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined)
+    const resource = await service.images.load({ laneId: 'main', artifact })
+    expect(call.mock.calls.map(([, request]) => request.range)).toEqual([
+      'bytes=0-1048575',
+      'bytes=1048576-1048582',
+    ])
+    if (!blob) throw new Error('image Blob missing')
+    expect(new Uint8Array(await blob.arrayBuffer())).toEqual(bytes)
+    resource.release()
+    expect(revoke).toHaveBeenCalledWith('blob:large-image')
+    create.mockRestore()
+    revoke.mockRestore()
+  })
+
+  it.each(['wrong-range', 'wrong-etag', 'oversized-base64', 'disposed', 'second-range-failed'])(
+    '大图拒绝 %s，不发布部分图片',
+    async (failure) => {
+      const ctx = new Context()
+      const session = new SessionService(ctx, 'session-a')
+      const artifact = { sha256: 'e'.repeat(64), size: 1024 * 1024 + 1, mime: 'image/jpeg' }
+      let reads = 0
+      const call = vi.fn(async () => {
+        reads++
+        if (failure === 'second-range-failed' && reads === 2)
+          return { ok: false, status: 403, code: 'artifact_forbidden' }
+        if (failure === 'disposed') await ctx.fiber.dispose()
+        return {
+          ok: true,
+          status: 206,
+          artifact,
+          acceptRanges: 'bytes',
+          contentLength: 1024 * 1024,
+          etag: failure === 'wrong-etag' ? '"wrong"' : `"${artifact.sha256}"`,
+          contentRange: failure === 'wrong-range' ? 'bytes 1-1048576/1048577' : 'bytes 0-1048575/1048577',
+          base64: btoa('\0'.repeat(1024 * 1024)) + (failure === 'oversized-base64' ? 'AAAA' : ''),
+        }
+      })
+      const service = new ClientResourceService(ctx, { call } as never, session)
+      const create = vi.spyOn(URL, 'createObjectURL')
+      await expect(service.images.load({ laneId: 'main', artifact })).rejects.toThrow()
+      expect(create).not.toHaveBeenCalled()
+      expect(call).toHaveBeenCalledTimes(failure === 'second-range-failed' ? 2 : 1)
+      create.mockRestore()
+    },
+  )
+
   it('只通过当前会话授权读取图片，并提供可回收的 Blob URL', async () => {
     const ctx = new Context()
     const session = new SessionService(ctx, 'session-a')
@@ -520,44 +689,69 @@ describe('client command boundary', () => {
     await fiber.dispose()
   })
 
-  it('routes an authorized effect through the current session and isolates command ownership', async () => {
-    const ctx = new Context()
-    await ctx.plugin(SlotRegistry)
-    const client = { sessions: { get: () => undefined } } as never
-    const effect = vi.fn(async (...args: unknown[]) => ({ args }))
-    new AgnesClientService(ctx, client, undefined, effect)
-    const commands = new CommandService(ctx, async () => true)
-    new SessionService(ctx, 'session-a', client)
-    new ThemeService(ctx, 'light')
-    new LocaleService(ctx, 'zh-CN')
-    let first: ClientContext['commands'] | undefined
-    const fiber = ctx.plugin(
-      clientModule({
-        apply(cctx: ClientContext) {
-          first = cctx.commands
-          cctx.commands.registerEffect({ id: 'demo.write', service: 'panel.write' })
+  it.each(['stable', 'switch', 'switch-back', 'unload'])(
+    'routes an authorized effect only while its original scope survives: %s',
+    async (mode) => {
+      const ctx = new Context()
+      await ctx.plugin(SlotRegistry)
+      const client = { sessions: { get: () => undefined } } as never
+      const effect = vi.fn(async (...args: unknown[]) => ({ args }))
+      new AgnesClientService(ctx, client, undefined, effect)
+      let approve!: (allowed: boolean) => void
+      const approval = new Promise<boolean>((resolve) => {
+        approve = resolve
+      })
+      const authorize = vi.fn(async () => (mode === 'stable' ? true : approval))
+      const commands = new CommandService(ctx, authorize)
+      const session = new SessionService(ctx, 'session-a', client)
+      new ThemeService(ctx, 'light')
+      new LocaleService(ctx, 'zh-CN')
+      let first: ClientContext['commands'] | undefined
+      const fiber = ctx.plugin(
+        clientModule({
+          apply(cctx: ClientContext) {
+            first = cctx.commands
+            cctx.commands.registerEffect({ id: 'demo.write', service: 'panel.write' })
+          },
+        }),
+        {
+          rowId: 'web:pkg-demo/panel',
+          packageId: 'pkg-demo',
+          revision: 'r1',
+          services: ['panel.write'],
         },
-      }),
-      {
-        rowId: 'web:pkg-demo/panel',
-        packageId: 'pkg-demo',
-        revision: 'r1',
-        services: ['panel.write'],
-      },
-    )
-    await fiber
-    await expect(first?.execute('demo.write', { value: 1 })).resolves.toBeDefined()
-    expect(effect).toHaveBeenCalledWith(
-      expect.objectContaining({ rowId: 'web:pkg-demo/panel' }),
-      'session-a',
-      'panel.write',
-      expect.any(String),
-      { value: 1 },
-    )
-    await expect(commands.executeOwned('web:other/panel', 'demo.write', {})).rejects.toThrow('not registered')
-    await fiber.dispose()
-    await expect(commands.execute('demo.write', {})).rejects.toThrow('not registered')
-  })
+      )
+      await fiber
+      if (mode !== 'stable') {
+        if (!first) throw new Error('Missing module commands')
+        const pending = first.execute('demo.write', { value: 1 }).catch((error: unknown) => error)
+        await vi.waitFor(() => expect(authorize).toHaveBeenCalledOnce())
+        if (mode === 'unload') await fiber.dispose()
+        else {
+          session.setSession('session-b')
+          if (mode === 'switch-back') session.setSession('session-a')
+        }
+        approve(true)
+        expect(await pending).toBeInstanceOf(Error)
+        expect(effect).not.toHaveBeenCalled()
+        if (mode !== 'unload') await fiber.dispose()
+        return
+      }
+      await expect(first?.execute('demo.write', { value: 1 })).resolves.toBeDefined()
+      expect(effect).toHaveBeenCalledWith(
+        expect.objectContaining({ rowId: 'web:pkg-demo/panel' }),
+        'session-a',
+        'panel.write',
+        expect.any(String),
+        { value: 1 },
+      )
+      await expect(commands.executeOwned('web:other/panel', 'demo.write', {})).rejects.toThrow(
+        'not registered',
+      )
+      await fiber.dispose()
+      await expect(commands.execute('demo.write', {})).rejects.toThrow('not registered')
+    },
+  )
 
   it('never reaches the effect relay when host authorization is denied', async () => {
     const ctx = new Context()
@@ -869,5 +1063,232 @@ describe('SlotOutlet', () => {
       expect(errSpy.flat().some((item) => item === secret || item instanceof Error)).toBe(false)
     }, committed)
     vi.restoreAllMocks()
+  })
+})
+
+describe('host-retained client effect operations', () => {
+  async function setupRetained(persist = false, service = 'aka.capture') {
+    const ctx = new Context()
+    await ctx.plugin(SlotRegistry)
+    const client = { sessions: { get: () => undefined } } as never
+    const effect = vi.fn(
+      async (..._args: Parameters<NonNullable<ConstructorParameters<typeof AgnesClientService>[3]>>) => ({
+        ok: true,
+      }),
+    )
+    new AgnesClientService(ctx, client, undefined, effect)
+    const authorize = vi.fn(async () => true)
+    const commands = new CommandService(ctx, authorize)
+    const session = new SessionService(ctx, 'session-a', client)
+    new ThemeService(ctx, 'light')
+    new LocaleService(ctx, 'zh-CN')
+    let moduleContext!: ClientContext
+    let unregister!: () => void
+    const fiber = ctx.plugin(
+      clientModule({
+        apply(cctx) {
+          moduleContext = cctx
+          unregister = cctx.commands.registerEffect({
+            id: 'retained.photo',
+            service: persist ? service : 'photo',
+            retainOperation: true,
+            ...(persist ? { persistCapture: true as const } : {}),
+          })
+        },
+      }),
+      {
+        packageId: persist ? '@agnes-examples/aka-robot-plugin' : 'pkg-demo',
+        revision: 'r1',
+        services: [persist ? service : 'photo'],
+      },
+    )
+    await fiber
+    return { effect, authorize, commands, session, fiber, moduleContext, unregister }
+  }
+  it.each(['aka.capture', 'aka.recognition.test'])(
+    'restores only the original unresolved %s after module replacement and explicitly requests readback',
+    async (service) => {
+      const original = {
+        bindingRevision: 1,
+        configRevision: 1,
+        ...(service === 'aka.recognition.test' ? { recognitionRevision: 2, roundRevision: 3 } : {}),
+      }
+      const first = await setupRetained(true, service)
+      first.effect.mockRejectedValue(new Error('unknown'))
+      await expect(first.commands.execute('retained.photo', { ...original })).rejects.toThrow('unknown')
+      const originalId = first.effect.mock.calls[0]?.[3]
+      await first.fiber.dispose()
+      const next = await setupRetained(true, service)
+      try {
+        expect(next.effect).not.toHaveBeenCalled()
+        const input = next.moduleContext.commands.pendingEffect('retained.photo')
+        expect(input).toEqual(original)
+        expect(Object.isFrozen(input)).toBe(true)
+        expect(() =>
+          next.moduleContext.commands.registerEffect({
+            id: 'retained.photo',
+            service,
+            retainOperation: true,
+            persistCapture: true,
+          }),
+        ).toThrow('already registered')
+        expect(next.moduleContext.commands.pendingEffect('retained.photo')).toBe(input)
+        await expect(next.commands.execute('retained.photo', { ...original })).rejects.toThrow(
+          'requires readback',
+        )
+        expect(next.effect).not.toHaveBeenCalled()
+        next.session.setSession('session-b')
+        expect(next.moduleContext.commands.pendingEffect('retained.photo')).toBeNull()
+        next.session.setSession('session-a')
+        next.authorize.mockResolvedValue(false)
+        await expect(next.commands.execute('retained.photo', input)).rejects.toThrow('not authorized')
+        next.authorize.mockResolvedValue(true)
+        await next.commands.execute('retained.photo', input)
+        expect(next.effect.mock.calls[0]?.slice(3)).toEqual([originalId, input, { readbackOnly: true }])
+        next.moduleContext.commands.completeEffect('retained.photo', input)
+        expect(next.moduleContext.commands.pendingEffect('retained.photo')).toBeNull()
+        await next.commands.execute('retained.photo', { ...original })
+        expect(next.effect.mock.calls[1]?.[3]).not.toBe(originalId)
+        expect(next.effect.mock.calls[1]?.[5]).toBeUndefined()
+        next.unregister()
+        expect(next.moduleContext.commands.pendingEffect('retained.photo')).toBeNull()
+        expect(() => next.moduleContext.commands.completeEffect('retained.photo', input)).toThrow(
+          'completion is unavailable',
+        )
+        await expect(next.commands.execute('retained.photo', input)).rejects.toThrow('not registered')
+        expect(next.effect).toHaveBeenCalledTimes(2)
+      } finally {
+        await next.fiber.dispose()
+      }
+    },
+  )
+  it('does not bypass an active capture by obtaining its restored input handle', async () => {
+    const v = await setupRetained(true)
+    let finish!: (value: { ok: boolean }) => void
+    try {
+      v.effect.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve
+          }),
+      )
+      const pending = v.commands.execute('retained.photo', { bindingRevision: 1, configRevision: 1 })
+      await vi.waitFor(() => expect(v.effect).toHaveBeenCalledOnce())
+      const restored = v.moduleContext.commands.pendingEffect('retained.photo')
+      expect(() => v.moduleContext.commands.completeEffect('retained.photo', restored)).toThrow(
+        'completion is unavailable',
+      )
+      await expect(v.commands.execute('retained.photo', restored)).rejects.toThrow('still pending')
+      expect(v.effect).toHaveBeenCalledOnce()
+      finish({ ok: true })
+      await pending
+    } finally {
+      await v.fiber.dispose()
+    }
+  })
+  it('refuses unavailable or malformed recovery storage before dispatch and never persists secrets', async () => {
+    const v = await setupRetained(true)
+    try {
+      await expect(
+        v.commands.execute('retained.photo', { bindingRevision: 1, configRevision: 1, token: 'synthetic' }),
+      ).rejects.toThrow('input unavailable')
+      expect(sessionStorage.length).toBe(0)
+      const key = `agnes.capture-operation.v1:${JSON.stringify(['@agnes-examples/aka-robot-plugin', '@agnes-examples/aka-robot-plugin', 'session-a'])}`
+      sessionStorage.setItem(key, '{broken')
+      expect(() => v.moduleContext.commands.pendingEffect('retained.photo')).toThrow()
+      await expect(
+        v.commands.execute('retained.photo', { bindingRevision: 1, configRevision: 1 }),
+      ).rejects.toThrow()
+      sessionStorage.clear()
+      const set = vi.spyOn(sessionStorage, 'setItem').mockImplementation(() => {
+        throw new Error('unavailable')
+      })
+      await expect(
+        v.commands.execute('retained.photo', { bindingRevision: 1, configRevision: 1 }),
+      ).rejects.toThrow()
+      set.mockRestore()
+      expect(v.effect).not.toHaveBeenCalled()
+    } finally {
+      await v.fiber.dispose()
+    }
+  })
+  it('retains one immutable operation ID across failures and explicit readback, authorizing every attempt', async () => {
+    const v = await setupRetained()
+    try {
+      const input = Object.freeze({ bindingRevision: 1, configRevision: 1 })
+      v.effect.mockRejectedValueOnce(new Error('unknown'))
+      await expect(v.commands.execute('retained.photo', input)).rejects.toThrow('unknown')
+      await expect(v.commands.execute('retained.photo', input)).resolves.toEqual({ ok: true })
+      await expect(v.commands.execute('retained.photo', input)).resolves.toEqual({ ok: true })
+      expect(new Set(v.effect.mock.calls.map((args) => args[3])).size).toBe(1)
+      expect(Object.isFrozen(v.effect.mock.calls[0]?.[4])).toBe(true)
+      expect(v.authorize).toHaveBeenCalledTimes(3)
+      await v.commands.execute('retained.photo', { ...input })
+      expect(v.effect.mock.calls[3]?.[3]).not.toBe(v.effect.mock.calls[0]?.[3])
+    } finally {
+      await v.fiber.dispose()
+    }
+  })
+  it('refuses changed input, another session and denied readback without dispatching a new operation', async () => {
+    const v = await setupRetained()
+    try {
+      const input = { bindingRevision: 1, configRevision: 1 }
+      await v.commands.execute('retained.photo', input)
+      input.configRevision = 2
+      await expect(v.commands.execute('retained.photo', input)).rejects.toThrow('identity changed')
+      input.configRevision = 1
+      v.session.setSession('session-b')
+      await expect(v.commands.execute('retained.photo', input)).rejects.toThrow('identity changed')
+      v.session.setSession('session-a')
+      v.authorize.mockResolvedValue(false)
+      await expect(v.commands.execute('retained.photo', input)).rejects.toThrow('not authorized')
+      expect(v.effect).toHaveBeenCalledTimes(1)
+    } finally {
+      await v.fiber.dispose()
+    }
+  })
+  it('holds the original operation slot until the real call ends', async () => {
+    const v = await setupRetained()
+    let finish!: (value: { ok: boolean }) => void
+    try {
+      v.effect.mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve
+          }),
+      )
+      const input = { bindingRevision: 1, configRevision: 1 }
+      const pending = v.commands.execute('retained.photo', input)
+      await vi.waitFor(() => expect(v.effect).toHaveBeenCalledOnce())
+      await expect(v.commands.execute('retained.photo', input)).rejects.toThrow('still pending')
+      finish({ ok: true })
+      await pending
+      v.effect.mockResolvedValue({ ok: true })
+      await v.commands.execute('retained.photo', input)
+      expect(v.effect.mock.calls[1]?.[3]).toBe(v.effect.mock.calls[0]?.[3])
+    } finally {
+      await v.fiber.dispose()
+    }
+  })
+  it('rejects non-data retained inputs without evaluating getters or dispatching effects', async () => {
+    const v = await setupRetained()
+    try {
+      const getter = vi.fn(() => 1)
+      for (const input of [
+        {
+          get revision() {
+            return getter()
+          },
+        },
+        { revision: NaN },
+        { revision: {} },
+        { [Symbol('id')]: 1 },
+      ])
+        await expect(v.commands.execute('retained.photo', input)).rejects.toThrow('flat JSON data')
+      expect(getter).not.toHaveBeenCalled()
+      expect(v.effect).not.toHaveBeenCalled()
+    } finally {
+      await v.fiber.dispose()
+    }
   })
 })

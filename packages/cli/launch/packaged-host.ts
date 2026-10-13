@@ -121,6 +121,8 @@ export function createPackagedHost(
     | 'runtimePluginSources'
     | 'managedExtensionPackageIds'
     | 'serviceAuthority'
+    | 'deviceRecognitionAuthorization'
+    | 'deviceRecognitionExecute'
   >,
 ) {
   const { home, cwd, entryFile, ...resources } = options

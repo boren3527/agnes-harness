@@ -189,6 +189,10 @@ export function createTurnProjector(options: {
         let pendingApproval = false
         let awaitingToolApproval = false
         let runningTool = false
+        const latestImageId = turn.nodeIds.findLast((id) => {
+          const node = nodeMap.get(id)
+          return node?.kind === 'artifact' && ['image/png', 'image/jpeg'].includes(node.ref.mime)
+        })
         let latestStreaming: Extract<UINode, { kind: 'assistant' }> | undefined
         for (const id of turn.nodeIds) {
           const node = nodeMap.get(id)
@@ -207,6 +211,7 @@ export function createTurnProjector(options: {
           )
             latestStreaming = node
           if (node.kind === 'user') userNodes.push(element)
+          else if (id === latestImageId) finalNodes.push(element)
           else if (id === turn.finalAssistantId) {
             if (node.kind === 'assistant' && node.thinking?.trim() && thinking) {
               processNodes.push(thinking)

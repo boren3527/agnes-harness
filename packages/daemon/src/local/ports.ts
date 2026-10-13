@@ -23,7 +23,8 @@ export type JournalState =
   | { state: 'corrupt' }
 
 export interface CommandJournal {
-  begin(identity: JournalIdentity, binding: JournalBinding): Promise<JournalState>
+  /** Read-only lookup must never reserve a missing identity. */
+  begin(identity: JournalIdentity, binding: JournalBinding, readOnly?: true): Promise<JournalState>
   complete(identity: JournalIdentity, result: JournalResult): Promise<void>
   /** Frees a row whose dispatch threw. A row that already has a result is left alone: that result is
    *  the idempotency evidence. Without this, one failed dispatch makes the commandId answer
@@ -101,9 +102,10 @@ export class MemoryJournal implements CommandJournal {
     return `${i.principalId}\u0000${i.clientId}\u0000${i.sessionId}\u0000${i.commandId}`
   }
 
-  async begin(identity: JournalIdentity, binding: JournalBinding): Promise<JournalState> {
+  async begin(identity: JournalIdentity, binding: JournalBinding, readOnly?: true): Promise<JournalState> {
     const r = this.rows.get(this.k(identity))
     if (!r) {
+      if (readOnly) return { state: 'new' }
       this.rows.set(this.k(identity), { binding, receivedAt: this.clock() })
       return { state: 'new' }
     }

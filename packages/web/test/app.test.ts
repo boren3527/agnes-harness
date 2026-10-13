@@ -267,6 +267,27 @@ function modelMenu(): HTMLElement {
   return found
 }
 
+/**
+ * 即时提示迁移后落在 `document.body` 的 antd 通知浮层里；`#notice` 只剩会话恢复块和两条页面级
+ * 提示（首屏未配置、当前后台找不到该任务），所以断言提示文案要读这一处。
+ * `.agnes-ui-notification` 是 web-ui 包装组件的根类，不依赖 antd 的内部结构。
+ */
+function notices(): string {
+  return [...document.querySelectorAll<HTMLElement>('.agnes-ui-notification')]
+    .map((node) => node.textContent ?? '')
+    .join('\n')
+}
+
+/** 用真实校验器造一个错误实例：断言本地化时不必依赖 protocol-validation 的内部类。 */
+function raisedBy(run: () => void): unknown {
+  try {
+    run()
+  } catch (error) {
+    return error
+  }
+  throw new Error('the invalid input was accepted')
+}
+
 afterEach(async () => {
   window.dispatchEvent(new Event('pagehide'))
   await Promise.resolve()
@@ -285,6 +306,46 @@ afterEach(async () => {
   sessionStorage.clear()
   localStorage.clear()
 })
+
+it('loads initial models, workspaces and sessions concurrently before opening the selected session', async () => {
+  installPublicFixture()
+  const models = deferred<{ profile: { models: Array<{ route: string; id: string }> } }>()
+  const workspaces = deferred<{ items: [] }>()
+  const sessions = deferred<{ items: Array<{ sessionId: string }> }>()
+  const old = session('old', async () => idleTimeline('old'))
+  const apis = vi.fn(() => models.promise)
+  const workspaceList = vi.fn(() => workspaces.promise)
+  const sessionList = vi.fn(() => sessions.promise)
+  sdk.createClient.mockReturnValue({
+    initialize: vi.fn(async () => undefined),
+    on: vi.fn(),
+    close: vi.fn(async () => undefined),
+    apis,
+    config: {
+      get: vi.fn(async () => ({ configured: true })),
+      providers: vi.fn(async () => ({ providers: [] })),
+    },
+    workspace: { list: workspaceList },
+    session: { list: sessionList, load: vi.fn(async () => old) },
+  })
+  binding.loadWebSession.mockResolvedValue({ session: old, offPermission: vi.fn() })
+  await import('../src/app.js')
+  try {
+    await vi.waitFor(() => expect(apis).toHaveBeenCalled())
+    expect(workspaceList).toHaveBeenCalled()
+    expect(sessionList).toHaveBeenCalled()
+    expect(binding.loadWebSession).not.toHaveBeenCalled()
+    workspaces.resolve({ items: [] })
+    sessions.resolve({ items: [{ sessionId: 'old' }] })
+    await Promise.resolve()
+    expect(binding.loadWebSession).not.toHaveBeenCalled()
+  } finally {
+    models.resolve({ profile: { models: [{ route: 'local', id: 'model-a' }] } })
+    workspaces.resolve({ items: [] })
+    sessions.resolve({ items: [{ sessionId: 'old' }] })
+  }
+  await vi.waitFor(() => expect(binding.loadWebSession).toHaveBeenCalled())
+}, 60000)
 
 describe('web permission synchronization', () => {
   const label = () => document.querySelector('[data-permission-label]')?.textContent
@@ -780,7 +841,7 @@ describe('web session selection', () => {
       detailRow('model-detail-thinking')?.click()
       expect(leafOption('高')?.getAttribute('aria-selected')).toBe('true')
       leafOption('低')?.click()
-      await vi.waitFor(() => expect(document.getElementById('notice')?.textContent).toContain('新会话将使用'))
+      await vi.waitFor(() => expect(notices()).toContain('新会话将使用'))
       // 选完一个参数整条菜单收起，改下一个要重新展开。
       await vi.waitFor(() => expect(document.getElementById('model-listbox')).toBeNull())
       await openDetail()
@@ -971,7 +1032,7 @@ describe('web session selection', () => {
     await savedCallback(snapshot)
     for (const id of ['model', 'composer-workspace', 'composer-permission', 'new', 'prompt'])
       expect(control(id).disabled).toBe(false)
-    expect(document.getElementById('notice')?.textContent).toContain('尚未生效')
+    await vi.waitFor(() => expect(notices()).toContain('尚未生效'))
     models = [...models, { route: 'new', id: 'model-b' }]
     await savedCallback({ ...snapshot, effect: 'new-sessions' })
     control('model').click()
@@ -991,10 +1052,6 @@ describe('web session selection', () => {
 
   it('keeps the model picker flat and applies the selected model settings', async () => {
     installPublicFixture()
-    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
-      callback(0)
-      return 1
-    })
     const old = session('old', async () => idleTimeline('old', { route: 'local', id: 'model-a' }))
     sdk.createClient.mockReturnValue({
       initialize: vi.fn(async () => undefined),
@@ -1092,7 +1149,7 @@ describe('web session selection', () => {
       }
       saveRead.resolve(result)
       await saved
-      expect(document.getElementById('notice')?.textContent).toContain('模型配置已更新')
+      await vi.waitFor(() => expect(notices()).toContain('模型配置已更新'))
       if (order === 'poll-fails') pollRead.reject(new Error('poll unavailable'))
       else pollRead.resolve(result)
       await vi.waitFor(() => expect(modelButton.disabled).toBe(false))
@@ -1102,6 +1159,74 @@ describe('web session selection', () => {
       if (order === 'poll-first') expect(modelMenu().textContent).toContain('model-c')
     },
   )
+
+  /** 首屏引导与会话恢复块共用 #notice；保存设置必须只清掉前者。 */
+  const bootNotConfigured = async (recoveryError: Error | undefined) => {
+    installPublicFixture()
+    const old = session('old', async () => idleTimeline('old', { route: 'local', id: 'model-a' }))
+    // 首屏没有可用模型才会挂出配置引导；保存之后再让目录里出现模型。
+    const apis = vi.fn(async () => ({ profile: { models: [] as { route: string; id: string }[] } }))
+    sdk.createClient.mockReturnValue({
+      initialize: vi.fn(async () => undefined),
+      on: vi.fn(),
+      close: vi.fn(async () => undefined),
+      apis,
+      config: {
+        get: vi.fn(async () => ({ configured: false })),
+        providers: vi.fn(async () => ({ providers: [] })),
+      },
+      workspace: { list: vi.fn(async () => ({ items: [] })) },
+      session: { list: vi.fn(async () => ({ items: [{ sessionId: 'old' }] })) },
+    })
+    if (recoveryError) binding.loadWebSession.mockRejectedValueOnce(recoveryError)
+    binding.loadWebSession.mockResolvedValue({ session: old, offPermission: vi.fn() })
+    await import('../src/app.js')
+    const notice = document.getElementById('notice') as HTMLElement
+    const save = configurationCallback.saved
+    if (!save) throw new Error('settings callback not bound')
+    const publishModel = () =>
+      apis.mockImplementation(async () => ({ profile: { models: [{ route: 'local', id: 'model-a' }] } }))
+    return {
+      notice,
+      publishModel,
+      save: (snapshot: Partial<ConfigSnapshot>) =>
+        save({
+          configured: true,
+          effect: 'new-sessions',
+          provider: { id: 'local', route: 'local', model: 'model-a' },
+          ...snapshot,
+        } as ConfigSnapshot),
+    }
+  }
+
+  it('clears the first-run guide once a configuration is saved, and reports the result as a notification', async () => {
+    const { notice, publishModel, save } = await bootNotConfigured(undefined)
+    await vi.waitFor(() => expect(notice.textContent).toContain('先配置模型，即可开始第一个任务。'))
+
+    publishModel()
+    await save({})
+
+    // 保存设置走 onSaved 直接回调，不经过 run(op)；没有这条清空，顶栏会一直挂着这句已经不成立的话。
+    expect(notice.textContent).toBe('')
+    await vi.waitFor(() => expect(notices()).toContain('模型配置已更新'))
+  })
+
+  it('keeps the recovery block and its buttons when a configuration is saved', async () => {
+    const missing = Object.assign(new Error('INTERNAL_ERROR (-32603)'), {
+      data: { code: 'SESSION_PROFILE_MISSING' },
+    })
+    const { notice, publishModel, save } = await bootNotConfigured(missing)
+    await vi.waitFor(() => expect(notice.dataset.kind).toBe('session-recovery'))
+    const buttons = [...notice.querySelectorAll('button')]
+
+    publishModel()
+    await save({})
+
+    expect(notice.dataset.kind).toBe('session-recovery')
+    expect(notice.textContent).toContain('旧配置文件已缺失')
+    expect([...notice.querySelectorAll('button')]).toEqual(buttons)
+    await vi.waitFor(() => expect(notices()).toContain('模型配置已更新'))
+  })
 
   it.each(['missing-profile', 'system-error', 'legacy-ledger'])(
     'keeps %s recovery visible and allows retry or a new task',
@@ -1225,7 +1350,9 @@ describe('web session selection', () => {
       if (kind === 'missing-profile') {
         const pendingLoad = deferred<{ session: SessionDouble; offPermission: ReturnType<typeof vi.fn> }>()
         binding.loadWebSession.mockImplementationOnce(() => pendingLoad.promise)
-        const event = (name: string) => client.on.mock.calls.find(([key]: [string]) => key === name)?.[1]()
+        const event = (name: string) => {
+          for (const [key, listener] of client.on.mock.calls) if (key === name) listener()
+        }
         event('reconnecting')
         expect((document.getElementById('new') as HTMLButtonElement).disabled).toBe(true)
         for (const control of recoveryButtons) {
@@ -1263,6 +1390,299 @@ describe('web session selection', () => {
         await vi.waitFor(() => expect(notice.textContent).toBe(''))
       }
       expect(create).not.toHaveBeenCalled()
+    },
+  )
+
+  it('creates and detaches a device session while preserving its key, conversation and workspace history', async () => {
+    installPublicFixture()
+    const workspace = {
+      path: '/repo/device',
+      name: 'device',
+      workspaceId: 'a'.repeat(64),
+      revision: 1,
+      lastUsedAt: null,
+      sessionCount: 0,
+      available: true,
+    }
+    const fresh = session('device-session', async () => idleTimeline('device-session'))
+    let bound = false
+    let detached = false
+    const association = {
+      workspaceId: workspace.workspaceId,
+      deviceId: '11111111-1111-4111-8111-111111111111',
+      revision: 1,
+      active: true,
+    }
+    const bind = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('binding failed'))
+      .mockImplementation(async () => {
+        bound = true
+        return {
+          workspace: association,
+          session: {
+            sessionId: fresh.id,
+            deviceId: association.deviceId,
+            workspaceId: association.workspaceId,
+            bindingRevision: 1,
+            active: true,
+          },
+        }
+      })
+    const create = vi.fn(async () => fresh)
+    const client = {
+      connectionState: 'connected',
+      close: vi.fn(async () => {}),
+      on: vi.fn(),
+      initialize: vi.fn(async () => {}),
+      apis: vi.fn(async () => ({ profile: { models: [{ route: 'local', id: 'model-a' }] } })),
+      config: {
+        get: vi.fn(async () => ({
+          configured: true,
+          profile: 'local',
+          provider: { id: 'local', route: 'local', model: 'model-a' },
+        })),
+        providers: vi.fn(async () => ({ providers: [] })),
+      },
+      workspace: {
+        list: vi.fn(async () => ({ items: [workspace] })),
+        add: vi.fn(async () => ({ workspace })),
+      },
+      device: {
+        bindings: vi.fn(async () => ({ items: bound ? [association] : [] })),
+        session: vi.fn(async () => ({
+          workspace: bound || detached ? { ...association, active: bound, revision: detached ? 2 : 1 } : null,
+          session:
+            bound || detached
+              ? {
+                  sessionId: fresh.id,
+                  deviceId: association.deviceId,
+                  workspaceId: association.workspaceId,
+                  bindingRevision: 1,
+                  active: bound,
+                }
+              : null,
+        })),
+        bindSession: bind,
+        detachSession: vi.fn(async (sessionId: string, expectedRevision: number) => {
+          expect(sessionId).toBe(fresh.id)
+          expect(expectedRevision).toBe(1)
+          bound = false
+          detached = true
+          return {
+            workspace: { ...association, active: false, revision: 2 },
+            session: {
+              sessionId,
+              workspaceId: association.workspaceId,
+              deviceId: association.deviceId,
+              bindingRevision: 1,
+              active: false,
+            },
+          }
+        }),
+      },
+      session: {
+        list: vi.fn(async () => ({
+          items: bound || detached ? [{ sessionId: fresh.id, cwd: workspace.path }] : [],
+        })),
+        new: create,
+        load: vi.fn(async () => fresh),
+      },
+    }
+    sdk.createClient.mockReturnValue(client)
+    binding.bindWebSession.mockImplementation((selected: SessionDouble) => ({
+      session: selected,
+      offPermission: vi.fn(),
+    }))
+    await import('../src/app.js')
+    const trigger = document.getElementById('new-device') as HTMLButtonElement
+    await vi.waitFor(() => expect(trigger.disabled).toBe(false))
+    trigger.click()
+    const dialog = document.getElementById('new-session') as HTMLDialogElement
+    await vi.waitFor(() => expect(dialog.open).toBe(true))
+    expect(create).not.toHaveBeenCalled()
+    const cwd = document.getElementById('new-session-cwd') as HTMLInputElement
+    const form = document.getElementById('new-session-form') as HTMLFormElement
+    cwd.value = workspace.path
+    cwd.dispatchEvent(new Event('input'))
+    await vi.waitFor(() =>
+      expect((document.getElementById('new-session-create') as HTMLButtonElement).disabled).toBe(false),
+    )
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    await vi.waitFor(() =>
+      expect(document.getElementById('new-session-error')?.textContent).toContain('binding failed'),
+    )
+    expect(dialog.open).toBe(true)
+    expect(fresh.prompt).not.toHaveBeenCalled()
+    await vi.waitFor(() =>
+      expect((document.getElementById('new-session-create') as HTMLButtonElement).disabled).toBe(false),
+    )
+    form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    await vi.waitFor(() => expect(dialog.open).toBe(false))
+    expect(create.mock.calls[0]).toEqual(create.mock.calls[1])
+    expect(bind).toHaveBeenCalledWith(fresh.id, 0)
+    expect(fresh.prompt).not.toHaveBeenCalled()
+    expect(location.search).toContain('session=device-session')
+    await vi.waitFor(() =>
+      expect(document.querySelector('.workspace-name')?.textContent).toBe('device（设备）'),
+    )
+    await vi.waitFor(() => {
+      expect((document.getElementById('device-workbench') as HTMLElement).hidden).toBe(false)
+      expect(document.getElementById('device-workbench')?.textContent).toContain('控制台尚未就绪')
+    })
+    expect(document.getElementById('session-workbench')?.classList.contains('has-device-workbench')).toBe(
+      true,
+    )
+    const unbind = Array.from(document.querySelectorAll<HTMLButtonElement>('#device-workbench button')).find(
+      (button) => button.textContent === '解绑设备',
+    )
+    if (!unbind) throw new Error('missing detach action')
+    unbind.click()
+    await vi.waitFor(() => expect(document.querySelector('[role="alertdialog"]')).not.toBeNull())
+    const confirm = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('[role="alertdialog"] button'),
+    ).find((button) => button.textContent === '解绑设备')
+    if (!confirm) throw new Error('missing detach confirmation')
+    confirm.click()
+    await vi.waitFor(() => expect(document.querySelector('[role="alertdialog"]')).toBeNull())
+    // This app fixture has no device plugin; the configuration slot uses its normal fallback.
+    expect(document.getElementById('device-workbench')?.textContent).toContain('设备控制台尚未就绪')
+    expect(document.getElementById('device-workbench')?.textContent).not.toContain('重新绑定原设备')
+    expect(client.device.bindSession).toHaveBeenCalledTimes(2)
+    await vi.waitFor(() => expect(document.querySelector('.workspace-name')?.textContent).toBe('device'))
+    expect(client.device.detachSession).toHaveBeenCalledOnce()
+    expect(fresh.prompt).not.toHaveBeenCalled()
+    expect(location.search).toContain('session=device-session')
+    expect(document.querySelector('aside.sidebar')?.textContent).toContain('device')
+  })
+
+  it.each(['auto', 'chat', 'chat-after-error'] as const)(
+    'uses %s mode for a new session in an existing device workspace',
+    async (mode) => {
+      installPublicFixture()
+      const workspace = {
+        path: '/repo/device',
+        name: 'device',
+        workspaceId: 'a'.repeat(64),
+        revision: 1,
+        lastUsedAt: null,
+        sessionCount: 0,
+        available: true,
+      }
+      const association = {
+        workspaceId: workspace.workspaceId,
+        deviceId: '11111111-1111-4111-8111-111111111111',
+        revision: 3,
+        active: true,
+      }
+      const old = session('old', async () => idleTimeline('old'))
+      const sessions = new Map<string, SessionDouble>()
+      const enrolled = new Set<string>()
+      const create = vi.fn(async (params: { sessionKey: string }) => {
+        let value = sessions.get(params.sessionKey)
+        if (!value) {
+          value = session(params.sessionKey, async () => idleTimeline(params.sessionKey))
+          sessions.set(params.sessionKey, value)
+        }
+        return value
+      })
+      const enrollment = (id: string) => ({
+        sessionId: id,
+        workspaceId: association.workspaceId,
+        deviceId: association.deviceId,
+        bindingRevision: association.revision,
+        active: true,
+      })
+      const bind = vi.fn(async (id: string) => {
+        enrolled.add(id)
+        return { workspace: association, session: enrollment(id) }
+      })
+      if (mode === 'chat-after-error') bind.mockRejectedValueOnce(new Error('binding failed'))
+      const client = {
+        connectionState: 'connected',
+        close: vi.fn(async () => {}),
+        on: vi.fn(),
+        initialize: vi.fn(async () => {}),
+        apis: vi.fn(async () => ({ profile: { models: [{ route: 'local', id: 'model-a' }] } })),
+        config: {
+          get: vi.fn(async () => ({
+            configured: true,
+            profile: 'local',
+            provider: { id: 'local', route: 'local', model: 'model-a' },
+          })),
+          providers: vi.fn(async () => ({ providers: [] })),
+        },
+        workspace: {
+          list: vi.fn(async () => ({ items: [workspace] })),
+          add: vi.fn(async () => ({ workspace })),
+        },
+        device: {
+          bindings: vi.fn(async () => ({ items: [association] })),
+          session: vi.fn(async (id: string) => ({
+            workspace: association,
+            session: enrolled.has(id) ? enrollment(id) : null,
+          })),
+          bindSession: bind,
+        },
+        session: {
+          list: vi.fn(async () => ({ items: [{ sessionId: old.id, cwd: workspace.path }] })),
+          new: create,
+          load: vi.fn(async () => old),
+        },
+      }
+      sdk.createClient.mockReturnValue(client)
+      binding.loadWebSession.mockResolvedValue({ session: old, offPermission: vi.fn() })
+      binding.bindWebSession.mockImplementation((selected: SessionDouble) => ({
+        session: selected,
+        offPermission: vi.fn(),
+      }))
+      await import('../src/app.js')
+      const plus = () =>
+        document.querySelector<HTMLButtonElement>('[data-workspace-new-session="/repo/device"]')
+      await vi.waitFor(() => expect(plus()?.disabled).toBe(false))
+      plus()?.click()
+      const dialog = document.getElementById('new-session') as HTMLDialogElement
+      const choice = document.getElementById('new-session-mode') as HTMLSelectElement
+      await vi.waitFor(() => expect(dialog.open).toBe(true))
+      expect(choice.value).toBe('auto')
+      await vi.waitFor(() => expect(choice.disabled).toBe(false))
+      const pick = () => document.querySelector<HTMLButtonElement>('.workspace-option')?.click()
+      if (mode === 'chat-after-error') {
+        pick()
+        await vi.waitFor(() =>
+          expect(document.getElementById('new-session-error')?.textContent).toContain('binding failed'),
+        )
+        await vi.waitFor(() => expect(choice.disabled).toBe(false))
+      }
+      if (mode !== 'auto') {
+        choice.value = 'chat'
+        choice.dispatchEvent(new Event('change'))
+      }
+      pick()
+      await vi.waitFor(() => expect(dialog.open).toBe(false))
+      if (mode !== 'auto') {
+        expect(create).toHaveBeenCalledTimes(mode === 'chat' ? 0 : 1)
+        submit('ordinary conversation')
+      }
+      await vi.waitFor(() => expect(create).toHaveBeenCalledTimes(mode === 'chat-after-error' ? 2 : 1))
+      const created = [...sessions.values()].at(-1)
+      if (!created) throw new Error('session was not created')
+      await vi.waitFor(() => expect(location.search).toContain(created.id))
+      if (mode === 'auto') {
+        expect(bind).toHaveBeenCalledWith(created.id, 3)
+        expect(created.prompt).not.toHaveBeenCalled()
+        await vi.waitFor(() =>
+          expect((document.getElementById('device-workbench') as HTMLElement).hidden).toBe(false),
+        )
+      } else {
+        await vi.waitFor(() => expect(created.prompt).toHaveBeenCalledOnce())
+        expect(enrolled.has(created.id)).toBe(false)
+        expect(bind).toHaveBeenCalledTimes(mode === 'chat' ? 0 : 1)
+        expect((document.getElementById('device-workbench') as HTMLElement).hidden).toBe(true)
+        if (mode === 'chat-after-error')
+          expect(create.mock.calls[0]?.[0].sessionKey).not.toBe(create.mock.calls[1]?.[0].sessionKey)
+      }
+      expect(old.prompt).not.toHaveBeenCalled()
     },
   )
 
@@ -1327,7 +1747,7 @@ describe('web session selection', () => {
     const newSessionCreate = document.getElementById('new-session-create') as HTMLButtonElement
 
     await vi.waitFor(() => expect(prompt.disabled).toBe(false))
-    expect(document.getElementById('notice')?.textContent).toContain('无法读取工作区列表')
+    await vi.waitFor(() => expect(notices()).toContain('无法读取工作区列表'))
     expect(send.disabled).toBe(true)
     expect(send.dataset.mode).toBe('idle')
     expect(send.getAttribute('aria-label')).toBe('发送')
@@ -1363,9 +1783,7 @@ describe('web session selection', () => {
     newButton.click()
     expect(newSession.open).toBe(true)
     expect(create).not.toHaveBeenCalled()
-    await vi.waitFor(() =>
-      expect(document.getElementById('notice')?.textContent).toContain('detach cleanup failed'),
-    )
+    await vi.waitFor(() => expect(notices()).toContain('detach cleanup failed'))
     expect(prompt.disabled).toBe(false)
     newSessionCwd.value = '/cancelled-directory'
     newSessionCancel.click()
@@ -1633,9 +2051,7 @@ describe('web session selection', () => {
         )
         if (mode === 'failed') {
           listing.reject(new Error('sidebar list failed'))
-          await vi.waitFor(() =>
-            expect(document.getElementById('notice')?.textContent).toContain('sidebar list failed'),
-          )
+          await vi.waitFor(() => expect(notices()).toContain('sidebar list failed'))
         }
         expect((document.getElementById('prompt') as HTMLTextAreaElement).value).toBe('')
         expect(fresh.prompt).toHaveBeenCalledTimes(1)
@@ -1721,9 +2137,7 @@ describe('web session selection', () => {
     modelMenu().querySelector<HTMLElement>('[role="option"]')?.click()
 
     submit('保留这条首轮草稿')
-    await vi.waitFor(() =>
-      expect(document.getElementById('notice')?.textContent).toContain('initial model failed'),
-    )
+    await vi.waitFor(() => expect(notices()).toContain('initial model failed'))
     expect(composer.value).toBe('保留这条首轮草稿')
     expect(fresh.prompt).not.toHaveBeenCalled()
     expect(create).toHaveBeenCalledTimes(1)
@@ -1732,9 +2146,7 @@ describe('web session selection', () => {
 
     submit('保留这条首轮草稿')
     await vi.waitFor(() =>
-      expect(document.getElementById('notice')?.textContent).toContain(
-        '模型凭据已失效或被上游拒绝，请在设置中重新配置或登录该模型账号。',
-      ),
+      expect(notices()).toContain('模型凭据已失效或被上游拒绝，请在设置中重新配置或登录该模型账号。'),
     )
     expect(fresh.setModel).toHaveBeenCalledTimes(2)
     expect(fresh.prompt).toHaveBeenCalledTimes(1)
@@ -2216,7 +2628,7 @@ describe('image composer submissions', () => {
     ])
     await vi.waitFor(() => expect(draft.value).toBe('请解释这张图'))
     expect(document.querySelector('.composer-image-preview img')).not.toBeNull()
-    expect(document.getElementById('notice')?.textContent).toContain('follow-up rejected')
+    await vi.waitFor(() => expect(notices()).toContain('follow-up rejected'))
   })
 
   it('accepts an image as a file attachment when the selected model has only text input', async () => {
@@ -2249,10 +2661,38 @@ describe('image composer submissions', () => {
     expect(active.prompt).not.toHaveBeenCalled()
     expect((document.getElementById('prompt') as HTMLTextAreaElement).value).toBe('保留文字和图片')
     expect(document.querySelector('.composer-image-preview img')).not.toBeNull()
-    expect(document.getElementById('notice')?.textContent).toContain('aggregate pixel limit')
+    await vi.waitFor(() => expect(notices()).toContain('aggregate pixel limit'))
     validation.mockRestore()
     submit('保留文字和图片')
     await vi.waitFor(() => expect(active.prompt).toHaveBeenCalledTimes(1))
+  })
+
+  it('names an attachment refusal in the interface language instead of the validator’s English', async () => {
+    const active = session('old', async () => idleTimeline('old', { route: 'local', id: 'model-a' }))
+    await start(active)
+    await attachPng()
+    const protocol = await import('@agnes/protocol')
+    // 同一个「附件过多」有两处报出：输入框侧取词条，提交侧此前只能原样转发英文。用真实校验器造一个
+    // 带 code 的实例，断言就不必依赖 protocol-validation 的内部类。
+    const tooMany = raisedBy(() =>
+      protocol.validateUserAttachments(
+        Array.from({ length: protocol.USER_MESSAGE_ATTACHMENT_LIMITS.maxCount + 1 }, () => ({
+          type: 'file',
+          name: 'a.txt',
+          mimeType: 'text/plain',
+          data: 'eA==',
+        })),
+      ),
+    )
+    const validation = vi.spyOn(protocol, 'validateUserAttachments').mockImplementationOnce(() => {
+      throw tooMany
+    })
+    submit('带附件发送')
+
+    expect(active.prompt).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(notices()).toContain('一条消息最多添加 50 个附件。'))
+    expect(notices()).not.toContain('A message can hold at most 50 attachments.')
+    validation.mockRestore()
   })
 
   it('keeps an image draft and refuses a WebSocket frame that exceeds the transport limit', async () => {
@@ -2265,7 +2705,7 @@ describe('image composer submissions', () => {
     expect(active.followUp).not.toHaveBeenCalled()
     expect((document.getElementById('prompt') as HTMLTextAreaElement).value).toBe(longText)
     expect(document.querySelector('.composer-image-preview img')).not.toBeNull()
-    expect(document.getElementById('notice')?.textContent).toContain('144 MiB 限制')
+    await vi.waitFor(() => expect(notices()).toContain('144 MiB 限制'))
   })
 })
 
@@ -2337,7 +2777,7 @@ describe('web model confirmation', () => {
     openModelList()
     modelMenu().querySelectorAll<HTMLElement>('[role="option"]')[1]?.click()
     await vi.waitFor(() => expect(old.setModel).toHaveBeenCalledTimes(1))
-    await vi.waitFor(() => expect(document.getElementById('notice')?.dataset.kind).toBe('error'))
+    await vi.waitFor(() => expect(notices()).toContain('model switch failed'))
     expect(model.querySelector('[data-model-label]')?.textContent).toBe('model-a')
     expect(model.getAttribute('aria-label')).not.toContain('account-acct-private')
 
@@ -2439,7 +2879,7 @@ describe('session action review regressions', () => {
     expect(document.querySelector('main')?.inert).toBe(true)
     document.querySelector<HTMLButtonElement>('[data-session-action-id="old"]')?.click()
     menuItem('分叉会话')?.click()
-    await vi.waitFor(() => expect(document.getElementById('notice')?.textContent).toContain('没有可分叉'))
+    await vi.waitFor(() => expect(notices()).toContain('没有可分叉'))
     expect(document.body.classList.contains('sidebar-open')).toBe(false)
     expect(document.querySelector('main')?.inert).toBe(false)
     expect(document.activeElement).toBe(document.getElementById('sidebar-toggle'))
@@ -2525,8 +2965,9 @@ describe('incremental opening', () => {
     })
     binding.loadWebSession.mockResolvedValue({ session: old, offPermission: vi.fn() })
     await import('../src/app.js')
-    const emit = (event: string, payload: unknown) =>
-      on.mock.calls.find(([name]) => name === event)?.[1](payload)
+    const emit = (event: string, payload: unknown) => {
+      for (const [name, listener] of on.mock.calls) if (name === event) listener(payload)
+    }
     return { old, list, emit }
   }
 
@@ -2650,11 +3091,12 @@ describe('incremental opening', () => {
       expect(reload.mock.calls.length).toBe(0)
       expect(probes(fetcher)).toBe(2)
       const status = document.getElementById('reconnect-notice') as HTMLElement
-      const notice = document.getElementById('notice') as HTMLElement
       expect(status.hidden).toBe(false)
       expect(connection.dataset.state).toBe('reconnecting')
-      // The notice states the fact without contradicting the automatic recovery.
-      expect(notice.textContent).not.toContain('重新运行')
+      // 连接断开的文案已经挪到通知浮层，读 #notice 只会拿到空串、断言永远通过不了。先确认提示
+      // 真的出现，再看它没有和自动恢复打架。
+      await vi.waitFor(() => expect(notices()).toContain('与后台的连接已断开'))
+      expect(notices()).not.toContain('重新运行')
       // A Web process that outlived the daemon still serves the old address: no reload into it.
       fetcher.mockImplementation(async () => samePage())
       await vi.waitFor(() => expect(probes(fetcher)).toBe(3), { timeout: 4000 })
@@ -2693,8 +3135,7 @@ describe('incremental opening', () => {
       expect(connection.dataset.state).toBe('closed')
       // A later message rewrites the notice, not the recovery status.
       emit('gap', { sessionId: 'old', earliestSeq: 1 })
-      const notice = document.getElementById('notice') as HTMLElement
-      expect(notice.textContent).toContain('部分历史事件')
+      await vi.waitFor(() => expect(notices()).toContain('部分历史事件'))
       expect(status.querySelector('button')).toBe(retry)
       // Showing the tab again resumes automatic probing, which still refuses the old address.
       fetcher.mockImplementation(async () => samePage())

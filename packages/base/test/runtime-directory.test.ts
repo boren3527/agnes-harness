@@ -118,8 +118,13 @@ it.runIf(process.platform === 'win32')(
     await fs.writeFile(join(transaction.staging, 'new'), 'new')
     const rename = fs.rename
     let attempts = 0
+    let elapsed = 0
+    vi.spyOn(performance, 'now').mockImplementation(() => elapsed)
     vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
-      if (++attempts < 3) throw Object.assign(new Error('sharing'), { code: 'EPERM' })
+      if (++attempts < 3) {
+        elapsed += 750
+        throw Object.assign(new Error('sharing'), { code: 'EPERM' })
+      }
       return rename(from, to)
     })
     await transaction.commit()
@@ -200,14 +205,17 @@ it.runIf(process.platform === 'win32')(
     const transaction = await beginRuntimeDirectory(output)
     const rename = fs.rename
     let attempts = 0
+    let elapsed = 0
+    vi.spyOn(performance, 'now').mockImplementation(() => elapsed)
     vi.spyOn(fs, 'rename').mockImplementation(async (from, to) => {
       if (String(from) === transaction.staging) {
         attempts++
+        elapsed += 5_000
         throw Object.assign(new Error('held'), { code: 'EPERM' })
       }
       return rename(from, to)
     })
-    await expect(transaction.commit()).rejects.toThrow('held')
+    await expect(transaction.commit()).rejects.toThrow('rename remained blocked after 10 seconds')
     await transaction.dispose()
     expect(attempts).toBeGreaterThan(1)
     expect(await fs.readFile(join(output, 'old'), 'utf8')).toBe('old')

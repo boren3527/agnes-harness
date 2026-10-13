@@ -51,10 +51,12 @@ export interface SidebarState {
   next?: string
   sessionPending: boolean
   newDisabled: boolean
+  newDeviceDisabled?: boolean
 }
 
 export interface SidebarActions {
   newSession(workspace?: WorkspaceEntry): void
+  newDevice?(): void
   addWorkspace(): void
   openSettings(): void
   openSession(id: string): void
@@ -67,6 +69,7 @@ export interface SidebarHandle {
   close(): void
   dismiss(): void
   focusNew(): void
+  focusNewDevice?(): void
 }
 
 export interface SidebarSlots {
@@ -170,6 +173,7 @@ const SidebarBuiltin = forwardRef<
 ) {
   const nav = useRef<HTMLElement>(null)
   const newButton = useRef<HTMLButtonElement>(null)
+  const deviceButton = useRef<HTMLButtonElement>(null)
   const workspaceAdd = useRef<HTMLButtonElement>(null)
   const settingsButton = useRef<HTMLButtonElement>(null)
   const shell = useRef<SidebarShell | undefined>(undefined)
@@ -213,6 +217,8 @@ const SidebarBuiltin = forwardRef<
       update: (next) => {
         stateRef.current = next
         if (newButton.current) newButton.current.disabled = next.newDisabled
+        if (deviceButton.current)
+          deviceButton.current.disabled = next.newDisabled || next.newDeviceDisabled === true
         const signature = navigationSignature(next)
         if (signature === renderedSignature.current) return
         // 依赖未就绪时 renderNavigation 不渲染，此时不能记签名，否则这次更新会永久丢失。
@@ -221,6 +227,7 @@ const SidebarBuiltin = forwardRef<
       close: () => shell.current?.close(),
       dismiss: () => shell.current?.dismiss(),
       focusNew: () => newButton.current?.focus(),
+      focusNewDevice: () => deviceButton.current?.focus(),
     }),
     [renderNavigation],
   )
@@ -233,14 +240,17 @@ const SidebarBuiltin = forwardRef<
   }, [renderNavigation])
   useLayoutEffect(() => {
     const newElement = newButton.current
+    const deviceElement = deviceButton.current
     const workspaceElement = workspaceAdd.current
     const settingsElement = settingsButton.current
     if (!newElement || !workspaceElement || !settingsElement) return
     newElement.onclick = () => actions.newSession()
+    if (deviceElement) deviceElement.onclick = () => actions.newDevice?.()
     workspaceElement.onclick = actions.addWorkspace
     settingsElement.onclick = actions.openSettings
     return () => {
       newElement.onclick = null
+      if (deviceElement) deviceElement.onclick = null
       workspaceElement.onclick = null
       settingsElement.onclick = null
     }
@@ -310,6 +320,21 @@ const SidebarBuiltin = forwardRef<
         icon(NEW_ICON, '0 0 16 16', 'icon icon-fill'),
         createElement('span', null, t('sidebar.newSession')),
       ),
+      actions.newDevice
+        ? createElement(
+            'button',
+            {
+              id: 'new-device',
+              ref: deviceButton,
+              className: 'primary-button',
+              type: 'button',
+              disabled: state.newDisabled || state.newDeviceDisabled === true,
+              'aria-label': t('sidebar.newDevice'),
+            },
+            icon(NEW_ICON, '0 0 16 16', 'icon icon-fill'),
+            createElement('span', null, t('sidebar.newDevice')),
+          )
+        : null,
     ),
     createElement(
       'div',

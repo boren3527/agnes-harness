@@ -47,7 +47,7 @@ export type CrashReclaimClaim = {
   generation: number
 }
 /**
- * The only core-ledger access the daemon supervisor receives. It deliberately exposes operations,
+ * The core-claim access the daemon supervisor receives. It deliberately exposes operations,
  * not a SQL handle: package table isolation remains intact while crash recovery can inspect and
  * release an expired writer claim without opening a second unrestricted connection.
  */

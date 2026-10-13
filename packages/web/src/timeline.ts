@@ -10,6 +10,7 @@ import {
 import { createAntdRoot } from '@agnes/web-ui'
 import { createConversationToolCard } from '@agnes/web-units'
 import { createElement, useLayoutEffect, useSyncExternalStore } from 'react'
+import { createArtifactImagePreview } from './artifact-image-preview.js'
 import { getSlotCardContext, mountSlotCard } from './client-modules/timeline-slot.js'
 import { isConversationNode } from './conversation-visibility.js'
 import { createMarkdownRenderer } from './markdown.js'
@@ -222,7 +223,12 @@ function compactionSummary(node: Extract<UINode, { kind: 'compaction' }>, t: Tra
   return node.summary ?? t('timeline.compactionFallback', { range: node.range.join('–') })
 }
 
-function createEntry(node: UINode, t: Translate, entryFingerprint: string): Entry {
+function createEntry(
+  node: UINode,
+  t: Translate,
+  entryFingerprint: string,
+  options: TimelineRendererOptions,
+): Entry {
   const element = article(node)
 
   if (node.kind === 'user') {
@@ -364,6 +370,11 @@ function createEntry(node: UINode, t: Translate, entryFingerprint: string): Entr
   if (node.kind === 'artifact') {
     const title = heading(element, 'node-label', t('timeline.artifactLabel'))
     const body = text(element, 'node-body', node.name)
+    const imageHost = document.createElement('div')
+    imageHost.className = 'timeline-artifact-preview'
+    element.append(imageHost)
+    const image = createArtifactImagePreview(imageHost, options, t)
+    image.update(node.ref, node.name)
     return {
       kind: node.kind,
       element,
@@ -372,7 +383,9 @@ function createEntry(node: UINode, t: Translate, entryFingerprint: string): Entr
         if (next.kind !== 'artifact') return
         updateText(title, t('timeline.artifactLabel'))
         updateText(body, next.name)
+        image.update(next.ref, next.name)
       },
+      dispose: () => image.dispose(),
     }
   }
 
@@ -430,8 +443,7 @@ function createEntry(node: UINode, t: Translate, entryFingerprint: string): Entr
 }
 
 // 与 NativeDshChildren 的子槽位清单保持一致（那边带 entryKey，这里只关心名字），
-// 供「有没有人认领」判定使用；声明占位条目（key: '__agnes-native-child-declarations__'）
-// 不是真实注册项，不会被 entriesOfSlot 之外的判断误伤。
+// 供「有没有人认领」判定使用。
 const dshChildSlotNames = (slotName: string, kind: UINode['kind']): readonly string[] =>
   slotName === 'tool.call.toolview'
     ? ['tool.call.images', 'tool.view.cordis']
@@ -805,7 +817,7 @@ export function createTimelineRenderer(options: TimelineRendererOptions): Timeli
         old?.dispose?.()
         old?.dshNode?.dispose()
         old?.element.remove()
-        entry = createEntry(node, t, nextFingerprint)
+        entry = createEntry(node, t, nextFingerprint, options)
         entry.dshNode = mountDshNode(entry, node, options)
         entries.set(node.id, entry)
         changed = true

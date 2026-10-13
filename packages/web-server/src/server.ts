@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto'
 import { readFile, stat } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { extname, isAbsolute, join, posix } from 'node:path'
+import { type DeviceMediaResolver, mountDeviceMedia } from './device-media.js'
 import { VENDOR_ENTRY_NAMES } from './vendor-assets.js'
 
 export const DEFAULT_WEB_PORT = 4177
@@ -77,6 +78,8 @@ type WatchedPluginBuild = {
 }
 
 export type WebServerOptions = {
+  /** Authenticated launcher-only resolver of registered loopback media; absent refuses upgrades. */
+  deviceMedia?: DeviceMediaResolver
   /** Directory containing the built index.html, app.js and style.css files. */
   root: string
   /** Credential-free loopback WebSocket endpoint advertised to the browser. */
@@ -132,6 +135,12 @@ export type WebServerOptions = {
   pluginBuildPollMs?: number
   /** Optional launcher-owned native directory picker. Paths are still validated by workspace.add. */
   workspacePicker?: WorkspacePicker
+  /**
+   * Origin of the Agnes MHS hub (AgnesHub), which the workbench's device panel reads live data, video
+   * and audio from; defaults to AGNES_HUB_ORIGIN. It is added to the workbench document's
+   * connect-src (http and ws forms) and media-src; nothing else is opened.
+   */
+  hubOrigin?: string
   /**
    * Optional mounted-Surface reverse proxy (`@agnes/daemon`'s `createMountProxy`). A GET/HEAD consults
    * it just before the static asset whitelist (`fileName`) so a mount like `/demo` is not rejected as
@@ -281,6 +290,26 @@ function listen(server: Server, requestedPort: number): Promise<{ port: number; 
   })
 }
 
+/** The exact http(s) origin of the MHS hub, or an error: a path, credentials or a query are refused. */
+function hubOrigin(value: string): string {
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch {
+    throw new Error('AGNES_HUB_ORIGIN must be an http or https origin')
+  }
+  if (
+    (url.protocol !== 'http:' && url.protocol !== 'https:') ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash ||
+    url.pathname !== '/'
+  )
+    throw new Error('AGNES_HUB_ORIGIN must be an http or https origin')
+  return url.origin
+}
+
 /** Start the static Web client. The daemon is intentionally outside this module's lifecycle. */
 export async function createWebServer(options: WebServerOptions): Promise<WebServer> {
   if (!isAbsolute(options.root)) throw new Error('Web asset root must be absolute')
@@ -292,6 +321,8 @@ export async function createWebServer(options: WebServerOptions): Promise<WebSer
   // Static assets share the base policy. Each HTML response adds its own nonce for Ant Design's
   // CSS-in-JS styles; it is also inserted into that document for ConfigProvider to consume.
   const contentSecurityPolicy = `default-src 'self'; connect-src 'self' ${wsUrl.origin.replace(/^http/, 'ws')}; style-src 'self'; script-src 'self'${importMapHash ? ` 'sha256-${importMapHash}'` : ''}`
+  const hubSetting = options.hubOrigin ?? process.env.AGNES_HUB_ORIGIN
+  const hub = hubSetting ? hubOrigin(hubSetting) : undefined
   const requestedPort = port(options.port ?? DEFAULT_WEB_PORT)
   const expectedOrigin = loopbackOrigin(options.origin ?? `http://${HOST}:${requestedPort}`)
   if (expectedOrigin.hostname !== HOST && expectedOrigin.hostname !== 'localhost')
@@ -664,9 +695,12 @@ export async function createWebServer(options: WebServerOptions): Promise<WebSer
         )
       }
       // Only the workbench consumes local image/PDF resource URLs; other pages keep the base policy.
+      const workbenchCsp = hub
+        ? `${contentSecurityPolicy.replace("connect-src 'self'", `connect-src 'self' ${hub} ${hub.replace(/^http/, 'ws')}`)}; media-src 'self' blob: ${hub}`
+        : contentSecurityPolicy
       const documentCsp =
         file === 'index.html'
-          ? `${contentSecurityPolicy}; img-src 'self' blob:; frame-src 'self' blob:`
+          ? `${workbenchCsp}; img-src 'self' blob:; frame-src 'self' blob:`
           : contentSecurityPolicy
       const responseCsp = documentNonce
         ? documentCsp.replace("style-src 'self'", `style-src 'self' 'nonce-${documentNonce}'`)
@@ -701,6 +735,14 @@ export async function createWebServer(options: WebServerOptions): Promise<WebSer
     throw new Error(`Web listener origin mismatch: expected ${expectedOrigin.origin}`)
   }
   let closing: Promise<void> | undefined
+  const stopDeviceMedia = await mountDeviceMedia(server, actualOrigin, options.deviceMedia).catch(
+    async (error: unknown) => {
+      stopPluginEvents?.()
+      for (const socket of sockets) socket.destroy()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+      throw error
+    },
+  )
   return {
     url: actualOrigin,
     reloadDevelopmentClients: () => {
@@ -709,6 +751,7 @@ export async function createWebServer(options: WebServerOptions): Promise<WebSer
     close: () =>
       (closing ??= new Promise<void>((resolve, reject) => {
         activePicker?.abort()
+        stopDeviceMedia()
         stopPluginEvents?.()
         if (pluginBuildPoller !== undefined) clearInterval(pluginBuildPoller)
         for (const response of pluginEventClients) response.end()

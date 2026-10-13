@@ -15,6 +15,7 @@ import { NoticeSink } from '../src/local/notice.js'
 import { CompositeTargetStore } from '../src/storage/composite-target-store.js'
 import { encodeFrame } from '../src/supervisor/framing.js'
 import { listenUnix } from '../src/supervisor/socket.js'
+import type { WorkerLink, WorkerServiceEffectScope } from '../src/supervisor/worker-link.js'
 import { WorkerPool } from '../src/supervisor/worker-pool.js'
 import { sqliteTables } from './sqlite-tables.js'
 import { workspaceBinding } from './workspace-authority.js'
@@ -61,6 +62,142 @@ function erroredChild(): FakeChild {
 }
 
 describe('WorkerPool', () => {
+  it.each(['device-recognition-budget', 'device-capture-selection', 'device-recognition-execute'] as const)(
+    'confines %s requests to live dispatched effects and refuses late replies',
+    async (method) => {
+      let release: ((value: unknown) => void) | undefined
+      const requests = vi.fn(
+        async (_key: string, _frame: unknown, effect?: WorkerServiceEffectScope, worker?: WorkerLink) => {
+          expect(effect).toBeDefined()
+          expect(Object.isFrozen(effect)).toBe(true)
+          expect(worker?.serviceEffect(effect?.sessionKey ?? '', effect?.callId ?? '')).toBe(effect)
+          return new Promise<unknown>((resolve) => {
+            release = resolve
+          })
+        },
+      )
+      const pool = new WorkerPool({
+        config: {
+          profileName: 'p',
+          dataDir: '/unused',
+          socketPath: '/unused/client.sock',
+          workersSocketPath: '/unused/worker.sock',
+          limits: DEFAULT_LIMITS,
+        },
+        profile: { name: 'p', hash: 'h1' } as never,
+        profileFile: '/unused/profile.json',
+        clock: () => 0,
+        onEvent: () => undefined,
+        onRequest: requests,
+        notices: { emit() {} },
+      })
+      const internals = pool as unknown as {
+        slots: Map<string, unknown>
+        pendingByToken: Map<string, (link: WorkerLink) => void>
+      }
+      let link: WorkerLink | undefined
+      const adopted = new Promise<void>((resolve) => {
+        internals.pendingByToken.set('budget-token', (value) => {
+          link = value
+          internals.slots.set('@shared', {
+            link: value,
+            channels: new Map([['s', {}]]),
+            resourceControl: false,
+          })
+          resolve()
+        })
+      })
+      const [poolSide, workerSide] = duplexPair()
+      const lines: string[] = []
+      workerSide.on('data', (chunk) => lines.push(chunk.toString()))
+      const frames = () =>
+        lines
+          .join('')
+          .trim()
+          .split('\n')
+          .filter(Boolean)
+          .map((line) => JSON.parse(line))
+      const reply = async (id: string) => {
+        await vi.waitFor(() =>
+          expect(frames().find((f) => f.kind === 'reply' && f.requestId === id)).toBeDefined(),
+        )
+        return frames().find((f) => f.kind === 'reply' && f.requestId === id)
+      }
+      const ask = (id: string, sessionKey = 's', callId = 'a'.repeat(32)) =>
+        workerSide.write(
+          encodeFrame({
+            kind: 'request',
+            requestId: id,
+            sessionKey,
+            method,
+            params: { callId },
+          }),
+        )
+      pool.adopt(poolSide)
+      try {
+        workerSide.write(
+          encodeFrame({
+            kind: 'hello',
+            token: 'budget-token',
+            workerKey: '@shared',
+            workerKind: 'session',
+            workerGeneration: 1,
+            profileHash: 'h1',
+          }),
+        )
+        await adopted
+        ask('no-effect')
+        expect((await reply('no-effect')).error).toBeDefined()
+        expect(requests).not.toHaveBeenCalled()
+        if (!link) throw new Error('link not adopted')
+        const dispatched = link.command('callService', {
+          callId: 'a'.repeat(32),
+          sessionKey: 's',
+          effectCommandId: 'effect-1',
+          call: {
+            sessionId: 's',
+            extension: 'plugin/aka-test',
+            service: 'aka.recognition.test',
+            commandId: 'effect-1',
+            input: {},
+          },
+        })
+        const scope = link.serviceEffect('s', 'a'.repeat(32))
+        expect(scope).toBeDefined()
+        ask('wrong-session', 'other')
+        ask('wrong-nonce', 's', 'b'.repeat(32))
+        expect((await reply('wrong-session')).error).toBeDefined()
+        expect((await reply('wrong-nonce')).error).toBeDefined()
+        expect(requests).not.toHaveBeenCalled()
+        ask('admitted')
+        await vi.waitFor(() => expect(requests).toHaveBeenCalledTimes(1))
+        expect(requests.mock.calls[0]?.[2]).toBe(scope)
+        release?.({ reserved: 1 })
+        expect((await reply('admitted')).result).toEqual({ reserved: 1 })
+        ask('late')
+        await vi.waitFor(() => expect(requests).toHaveBeenCalledTimes(2))
+        const abort = link.command('abortService', { callId: 'a'.repeat(32) })
+        expect(scope?.revoked.aborted).toBe(true)
+        release?.({ reserved: 2, privateResult: 'must-not-return' })
+        const late = await reply('late')
+        expect(late.error).toBeDefined()
+        expect(late.result).toBeUndefined()
+        expect(JSON.stringify(late)).not.toContain('must-not-return')
+        await vi.waitFor(() => expect(frames().filter((f) => f.kind === 'command')).toHaveLength(2))
+        for (const command of frames().filter((f) => f.kind === 'command'))
+          workerSide.write(encodeFrame({ kind: 'reply', requestId: command.requestId, result: {} }))
+        await Promise.all([dispatched, abort])
+        ask('after-revocation')
+        expect((await reply('after-revocation')).error).toBeDefined()
+        expect(requests).toHaveBeenCalledTimes(2)
+      } finally {
+        link?.close('test finished')
+        poolSide.destroy()
+        workerSide.destroy()
+      }
+    },
+  )
+
   it('accepts a preview only from the link that carries the session channel', () => {
     const pool = new WorkerPool({
       config: {
@@ -90,6 +227,11 @@ describe('WorkerPool', () => {
 
   it('passes on a preview from the adopted link that hosts the session, never from another', async () => {
     const previews: Array<{ key: string; delta: string }> = []
+    const requests = vi.fn(async (_key: string, f: { params: unknown }) =>
+      (f.params as { view?: unknown }).view === 'connection'
+        ? { deviceId: '11111111-1111-4111-8111-111111111111', bindingRevision: 1, profile: null }
+        : { session: null, workspace: null },
+    )
     const pool = new WorkerPool({
       config: {
         profileName: 'p',
@@ -103,7 +245,7 @@ describe('WorkerPool', () => {
       clock: () => 0,
       onEvent: () => undefined,
       onPreview: (key, update) => previews.push({ key, delta: update.delta }),
-      onRequest: async () => undefined,
+      onRequest: requests,
       notices: { emit() {} },
     })
     const internals = pool as unknown as {
@@ -136,25 +278,142 @@ describe('WorkerPool', () => {
         workerGeneration,
         profileHash: 'h1',
       })
-    workerA.write(hello('token-a', 1, 'session'))
-    workerB.write(hello('token-b', 2, 'service'))
-    await Promise.all([adoptedA, adoptedB])
-    const preview = (delta: string) =>
-      encodeFrame({
-        kind: 'preview',
-        sessionKey: 's',
-        lane: 'main',
-        effectId: 'e1',
-        stream: 'text',
-        offset: 0,
-        delta,
+    const repliesA: string[] = []
+    const repliesB: string[] = []
+    workerA.on('data', (chunk) => repliesA.push(chunk.toString()))
+    workerB.on('data', (chunk) => repliesB.push(chunk.toString()))
+    try {
+      workerA.write(hello('token-a', 1, 'session'))
+      workerB.write(hello('token-b', 2, 'service'))
+      await Promise.all([adoptedA, adoptedB])
+      const preview = (delta: string) =>
+        encodeFrame({
+          kind: 'preview',
+          sessionKey: 's',
+          lane: 'main',
+          effectId: 'e1',
+          stream: 'text',
+          offset: 0,
+          delta,
+        })
+      workerB.write(preview('from b'))
+      workerA.write(preview('from a'))
+      await vi.waitFor(() => expect(previews).toHaveLength(1))
+      await new Promise((r) => setTimeout(r, 10))
+      expect(previews).toEqual([{ key: 's', delta: 'from a' }])
+      const request = (requestId: string, sessionKey: string) =>
+        encodeFrame({ kind: 'request', requestId, sessionKey, method: 'device-session-read', params: {} })
+      workerB.write(request('service-claim', 's'))
+      workerA.write(request('foreign-claim', 'other'))
+      workerA.write(request('current-session', 's'))
+      await vi.waitFor(() => {
+        expect(repliesB.join('')).toContain('service-claim')
+        expect(repliesA.join('')).toContain('foreign-claim')
+        expect(repliesA.join('')).toContain('current-session')
       })
-    workerB.write(preview('from b'))
-    workerA.write(preview('from a'))
-    await vi.waitFor(() => expect(previews).toHaveLength(1))
-    await new Promise((r) => setTimeout(r, 10))
-    expect(previews).toEqual([{ key: 's', delta: 'from a' }])
-    for (const end of [poolA, poolB, workerA, workerB]) end.destroy()
+      const replies = [...repliesA, ...repliesB]
+        .join('')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line))
+      expect(replies.find((reply) => reply.requestId === 'service-claim').error).toBeDefined()
+      expect(replies.find((reply) => reply.requestId === 'foreign-claim').error).toBeDefined()
+      expect(replies.find((reply) => reply.requestId === 'current-session').result).toEqual({
+        session: null,
+        workspace: null,
+      })
+      expect(requests).toHaveBeenCalledExactlyOnceWith(
+        's',
+        expect.objectContaining({ method: 'device-session-read', params: {} }),
+      )
+      const connection = (requestId: string, sessionKey: string) =>
+        encodeFrame({
+          kind: 'request',
+          requestId,
+          sessionKey,
+          method: 'device-session-read',
+          params: { view: 'connection' },
+        })
+      workerB.write(connection('service-profile', 's'))
+      workerA.write(connection('foreign-profile', 'other'))
+      workerA.write(connection('current-profile', 's'))
+      await vi.waitFor(() => {
+        expect(repliesB.join('')).toContain('service-profile')
+        expect(repliesA.join('')).toContain('foreign-profile')
+        expect(repliesA.join('')).toContain('current-profile')
+      })
+      const profileReplies = [...repliesA, ...repliesB]
+        .join('')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line))
+      expect(profileReplies.find((reply) => reply.requestId === 'service-profile').error).toBeDefined()
+      expect(profileReplies.find((reply) => reply.requestId === 'foreign-profile').error).toBeDefined()
+      expect(profileReplies.find((reply) => reply.requestId === 'current-profile').result).toMatchObject({
+        profile: null,
+        bindingRevision: 1,
+      })
+      expect(requests.mock.calls).toEqual([
+        ['s', expect.objectContaining({ params: {} })],
+        ['s', expect.objectContaining({ params: { view: 'connection' } })],
+      ])
+      const changed = {
+        workspaceId: 'a'.repeat(64),
+        deviceId: '11111111-1111-4111-8111-111111111111',
+        revision: 2,
+        active: false,
+      }
+      pool.deviceBindingChanged(changed)
+      await vi.waitFor(() => expect(repliesA.join('')).toContain('device.binding.changed'))
+      expect(repliesB.join('')).not.toContain('device.binding.changed')
+      const configured = {
+        deviceId: changed.deviceId,
+        bindingRevision: 2,
+        profile: {
+          driver: 'aka-00' as const,
+          ip: '192.168.1.42',
+          port: 80,
+          macAddress: '12:34:56:78:90:ab',
+          configRevision: 1,
+        },
+      }
+      pool.deviceConnectionChanged(configured)
+      await vi.waitFor(() => expect(repliesA.join('')).toContain('device.connection.changed'))
+      expect(repliesB.join('')).not.toContain('device.connection.changed')
+      const recognition = {
+        deviceId: changed.deviceId,
+        bindingRevision: 2,
+        configRevision: 1,
+        settings: null,
+      }
+      pool.deviceRecognitionChanged(recognition)
+      await vi.waitFor(() => expect(repliesA.join('')).toContain('device.recognition.changed'))
+      expect(repliesB.join('')).not.toContain('device.recognition.changed')
+      expect(
+        repliesA
+          .join('')
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line))
+          .find((frame) => frame.kind === 'device.recognition.changed'),
+      ).toEqual({ kind: 'device.recognition.changed', recognition })
+
+      vi.spyOn(poolA, 'write').mockImplementationOnce(() => {
+        throw new Error('notification write failed')
+      })
+      expect(() => pool.deviceConnectionChanged(configured)).toThrow('notification write failed')
+      expect(poolA.destroyed).toBe(true)
+      expect(
+        repliesA
+          .join('')
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line))
+          .find((frame) => frame.kind === 'device.binding.changed'),
+      ).toEqual({ kind: 'device.binding.changed', binding: changed })
+    } finally {
+      for (const end of [poolA, poolB, workerA, workerB]) end.destroy()
+    }
   })
 
   it('survives a session interruption on a link whose session has an attached connection', async () => {

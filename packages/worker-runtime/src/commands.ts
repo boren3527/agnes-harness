@@ -692,6 +692,26 @@ export async function handleServiceCommand(
       if (!host?.computerUse || typeof p.operationId !== 'string')
         throw new TypeError('invalid Computer Use operation cancellation')
       return host.computerUse.operationCancel(p.operationId)
+    case 'deviceMedia.endpoint': {
+      if (
+        !host ||
+        typeof host.deviceMediaEndpoint !== 'function' ||
+        typeof p.rowId !== 'string' ||
+        !p.rowId ||
+        p.rowId.length > 256 ||
+        Object.keys(p).some((key) => key !== 'rowId')
+      )
+        throw rpcError('CAPABILITY_DENIED')
+      const endpoint = host.deviceMediaEndpoint(p.rowId)
+      if (!endpoint || endpoint.revoked.aborted) return null
+      // Private supervisor reply only: never publish the AbortSignal or expose this as a service.
+      return {
+        port: endpoint.port,
+        authorization: endpoint.authorization,
+        rowRevision: endpoint.rowRevision,
+        registrationId: endpoint.registrationId,
+      }
+    }
     case 'inspectService': {
       if (!host) throw new Error('generic services are unavailable in a resource lifecycle worker')
       const params = p.call as ExtensionCallParams | undefined
@@ -714,6 +734,8 @@ export async function handleServiceCommand(
     }
     case 'callService': {
       if (!host) throw new Error('generic services are unavailable in a resource lifecycle worker')
+      if (p.effectRecoverOnly !== undefined && p.effectRecoverOnly !== true)
+        throw rpcError('CAPABILITY_DENIED')
       const params = p.call as ExtensionCallParams | undefined
       if (
         typeof p.sessionKey !== 'string' ||
@@ -732,7 +754,13 @@ export async function handleServiceCommand(
           params,
           p.credential,
           ac.signal,
-          typeof admission === 'string' ? { commandId: admission } : undefined,
+          typeof admission === 'string'
+            ? {
+                commandId: admission,
+                ...(/^[a-f0-9]{32}$/.test(callId) ? { callId } : {}),
+                ...(p.effectRecoverOnly ? { recoverOnly: true as const } : {}),
+              }
+            : undefined,
         )
       } finally {
         aborts.delete(callId)

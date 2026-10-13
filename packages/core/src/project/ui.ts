@@ -11,6 +11,7 @@ import {
   type ModelSettings,
   normalize,
   type OpState,
+  readDeviceCaptureEvent,
   type SlotFillView,
   type ThinkingLevel,
   type ToolCall,
@@ -43,6 +44,7 @@ import {
 } from './cache-health.js'
 import { clipUtf16 as clip } from './clip.js'
 import { SurfaceCache } from './surface.js'
+import { toolImages } from './tool-images.js'
 import { TurnProjection, turnsForNodes } from './turns.js'
 
 /** Generation belongs to the daemon's writer ownership, not to a core ledger projection. */
@@ -769,6 +771,11 @@ export class UIProjectionCell {
           this.completedResults.push({ seq, toolUseId: node.toolUseId })
           changed.add(node.id)
         }
+        for (const image of toolImages(result)) {
+          const imageId = `${id}:image:${image.index}`
+          this.pushNode({ kind: 'artifact', id: imageId, seq, name: 'image', ref: image.ref })
+          changed.add(imageId)
+        }
         break
       }
       case 'approval/asked': {
@@ -852,6 +859,14 @@ export class UIProjectionCell {
           ...(cost.credits !== undefined ? { credits: cost.credits } : {}),
         })
         changed.add(id)
+        break
+      }
+      case 'x/core/device-capture': {
+        const capture = readDeviceCaptureEvent(event)
+        if (capture && capture.purpose !== 'recognition') {
+          this.pushNode({ kind: 'artifact', id, seq, name: capture.captureId, ref: { ...capture.ref } })
+          changed.add(id)
+        }
         break
       }
       case 'artifact/job': {

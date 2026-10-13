@@ -9,9 +9,11 @@ import {
   validateAgainst,
   validateMethod,
 } from '@agnes/protocol'
-import { Actor } from '@agnes/protocol/gen/authz'
+import { Actor, Decision } from '@agnes/protocol/gen/authz'
 import type { AuditSink } from '../audit.js'
+import { canonicalJson } from '../profile/canonical.js'
 import { frozenJson } from './frozen-json.js'
+import { pluginRowSource } from './row-extension-host.js'
 import type { ServiceRegistration, ServiceRegistry } from './services.js'
 
 /** Supplied by the trusted embedding at assembly, never by a wire request or author. */
@@ -25,7 +27,18 @@ export interface ServiceAuthority {
 /** A daemon-owned proof that an effect has already entered the durable command journal. This is
  * intentionally not part of ExtensionCallParams: a wire caller may name commandId, but cannot mint
  * the matching trusted admission. */
-export type ServiceEffectAdmission = Readonly<{ commandId: string }>
+export type ServiceEffectAdmission = Readonly<{
+  commandId: string
+  /** Private daemon-generated live call correlation; absent on older/direct embeddings. */
+  callId?: string
+  /** Trusted photo readback only: no fresh selection or artifact writes. Never a public input. */
+  recoverOnly?: true
+}>
+/** Host-private live proof for the verified recognition effect. Never serialized to a plugin. */
+export type ServiceInvocationAuthorization = Readonly<{
+  revoked: AbortSignal
+  assertAuthorized(): Promise<void>
+}>
 export type ServiceInspection = Readonly<{ kind: 'query' | 'effect' }>
 export type PreparedServiceInvocation = Readonly<{
   params: ExtensionCallParams
@@ -39,9 +52,11 @@ export type ServiceInvocationDeps = {
   signal: AbortSignal
   context(
     entry: ServiceRegistration,
-    identity: Pick<ServiceContext, 'actor' | 'source' | 'requestId' | 'signal' | 'timeoutMs'>,
+    identity: Pick<ServiceContext, 'actor' | 'source' | 'requestId' | 'signal' | 'timeoutMs' | 'session'>,
     alive: () => void,
     workspace: WorkspaceInvocationView,
+    admission?: ServiceEffectAdmission,
+    recognitionAuthorization?: ServiceInvocationAuthorization,
   ): ServiceContext
 }
 
@@ -77,6 +92,7 @@ export function serviceInvoker(deps: ServiceInvocationDeps) {
     mode: Readonly<{ kind: 'inspect' }> | Readonly<{ kind: 'call'; admission?: ServiceEffectAdmission }> = {
       kind: 'call',
     },
+    session?: ServiceContext['session'],
   ): Promise<ExtensionCallResult | ServiceInspection> => {
     const { params, entry } = prepared
     const cap = entry.capability,
@@ -154,12 +170,95 @@ export function serviceInvoker(deps: ServiceInvocationDeps) {
       if (cap.kind === 'effect') {
         if (!params.commandId) throw fail('INVALID_PARAMS')
         if (mode.admission?.commandId !== params.commandId) throw fail('CAPABILITY_DENIED')
+        if (
+          mode.admission.recoverOnly !== undefined &&
+          (mode.admission.recoverOnly !== true ||
+            entry.owner !== pluginRowSource('ext:agnes-examples/aka-robot') ||
+            cap.name !== 'aka.capture')
+        )
+          throw fail('CAPABILITY_DENIED')
+        if (
+          mode.admission.callId !== undefined &&
+          (typeof mode.admission.callId !== 'string' || !/^[a-f0-9]{32}$/.test(mode.admission.callId))
+        )
+          throw fail('CAPABILITY_DENIED')
       } else if (mode.admission) throw fail('CAPABILITY_DENIED')
+      const recognitionAuthorization: ServiceInvocationAuthorization | undefined =
+        mode.kind === 'call' &&
+        cap.kind === 'effect' &&
+        mode.admission?.callId &&
+        entry.owner === pluginRowSource('ext:agnes-examples/aka-robot') &&
+        ['aka.recognition.test', 'aka.recognition.enable'].includes(cap.name)
+          ? Object.freeze({
+              revoked: combined,
+              assertAuthorized: async () => {
+                alive()
+                try {
+                  if (!deps.authority) throw fail('CAPABILITY_DENIED')
+                  const current = await deps.authority.resolve(credential)
+                  alive()
+                  if (
+                    current.source !== source.source ||
+                    !current.grants.some(
+                      (grant) =>
+                        grant.extension === entry.owner &&
+                        grant.name === cap.name &&
+                        satisfiesApiRange(grant.range, entry.version),
+                    )
+                  )
+                    throw fail('CAPABILITY_DENIED')
+                  const resolved = inspectJsonData(
+                    await deps.principals.resolve(current.subjectCredential, 'service'),
+                  )
+                  alive()
+                  if (
+                    !resolved.ok ||
+                    !validateAgainst(Actor, resolved.value).ok ||
+                    canonicalJson(resolved.value) !== canonicalJson(actor)
+                  )
+                    throw fail('CAPABILITY_DENIED')
+                  const checked = inspectJsonData(
+                    await deps.principals.authorize(actor, 'execute', {
+                      kind: 'datasource',
+                      id: `${entry.owner}/${cap.name}`,
+                    }),
+                  )
+                  alive()
+                  if (!checked.ok || !validateAgainst(Decision, checked.value).ok)
+                    throw fail('CAPABILITY_DENIED')
+                  const decision = checked.value as { effect: string; expiresAt?: string }
+                  if (
+                    decision.effect !== 'allow' ||
+                    (decision.expiresAt !== undefined && Date.parse(decision.expiresAt) <= Date.now())
+                  )
+                    throw fail('CAPABILITY_DENIED')
+                } catch {
+                  alive()
+                  throw fail('CAPABILITY_DENIED')
+                }
+              },
+            })
+          : undefined
       const context = deps.context(
         entry,
-        { actor, source: sourceId, requestId, signal: combined, timeoutMs: cap.timeoutMs },
+        {
+          actor,
+          source: sourceId,
+          requestId,
+          signal: combined,
+          timeoutMs: cap.timeoutMs,
+          ...(session ? { session } : {}),
+        },
         alive,
         workspace,
+        cap.kind === 'effect' && mode.admission
+          ? Object.freeze({
+              commandId: mode.admission.commandId,
+              ...(mode.admission.callId ? { callId: mode.admission.callId } : {}),
+              ...(mode.admission.recoverOnly ? { recoverOnly: true as const } : {}),
+            })
+          : undefined,
+        recognitionAuthorization,
       )
       alive()
       entry.consume()
@@ -217,11 +316,19 @@ export function serviceInvoker(deps: ServiceInvocationDeps) {
       workspace: WorkspaceInvocationView,
       signal?: AbortSignal,
       admission?: ServiceEffectAdmission,
+      session?: ServiceContext['session'],
     ): Promise<ExtensionCallResult> =>
-      invoke(prepared, credential, workspace, signal, {
-        kind: 'call',
-        ...(admission ? { admission } : {}),
-      }) as Promise<ExtensionCallResult>,
+      invoke(
+        prepared,
+        credential,
+        workspace,
+        signal,
+        {
+          kind: 'call',
+          ...(admission ? { admission } : {}),
+        },
+        session,
+      ) as Promise<ExtensionCallResult>,
     inspectPrepared: (
       prepared: PreparedServiceInvocation,
       credential: unknown,

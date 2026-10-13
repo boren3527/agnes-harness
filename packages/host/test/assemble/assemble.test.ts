@@ -20,6 +20,7 @@ import { resolveProfile } from '../../src/profile/resolve.js'
 import { SessionWorkspaceRuntimeTable } from '../../src/session-workspace-runtime.js'
 import { WorkspaceBindingAuthority } from '../../src/workspace-authority.js'
 import { attachTestSeamPlugins } from '../../testkit/cordis-seams.js'
+import { pluginSourceWith } from './plugin-extension-fixture.js'
 
 const MODEL: ModelRecord = {
   id: 'm1',
@@ -136,6 +137,69 @@ const profileFor = (over: Record<string, unknown> = {}) =>
 const events = (d: AssembleDeps): AuditEvent[] => (d.audit as AuditSink & { events: AuditEvent[] }).events
 
 describe('assemble', () => {
+  it('imports independent boot snapshots concurrently before activating their rows', async () => {
+    const sources = ['@acme/parallel-a', '@acme/parallel-b'].map((vendor, index) =>
+      pluginSourceWith([{ exportName: 'main', rowId: `ext:acme/parallel-${index}`, body: '' }], { vendor }),
+    )
+    const profile = await resolveProfile(
+      {
+        builtin: 'local-dev',
+        lock: {
+          packages: {
+            ...lockPkgs,
+            ...Object.fromEntries(
+              sources.map(({ snapshot }) => [
+                snapshot.packageId,
+                {
+                  version: snapshot.version,
+                  integrity: snapshot.integrity,
+                  trust: 'trusted',
+                  enabled: true,
+                },
+              ]),
+            ),
+          },
+        },
+        user: {
+          name: 'local-dev',
+          provider: { package: '@agnes/ai', adapters: ['@agnes/ai'], routes: [ROUTE] },
+          packages: sources.map(({ snapshot }) => ({ id: snapshot.packageId, source: 'fixture' })),
+        },
+      },
+      env,
+    )
+    let release!: () => void
+    const hold = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const started = new Set<string>()
+    const loading = assemble(
+      profile,
+      deps(allModules(), {
+        runtimePluginSnapshots: sources,
+        extensionLoader: {
+          import: async (entry) => {
+            started.add(entry)
+            await hold
+            return { main: { inject: ['extension'], apply() {} } }
+          },
+        },
+      }),
+    )
+    // Attach a rejection handler before waiting, including on a failing implementation.
+    const completed = loading.then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    )
+    try {
+      await vi.waitFor(() => expect(started.size).toBe(2))
+    } finally {
+      release()
+    }
+    const result = await completed
+    if ('error' in result) throw result.error
+    await closeHost(result.value, new Set(), { timeoutMs: 1000, audit: deps(allModules()).audit })
+  })
   const dirs: string[] = []
   afterEach(() => {
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true })

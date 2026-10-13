@@ -1,5 +1,11 @@
 import type { Duplex } from 'node:stream'
-import type { EventEnvelope, McpStatus, RuntimeTargetArtifact } from '@agnes/protocol'
+import {
+  type EventEnvelope,
+  inspectJsonData,
+  type McpStatus,
+  type RuntimeTargetArtifact,
+  validateMethod,
+} from '@agnes/protocol'
 import type { PreviewUpdate } from '../registry.js'
 import type {
   RequestFrame,
@@ -15,6 +21,18 @@ import { encodeFrame, JsonlDecoder } from './framing.js'
 import { skillInstallReplyError } from './skill-install-error.js'
 
 export type WorkerCommandOptions = { timeoutMs?: number }
+
+/** Transport continuity for a daemon-dispatched journaled service call, not Host grants or physical authority. */
+export type WorkerServiceEffectScope = Readonly<{
+  callId: string
+  sessionKey: string
+  commandId: string
+  extension: string
+  service: string
+  recoverOnly?: true
+  revoked: AbortSignal
+}>
+type EffectScope = { view: WorkerServiceEffectScope; controller: AbortController }
 
 /** Session-scoped view of the shared process connection. */
 export class WorkerSessionChannel {
@@ -83,6 +101,7 @@ export class WorkerLink {
       resolve: (value: unknown) => void
       reject: (error: unknown) => void
       timer?: ReturnType<typeof setTimeout>
+      effect?: EffectScope
     }
   >()
   private nextId = 1
@@ -190,6 +209,7 @@ export class WorkerLink {
    */
   private failSession(sessionKey: string, error: unknown): void {
     this.failedSessions.add(sessionKey)
+    this.revokeServiceEffects((scope) => scope.sessionKey === sessionKey)
     try {
       this.options.onSessionFailure?.(sessionKey, error)
     } catch (observerError) {
@@ -285,11 +305,13 @@ export class WorkerLink {
       sessionKey?: string
       resolve: (value: unknown) => void
       reject: (error: unknown) => void
+      effect?: EffectScope
     }) => void,
   ): boolean {
     const pending = this.pending.get(requestId)
     if (!pending) return false
     this.pending.delete(requestId)
+    pending.effect?.controller.abort()
     if (pending.timer !== undefined) clearTimeout(pending.timer)
     complete(pending)
     return true
@@ -301,6 +323,27 @@ export class WorkerLink {
 
   offerRuntimeTarget(artifact: RuntimeTargetArtifact): void {
     this.send({ type: 'runtime.stale', artifact })
+  }
+  deviceBindingChanged(binding: import('@agnes/protocol').DeviceWorkspaceBinding): void {
+    this.send({ kind: 'device.binding.changed', binding })
+  }
+  deviceRecognitionChanged(recognition: import('@agnes/protocol').DeviceRecognitionResult): void {
+    try {
+      this.send({ kind: 'device.recognition.changed', recognition })
+    } catch (error) {
+      this.socket.destroy()
+      this.markDead()
+      throw error
+    }
+  }
+  deviceConnectionChanged(connection: import('@agnes/protocol').DeviceConnectionResult): void {
+    try {
+      this.send({ kind: 'device.connection.changed', connection })
+    } catch (error) {
+      this.socket.destroy()
+      this.markDead()
+      throw error
+    }
   }
 
   command(
@@ -356,6 +399,7 @@ export class WorkerLink {
   }
 
   async closeSession(sessionKey: string, reason: string, options: WorkerCommandOptions = {}): Promise<void> {
+    this.revokeServiceEffects((scope) => scope.sessionKey === sessionKey)
     try {
       await this.sendSessionLifecycle('session.close', sessionKey, { reason }, options)
     } finally {
@@ -410,6 +454,7 @@ export class WorkerLink {
     options: WorkerCommandOptions,
   ): Promise<unknown> {
     if (!this.alive) return Promise.reject(new Error('worker link closed'))
+    if (method === 'abortService') this.revokeServiceEffects((scope) => scope.callId === params.callId)
     const requestId = `s${this.nextId++}`
     return new Promise((resolve, reject) => {
       const pending: {
@@ -417,7 +462,12 @@ export class WorkerLink {
         resolve: (value: unknown) => void
         reject: (error: unknown) => void
         timer?: ReturnType<typeof setTimeout>
+        effect?: EffectScope
       } = { ...(sessionKey ? { sessionKey } : {}), resolve, reject }
+      if (method === 'callService') {
+        const effect = this.serviceEffectScope(params)
+        if (effect) pending.effect = effect
+      }
       this.pending.set(requestId, pending)
       if (options.timeoutMs) {
         pending.timer = setTimeout(() => {
@@ -425,15 +475,79 @@ export class WorkerLink {
         }, options.timeoutMs)
         pending.timer.unref()
       }
-      this.send({ kind: 'command', requestId, ...(sessionKey ? { sessionKey } : {}), method, params })
+      try {
+        this.send({ kind: 'command', requestId, ...(sessionKey ? { sessionKey } : {}), method, params })
+      } catch (error) {
+        this.settle(requestId, (current) => current.reject(error))
+      }
     })
+  }
+
+  /** Only trusted pool/request composition calls this. Worker-supplied fields never create a scope. */
+  serviceEffect(sessionKey: string, callId: string): WorkerServiceEffectScope | undefined {
+    if (!this.alive || this.failedSessions.has(sessionKey)) return undefined
+    for (const pending of this.pending.values()) {
+      const scope = pending.effect?.view
+      if (scope?.sessionKey === sessionKey && scope.callId === callId && !scope.revoked.aborted) return scope
+    }
+    return undefined
+  }
+
+  private revokeServiceEffects(matches: (scope: WorkerServiceEffectScope) => boolean): void {
+    for (const pending of this.pending.values())
+      if (pending.effect && matches(pending.effect.view)) pending.effect.controller.abort()
+  }
+
+  private serviceEffectScope(params: Record<string, unknown>): EffectScope | undefined {
+    const inspected = inspectJsonData(params, 1049600)
+    if (!inspected.ok) return undefined
+    const input = inspected.value as Record<string, unknown>
+    const call = input.call as Record<string, unknown> | undefined
+    if (
+      typeof input.callId !== 'string' ||
+      !/^[a-f0-9]{32}$/.test(input.callId) ||
+      typeof input.sessionKey !== 'string' ||
+      !validateMethod('_agnes/v1/extension.call', 'params', call).ok ||
+      !call ||
+      call.sessionId !== input.sessionKey ||
+      typeof input.effectCommandId !== 'string' ||
+      input.effectCommandId !== call.commandId ||
+      (input.effectRecoverOnly !== undefined && input.effectRecoverOnly !== true)
+    )
+      return undefined
+    let count = 0
+    for (const pending of this.pending.values()) {
+      if (!pending.effect) continue
+      count++
+      if (pending.effect.view.callId === input.callId) {
+        pending.effect.controller.abort()
+        return undefined
+      }
+    }
+    if (count >= 128) return undefined
+    const controller = new AbortController()
+    return {
+      controller,
+      view: Object.freeze({
+        callId: input.callId,
+        sessionKey: input.sessionKey,
+        commandId: input.effectCommandId,
+        extension: call.extension as string,
+        service: call.service as string,
+        ...(input.effectRecoverOnly ? { recoverOnly: true as const } : {}),
+        revoked: controller.signal,
+      }),
+    }
   }
 
   close(reason: string): void {
     if (!this.alive) return
-    this.send({ kind: 'close', reason })
-    this.socket.end()
-    this.markDead()
+    try {
+      this.send({ kind: 'close', reason })
+      this.socket.end()
+    } finally {
+      this.markDead()
+    }
   }
 
   onExit(handler: () => void): void {

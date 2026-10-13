@@ -5,10 +5,7 @@ import type { LocalBackend } from './backend.js'
 
 type MountProxyLookup = Parameters<typeof createMountProxy>[0]['lookup']
 
-/** Lightweight-demo cadence, not a high-frequency channel: one short-lived loopback RPC per tick.
- *  8s keeps worst-case browser-visible lag at ~10s (this interval plus the demo page's own 2s
- *  /version poll) while staying far under the controller's 30s startup deadline, so "not refreshed
- *  yet" can never be mistaken for "the new instance failed to start". See spec RC1. */
+/** Background refresh cadence; one reusable authenticated connection per feed. */
 export const SURFACE_MOUNT_REFRESH_MS = 8_000
 
 /** Reserved URL prefixes the Web server answers with its own fixed branches (design WC3): the admin
@@ -35,12 +32,8 @@ export type SurfaceMountFeed = Readonly<{
  * and the design note at packages/daemon/src/surfaces/mount-proxy.ts for why a closure alone cannot
  * do this in production).
  *
- * Polls the mount table on a fixed interval (`SURFACE_MOUNT_REFRESH_MS` by default) over a short-lived
- * private Unix connection identical in kind to `localPackageAdmin`'s (same `auth: {kind:'local'}`,
- * same pipe-factory seam for the Windows named pipe transport) -- a fresh connection per tick, not one
- * held open across the poll's lifetime. This is spec RC1: a boot-time-only snapshot never learns about
- * a Surface instance `agnesd` hot-updates after this process started, so the mount table is refreshed
- * in the background instead of fetched once and frozen.
+ * Reuses a private SDK connection. The SDK reauthenticates on transport reconnection; a failed
+ * refresh retires the client and retries with bounded backoff. Polls never overlap.
  *
  * Fails soft in both directions: an unreachable daemon or a query error on the very first fetch leaves
  * the lookup answering "no mount" for every path, the same degraded-but-serving behavior
@@ -51,7 +44,7 @@ export type SurfaceMountFeed = Readonly<{
  */
 export async function fetchSurfaceMountLookup(
   backend: LocalBackend,
-  options: Readonly<{ intervalMs?: number }> = {},
+  options: Readonly<{ intervalMs?: number; waitForInitial?: boolean }> = {},
 ): Promise<SurfaceMountFeed> {
   // `undefined` means "no successful fetch has ever landed" -- distinct from "the daemon reports an
   // empty table". Only a SUCCESSFUL fetch ever writes here: a later poll that throws must leave the
@@ -59,45 +52,64 @@ export async function fetchSurfaceMountLookup(
   let mounts: readonly MountProxyMatch[] | undefined
   let inflight: Promise<void> | undefined
   let stopped = false
+  let client: ReturnType<typeof createClient> | undefined
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let failures = 0
+  const interval = options.intervalMs ?? SURFACE_MOUNT_REFRESH_MS
 
   const refresh = async (): Promise<void> => {
-    // Identical connection shape on EVERY tick -- including `transportFactories` (the Windows
-    // named-pipe seam) and a fresh `memoryJournal` per attempt. `memoryJournal` is a pure in-memory
-    // closure with no shared registry (packages/sdk/src/journal.ts), so calling it repeatedly with the
-    // same label is safe; nothing here is a one-time-only construct.
-    const client = createClient({
+    client ??= createClient({
       transport: { kind: 'unix', path: backend.socketPath },
       transportFactories: localPipeFactories(backend.socketPath, backend.scope),
       auth: { kind: 'local' },
       journal: memoryJournal(`surface-mounts-${backend.scope.scopeID}`),
     })
+    const current = client
     try {
-      await client.initialize()
-      const next = await client.surfaces.mounts()
+      await current.initialize()
+      const next = await current.surfaces.mounts()
       // M3 (final review, Minor): the Task-15 RPC row only ever carries {mount, host, port}; it used
       // to be padded with a fabricated `healthPath: ''` purely to satisfy createMountProxy's lookup()
       // return type, which has since been narrowed (mount-proxy.ts's `MountProxyMatch`) to exactly
       // this shape, so the padding is gone.
       if (!stopped) mounts = next.mounts.filter((row) => !isReservedMount(row.mount))
-    } finally {
-      await client.close().catch(() => undefined)
+    } catch (error) {
+      if (client === current) client = undefined
+      await current.close().catch(() => undefined)
+      throw error
     }
   }
   const tick = (): Promise<void> => {
-    inflight = refresh().catch((error: unknown) => {
-      console.error(
-        mounts === undefined
-          ? 'agh serve: could not read the Surface mount table; Surfaces will not be reachable'
-          : 'agh serve: Surface mount table refresh failed; serving the last known table',
-        error,
-      )
-    })
+    if (stopped) return Promise.resolve()
+    if (inflight) return inflight
+    inflight = refresh()
+      .then(() => {
+        if (failures && !stopped) console.info('agh serve: Surface mount table refresh recovered')
+        failures = 0
+      })
+      .catch((error: unknown) => {
+        if (stopped) return
+        failures++
+        if (failures !== 1) return
+        console.error(
+          mounts === undefined
+            ? 'agh serve: could not read the Surface mount table; Surfaces will not be reachable'
+            : 'agh serve: Surface mount table refresh failed; serving the last known table',
+          error,
+        )
+      })
+      .finally(() => {
+        inflight = undefined
+        if (!stopped) {
+          timer = setTimeout(() => void tick(), Math.min(60_000, interval * 2 ** Math.min(failures, 4)))
+          timer.unref()
+        }
+      })
     return inflight
   }
 
-  await tick()
-  const timer = setInterval(() => void tick(), options.intervalMs ?? SURFACE_MOUNT_REFRESH_MS)
-  timer.unref()
+  const initial = tick()
+  if (options.waitForInitial !== false) await initial
   return Object.freeze({
     // I3 (final review, Important): the match predicate itself comes from the shared `matchMount`
     // instead of being re-derived here.
@@ -105,7 +117,9 @@ export async function fetchSurfaceMountLookup(
     async close() {
       if (stopped) return
       stopped = true
-      clearInterval(timer)
+      clearTimeout(timer)
+      await client?.close().catch(() => undefined)
+      client = undefined
       await inflight?.catch(() => undefined)
     },
   })
@@ -114,7 +128,7 @@ export async function fetchSurfaceMountLookup(
 /** Convenience wrapper: `fetchSurfaceMountLookup` plus wiring the result into `createMountProxy`. */
 export async function fetchSurfaceMountProxy(
   backend: LocalBackend,
-  options: Readonly<{ intervalMs?: number }> = {},
+  options: Readonly<{ intervalMs?: number; waitForInitial?: boolean }> = {},
 ): Promise<Readonly<{ proxy: ReturnType<typeof createMountProxy>; close(): Promise<void> }>> {
   const feed = await fetchSurfaceMountLookup(backend, options)
   return Object.freeze({ proxy: createMountProxy({ lookup: feed.lookup }), close: feed.close })

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://agnes.ai/schema/profile.json",
-  "title": "Profile shapes (\u89c4\u683c \u00a718.2)",
+  "title": "Profile shapes (规格 §18.2)",
   "$defs": {
     "Capability": {
       "type": "string",
@@ -145,6 +145,18 @@
         },
         "workspacePackages": {
           "enum": ["deny", "require-project-trust"]
+        },
+        "recognitionNetworkAllow": {
+          "type": "array",
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "openplatform.aliyuncs.com",
+              "oss-cn-shanghai.aliyuncs.com",
+              "objectdet.cn-shanghai.aliyuncs.com"
+            ]
+          }
         }
       }
     },
@@ -992,6 +1004,18 @@
             },
             "workspacePackages": {
               "enum": ["deny", "require-project-trust"]
+            },
+            "recognitionNetworkAllow": {
+              "type": "array",
+              "maxItems": 3,
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "openplatform.aliyuncs.com",
+                  "oss-cn-shanghai.aliyuncs.com",
+                  "objectdet.cn-shanghai.aliyuncs.com"
+                ]
+              }
             }
           }
         },

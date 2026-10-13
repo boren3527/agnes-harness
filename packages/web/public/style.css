@@ -691,6 +691,7 @@ textarea {
 }
 .sidebar-actions {
   display: grid;
+  gap: 0.5rem;
 }
 .sidebar-actions .primary-button {
   height: 2.375rem;
@@ -1241,6 +1242,87 @@ body:not([data-connection="reconnecting"]):not([data-connection="closed"]) .conn
   grid-template-rows: auto minmax(0, 1fr);
   grid-template-columns: minmax(0, 1fr);
 }
+.session-workbench,
+.session-workbench-chat {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.session-workbench-chat {
+  flex-direction: column;
+}
+.session-workbench.has-device-workbench {
+  display: grid;
+  grid-template-columns: minmax(0, var(--device-chat-share, 60fr)) minmax(0, var(--device-panel-share, 40fr));
+}
+.device-workbench {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  border-left: 1px solid var(--agnes-line-primary);
+  background: var(--agnes-bg-app-content);
+}
+.device-workbench-content {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-height: 100%;
+  padding: 1rem;
+}
+.device-workbench-header,
+.device-workbench-ratio {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.device-workbench-layout-options {
+  margin-top: auto;
+  color: var(--agnes-text-secondary);
+  font-size: var(--font-size-sm);
+}
+.device-workbench-layout-options summary {
+  cursor: pointer;
+  padding-block: 8px;
+}
+.device-workbench-layout-options[open] .device-workbench-ratio {
+  margin-block: 8px;
+}
+.device-workbench-header h2 {
+  margin: 0;
+  font-size: var(--font-size-md);
+  text-wrap: balance;
+}
+.device-workbench-ratio {
+  font-size: var(--font-size-sm);
+}
+.device-workbench-ratio input {
+  min-width: 0;
+  width: 45%;
+}
+.device-workbench-empty {
+  color: var(--agnes-text-secondary);
+  text-wrap: pretty;
+}
+.device-workbench-content > [data-slot="workbench.device"] {
+  flex: 1;
+  min-height: 0;
+}
+body:has(#empty-state:not([hidden])) .has-device-workbench .workbench-split {
+  flex: 1;
+  margin-top: 0;
+}
+@media (max-width: 1100px) {
+  .session-workbench.has-device-workbench {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 3fr) minmax(0, 2fr);
+  }
+  .device-workbench {
+    border-left: 0;
+    border-top: 1px solid var(--agnes-line-primary);
+  }
+}
 /* 页签行：tablist 与「报告问题」按钮同级，按钮不进 tablist，以免破坏 tab 语义。 */
 .session-tabs-bar {
   display: flex;
@@ -1335,6 +1417,10 @@ body:not([data-connection="reconnecting"]):not([data-connection="closed"]) .conn
 .rightbar-document-preview {
   min-width: 0;
   overflow: auto;
+}
+.timeline-artifact-preview img {
+  max-width: 100%;
+  height: auto;
 }
 .rightbar-document-preview > img,
 .rightbar-document-preview > [data-document-preview] > img {
@@ -1763,6 +1849,40 @@ button.trace-gantt-bar:focus-visible {
   padding: 0;
   border: 1px solid var(--agnes-line-primary);
   background: transparent;
+}
+.artifact-image-thumbnail {
+  display: block;
+  max-width: 100%;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--agnes-line-primary);
+  border-radius: 0.5rem;
+  background: transparent;
+  cursor: zoom-in;
+}
+.artifact-image-thumbnail img {
+  display: block;
+  max-width: min(100%, 14rem);
+  max-height: 10rem;
+  object-fit: contain;
+}
+.artifact-image-dialog {
+  max-width: calc(100vw - 2rem);
+  max-height: calc(100dvh - 2rem);
+  padding: 1rem;
+}
+.artifact-image-dialog::backdrop {
+  background: var(--agnes-bg-lightbox);
+}
+.artifact-image-dialog > button {
+  display: block;
+  margin: 0 0 0.5rem auto;
+}
+.artifact-image-dialog > img {
+  display: block;
+  max-width: 100%;
+  max-height: calc(100dvh - 8rem);
+  object-fit: contain;
 }
 .trace-image-thumb img {
   display: block;
@@ -5909,6 +6029,23 @@ body.admin-page {
   flex: 1;
   padding: 1.25rem;
   overflow-y: auto;
+}
+
+#image-model-settings .form-field-wide {
+  grid-column: 1 / -1;
+}
+#image-model-settings .image-model-toggle span {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+#image-model-settings input[type="checkbox"] {
+  width: 1rem;
+  height: 1rem;
+  min-height: 1rem;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--agnes-text-emphasis);
 }
 /* 账户详情 / 新增弹窗：外壳沿用全局 dialog 口径（宽度 / 圆角 / 阴影 / 遮罩），
    这里只补内部排版 —— 内容可滚动、关闭按钮浮在右上、页脚保留原分隔线样式。 */

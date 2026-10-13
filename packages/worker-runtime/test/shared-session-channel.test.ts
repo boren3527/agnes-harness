@@ -41,24 +41,27 @@ describe('SharedSessionChannel', () => {
       channel.settle({ kind: 'reply', sessionKey: 'owner', requestId: sent[0].requestId, result: {} }),
     ).toBe(false)
   })
-  it('routes screenshot reads to their owning session and rejects a different session reply', async () => {
-    const sent: Array<{ requestId: string; sessionKey: string; method: string }> = []
-    const channel = new SharedSessionChannel((frame) => sent.push(frame as (typeof sent)[number]))
-    const read = channel.run('image-owner', () =>
-      channel.request(
-        'artifact-media-read',
-        { lane: 'main', nodeSeq: 21, sha256: 'a'.repeat(64) },
-        new AbortController().signal,
-      ),
-    )
-    expect(sent[0]).toMatchObject({ sessionKey: 'image-owner', method: 'artifact-media-read' })
-    const requestId = sent[0]?.requestId ?? ''
-    expect(() => channel.settle({ kind: 'reply', requestId, sessionKey: 'other', result: {} })).toThrow(
-      'session mismatch',
-    )
-    channel.settle({ kind: 'reply', requestId, sessionKey: 'image-owner', result: { ok: true } })
-    await expect(read).resolves.toEqual({ ok: true })
-  })
+  it.each(['artifact-media-read', 'device-session-read', 'device-capture-selection'] as const)(
+    'routes %s to its owning session and rejects a different session reply',
+    async (method) => {
+      const sent: Array<{ requestId: string; sessionKey: string; method: string }> = []
+      const channel = new SharedSessionChannel((frame) => sent.push(frame as (typeof sent)[number]))
+      const read = channel.run('image-owner', () =>
+        channel.request(
+          method,
+          method === 'artifact-media-read' ? { lane: 'main', nodeSeq: 21, sha256: 'a'.repeat(64) } : {},
+          new AbortController().signal,
+        ),
+      )
+      expect(sent[0]).toMatchObject({ sessionKey: 'image-owner', method })
+      const requestId = sent[0]?.requestId ?? ''
+      expect(() => channel.settle({ kind: 'reply', requestId, sessionKey: 'other', result: {} })).toThrow(
+        'session mismatch',
+      )
+      channel.settle({ kind: 'reply', requestId, sessionKey: 'image-owner', result: { ok: true } })
+      await expect(read).resolves.toEqual({ ok: true })
+    },
+  )
   it('attributes overlapping approval requests and rejects a cross-session reply', async () => {
     const sent: Array<{ requestId: string; sessionKey: string }> = []
     const channel = new SharedSessionChannel((frame) => sent.push(frame as (typeof sent)[number]))

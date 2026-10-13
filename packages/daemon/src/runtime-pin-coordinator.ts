@@ -69,6 +69,21 @@ export function createRuntimePinCoordinator(
     return running
   }
   const pins = () => input.manager.listRuntimePins(input.profileDirectory)
+  const inventory = async () => {
+    try {
+      return await (input.manager.runtimeInventory?.(input.profileDirectory) ??
+        input.manager.inventory(input.profileDirectory))
+    } catch (error) {
+      if (
+        error &&
+        typeof error === 'object' &&
+        'detail' in error &&
+        (error.detail as { reason?: unknown } | undefined)?.reason === 'runtime-inventory-stale'
+      )
+        return input.manager.inventory(input.profileDirectory)
+      throw error
+    }
+  }
   const held = () =>
     new Set([...referencedRuntimePins(input.store), ...[...retiring.values()].flatMap((ids) => [...ids])])
   const collect = async () => {
@@ -83,14 +98,17 @@ export function createRuntimePinCoordinator(
     }
     await input.manager.collectRuntimeSnapshots(input.profileDirectory)
   }
-  const ensure = async (artifact: RuntimeTargetArtifact): Promise<string> => {
-    const inventory = await input.manager.inventory(input.profileDirectory)
-    const existing = new Map((await pins()).map((pin) => [pin.pinId, pin]))
+  const ensure = async (
+    artifact: RuntimeTargetArtifact,
+    recoveredPins?: Map<string, RuntimePin>,
+  ): Promise<string> => {
+    const verified = await inventory()
+    const existing = recoveredPins ?? new Map((await pins()).map((pin) => [pin.pinId, pin]))
     for (const ref of references(artifact)) {
       const id = activeRuntimePinId(ref)
       input.store.pin(id)
-      const source = selector(inventory, ref)
-      const pkg = inventory.packages.find((row) => row.id === ref.packageId)
+      const source = selector(verified, ref)
+      const pkg = verified.packages.find((row) => row.id === ref.packageId)
       if (!pkg || !isSnapshotPackageEligible(pkg))
         throw new Error(`E_RUNTIME_TARGET_UNTRUSTED: ${ref.packageId}`)
       const prior: RuntimePin | undefined = existing.get(id)
@@ -104,28 +122,32 @@ export function createRuntimePinCoordinator(
         continue
       }
       if (!source) throw new Error(`E_RUNTIME_TARGET_SNAPSHOT_MISSING: ${ref.packageId}`)
-      await input.manager.pinRuntimeSnapshot(input.profileDirectory, {
+      const pin = await input.manager.pinRuntimeSnapshot(input.profileDirectory, {
         pinId: id,
         operationId: id,
         packageId: ref.packageId,
         purpose: 'active',
         selector: source,
       })
+      existing.set(id, pin)
     }
-    return inventory.hash
+    return verified.hash
   }
   return Object.freeze({
     /** Recover crash leftovers before a worker may boot from a persisted target. */
     recover: () =>
       exclusive(async () => {
         input.store.sweepPins()
-        const inventory = await input.manager.inventory(input.profileDirectory)
-        const eligible = new Set(inventory.packages.filter(isSnapshotPackageEligible).map((pkg) => pkg.id))
+        const verified = await inventory()
+        const eligible = new Set(verified.packages.filter(isSnapshotPackageEligible).map((pkg) => pkg.id))
         for (const artifact of [input.store.desired(), input.store.previous(), input.store.lastGood()])
           for (const ref of references(artifact))
             if (!eligible.has(ref.packageId)) input.store.revokePackage(ref.packageId)
+        // These targets commonly share snapshots. Verify persisted pins once for this
+        // serialized recovery batch; every newly created pin is verified by the manager.
+        const recoveredPins = new Map((await pins()).map((pin) => [pin.pinId, pin]))
         for (const artifact of [input.store.desired(), input.store.previous(), input.store.lastGood()])
-          if (artifact) await ensure(artifact)
+          if (artifact) await ensure(artifact, recoveredPins)
         input.store.sweepPins()
         await collect()
       }),

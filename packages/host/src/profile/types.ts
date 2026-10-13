@@ -57,6 +57,8 @@ export type AdaptersConfig = {
 export type Policy = {
   capabilityCeiling?: Capability[]
   workspacePackages?: 'deny' | 'require-project-trust'
+  /** Fixed cloud recognition destinations; does not grant shell or general service networking. */
+  recognitionNetworkAllow?: string[]
 }
 
 export type ComputerUseAppIdentity =
@@ -227,7 +229,11 @@ export type ResolvedProfile = Readonly<{
   cacheDir: string
   limits: Record<string, number>
   presets: { default: string; allowed: string[] }
-  policy: { capabilityCeiling: Capability[]; workspacePackages: 'deny' | 'require-project-trust' }
+  policy: {
+    capabilityCeiling: Capability[]
+    workspacePackages: 'deny' | 'require-project-trust'
+    recognitionNetworkAllow?: string[]
+  }
   reconcile: ReconcilePolicy
   approvals: ApprovalProfile
   computerUse: ResolvedComputerUseProfile

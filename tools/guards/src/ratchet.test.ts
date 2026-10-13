@@ -1,3 +1,84 @@
+// Reviewed image preview projection, configuration identity, and scoped image-generation ports.
+// Exact measured caps: web-ui 6816, core 26610, host/assemble 4242, extension-api 1122, web 17843, host 40903.
+// No extra headroom or new exclusions. Behavioral regressions are covered by their package tests.
+// Reviewed fixed recognition-only Host network policy, separate from OS sandbox enforcement.
+// Reviewed age-anchor placement after original persistence (+2 Host lines), cached inventory
+// recovery and bounded read-only observation handling; synchronized exact counts without spare budget.
+// Reviewed image-to-image settings/private credential storage, bounded subject processing and tool lifetime.
+// Also reconciled reviewed runtime inventory caching, initial mount async loading and parallel bundle staging.
+// Exact countLines totals only; no exclusions, disabled checks or spare allowance added.
+// Continuous recognition originals keep exact source bytes without flooding the chat timeline.
+// Measured Protocol 2463 (+5), Host 40247 (+4); no counting exclusions or spare allowance.
+// Reviewed original uncertain-recognition readback; exact extensions 241 (+25), nested in daemon 29977.
+// Reviewed original uncertain-recognition readback through durable publication/CAS; exact daemon 29977 (+201).
+// Reviewed trusted-backend detection archive with recorded-original correlation; exact daemon 29776 (+234).
+// Reviewed original recognition receipt readback and service-separated tab hints; web-client 2030 (+9).
+// Uncertain recognition cannot dispatch recovery; no exclusions or spare allocation.
+// Reviewed unusable-round preflight before credentials/upload; exact daemon 29542 (+8).
+// Detect admission still reserves atomically; no exclusions or spare allocation.
+// Reviewed explicit read-only budget service scope; exact Host 40243 (+4), daemon 29534 (+6).
+// Read scope cannot start/reserve or grant IO; no exclusions or spare allocation.
+// Reviewed narrow single-image original saving: exact Host 40239 (+1), daemon 29528 (+1).
+// Recognition recovery/continuous writes remain denied; no exclusions or spare allowance.
+// Reviewed admitted single-image context port, strict frame/result binding and actual plugin consumer.
+// Exact Host 40238 (+193; assemble 4220 +1 nested), extension API 1106 (+31), no exclusions/spare.
+// Reviewed exact AKA recognition effect network declaration and resolved Host policy; Host 40045 (+19).
+// Actual row/Host policy tests cover per-stage refusal and call revocation; no exclusions or spare budget.
+// Reviewed one-use daemon-clock frame window, private execute route and trusted WorkerPool link.
+// Exact daemon 29527 (+149), Host 40026 (+6), CLI launch 1193 (+1); no exclusions or spare allocation.
+// Reviewed exact-scope Host IO recheck bridge and daemon worker-bound recognition entry.
+// Exact daemon 29378 (+74), no exclusions or spare allocation; production service remains unwired.
+// Reviewed Host-private staged network authorization and ordinary/packaged worker registrar.
+// Exact Host 40020 (assemble 4219 nested), CLI launch 1192; no exclusions or spare allocation.
+// Reviewed Host-private revalidation for admitted AKA recognition effects; exact Host 39958
+// (service-invocation 351 nested, +63). No public grant or line-count exclusions/spare allowance.
+// Reviewed cloud dispatch shared slot and configured device frequency; exact daemon 29304 (+23).
+// Requests keep the slot through real settlement; no new exclusions or spare allocation.
+// Reviewed tab-local original capture identity, readonly relay/journal and completion cleanup.
+// Exact guard totals: web-client 2021, daemon 29281 (extensions 216 nested), Web 17502
+// (app 2333 nested), CLI launch 1191 (package-admin 304 nested); no exclusions or spare allocation.
+// Reviewed fixed-identity Host capture publication and durable daemon event/readability confirmation.
+// Photo recovery: trusted recovery-only dispatch/port and explicit host-retained client identity.
+// Exact daemon 29270 (+14), Host 39895 (+14, invocation 288 nested), web-client 1884 (+61).
+// Nested extensions 208 (+9) / service-worker 104 (+1); no spare or exclusions.
+// Reviewed atomic immutable capture publication identity and scoped real-byte preparation.
+// Exact daemon 29169 (+45), no spare or exclusions; correlation does not grant event publication.
+// Reviewed scoped capture saving, shared validation and actual-byte confirmation (including reclaimed refusal).
+// Exact Host 39715, assemble 4214 nested, protocol 2458, extension-api 1074, daemon 29124; no spare/exclusions.
+// Reviewed private scoped capture selection transport and owner/workspace/version continuity.
+// Exact daemon 29128 (+98), Host 39517 (+6); no exclusions or spare budget. No artifact/event grant.
+// Reviewed explicit AKA round-start effect and synchronous shared-executor idle guard in the
+// production supervisor. Exact daemon 28832 (+16), no exclusions or spare budget; no inference enable.
+// Reviewed sole Host cloud SDK adapter, structural copied JPEG frames and private daemon single-image
+// execution with staged admission and durable budget. Exact totals: Host 39511 (+343; adapters
+// 5436 +333 nested), daemon 28816 (+179). No exclusions or spare allocation; no registered inference API.
+// AKA-INVOCATION-LOOKUP: shared readonly validator and tool/hook lifetime-bound lookup;
+// exact measured source caps, no exclusions or spare allocation. No physical control authority.
+// AKA-SERVICE-ENROLLMENT: fresh readonly worker/session lookup with owner/workspace checks;
+// exact measured source caps, no exclusions or spare allocation. Physical control remains separate.
+// Reviewed device companion shell: session enrollment, independent slot, real built-in entry,
+// lifecycle cleanup and bounded layout adjustment. Exact measured counts; no exclusions or spare budget.
+// 2026-10-10 reviewed device association storage: daemon-issued workspace authority, atomic enrollment,
+// immutable historical session bindings, exclusive active device owner, and revision checks.
+// Exact countLines daemon 27044 (+168); real owner-confined SQLite and restart/refusal tests, no exclusions.
+// 2026-10-09 merge with main: three scopes were raised on both sides, so neither side's number holds.
+// Re-measured with countLines() on the resolved tree: Web 16967 (16947 + main's 20),
+// Web-units 6242, Web-UI 6678, Core 26556, Protocol 2276; no exclusions or spare allocation.
+// 2026-10-06 error notices move to an Ant Design notification overlay: a web-ui wrapper owns the antd
+// notification api, #notice keeps only the session-recovery block and the two page-level prompts, and
+// attachment refusals carry codes so the submit path translates them too.
+// Reviewed exact countLines totals: Web 16932/app 2207, Web-units 6235, Web-UI 6671; no exclusions or spare allocation.
+// 2026-10-06 the composer's paperclip hint moves from the native title to an Ant Design Tooltip,
+// which adds the wrapper in packages/web-ui and the wrap site in the composer.
+// Reviewed exact countLines totals: Web-units 6239, Web-UI 6678; no exclusions or spare allocation.
+// 2026-10-06 review fixes on the same notification work: a bfcache-safe pagehide on all three
+// listeners, the first-run kind reset before the missing-session prompt, the recovery-block and
+// first-run sentinel guards in notify's fallback, the detached-notifier reset on close, the two
+// refusal classes forwarded onto the protocol surface, and the page-level notice cleared on submit.
+// Reviewed exact countLines totals: Web 16947/app 2222, Web-units 6242, Protocol 2276; no exclusions or spare allocation.
+// 2026-10-09 tool image opt-in: ToolMeta.returnsImages, recorded in the call policy; request media
+// admits a trusted result's images when its call declared it. Exact measured Core 26560, daemon 26876,
+// extension API 1000; no exclusions or spare allocation.
 // 2026-10-06 attachment history reopening: bound authority replay so worker frames can be split.
 // Reviewed exact countLines daemon 26847 (+5); no exclusions or spare allocation.
 // 2026-10-06 bundled document reader: default-helper migration and release payload preparation.
@@ -69,6 +150,10 @@
 // takeover added): packages/package-manager/src 5611->5674, remeasured after biome --write.
 // I18N-20261003: exact merged feature totals after locale catalogs and UI wiring; measured with countLines,
 // no exclusions or spare allocation. See the 2026-10-03 internationalization PR review fixes.
+// AKA device association RPC/SDK and empty-session creation: owner gates, revision checking,
+// local-only capability discovery, initialization gating, retry and focus restoration.
+// Reviewed measured countLines totals: Web-units 6269, Protocol 2288, SDK 5197,
+// daemon 27160, Web 17012/app 2285. Exact caps, no new exclusions or spare allocation.
 import {
   existsSync,
   mkdirSync,
@@ -274,11 +359,17 @@ const INITIAL_CEILING: Record<string, number> = {
   // CU-ARTIFACT-RETENTION-GC-INDEX C8: measured 1714, exact, no spare (+9). ClientResourceReclaimedError
   // thrown on a 410 artifact_reclaimed read.
   // Locale catalogs on LocaleService. Measured 1745, exact, no spare (+31).
-  'packages/web-client/src': 1749,
+  'packages/web-client/src': 2032,
   'packages/web-slots/src': 605,
   // Failed shell calls read as their exit code (+19 lines); measured 4891, exact cap.
   // Approval reasons: the approval card label reads the decision reason (+22). Measured 6651, exact cap.
-  'packages/web-ui/src': 6640,
+  // 2026-10-06 error notices move to an Ant Design notification overlay: the web-ui wrapper that
+  // owns the antd api (placement, duration, closable, role) is new source here. Measured: 6671, exact,
+  // no spare.
+  // 2026-10-06 the composer's paperclip hint moves off the native title onto a Tooltip, which needs
+  // its own wrapper here (antd's Tooltip consumes `rootClassName`, not `className`). Measured: 6678.
+  // Reviewed: image-model workflow guidance and official documentation link.
+  'packages/web-ui/src': 6816,
   // W8a-3: retire the native tool renderer in favor of one compatibility root; measured 4630.
   // 2026-10-04 image upload merged onto the queue view: the composer reads, downscales and previews
   // attachments, and the queue row markup above stays. Measured: 5923, exact, no spare.
@@ -288,7 +379,14 @@ const INITIAL_CEILING: Record<string, number> = {
   // Fragment so the queue section can sit before the form, which costs the Fragment import, the
   // extracted `queueSection` binding and one extra nesting level. Measured: 5922, exact, no spare.
   // 2026-10-06: normalize JPEGs that fail strict validation and update the 10 MiB copy; 6090, exact.
-  'packages/web-units/src': 6192,
+  // 2026-10-06: accept JPEGs whose EOI has trailing bytes, and name an over-pixel image as too large
+  // instead of as an invalid file. Measured: 6202, exact, no spare.
+  // 2026-10-06: name the attachment limits the validator refuses (file data, name, aggregate bytes)
+  // and move the shared error-code to locale map out of the composer. Measured: 6235, exact, no spare.
+  // 2026-10-06 the paperclip wraps its button in that Tooltip and drops `title`. Measured: 6239.
+  // 2026-10-06 review fix: a refused file block reports through the shared attachment-error map
+  // instead of claiming the attachment could not be read. Measured: 6242, exact, no spare.
+  'packages/web-units/src': 6398, // Reviewed accessible association confirmation, +73; reuse Dialog.
   // Write staleness guard: a per-session table of what each file looked like when read, checked by
   // `write` (+55 counted lines, measured 855, exact cap).
   'packages/base/extensions/tools-core': 922,
@@ -387,7 +485,8 @@ const INITIAL_CEILING: Record<string, number> = {
   // PLUGIN-HELPER: measured 5763 -> 5770; approved feature scope, no spare allocation.
   // Windows stale-lock reclamation added 17 counted lines; exact baseline total, no spare.
   // Windows Unicode package copying replaces three crashing cpSync paths; exact measured total.
-  'packages/package-manager/src': 5803,
+  // Reviewed bounded inventory batches and single-read snapshot verification reuse (+21), no spare.
+  'packages/package-manager/src': 5992,
   'packages/package-manager/src/catalog': 211,
   // Web open-source UI: safe Markdown DOM, compact presentation helpers, task-first creation,
   // and explicit controls. v2 adds accessible compact composer state; exact measured allocation; evidence is tracked with the UI execution.
@@ -456,7 +555,12 @@ const INITIAL_CEILING: Record<string, number> = {
   // which lands on top of the diagnostics wiring above. Re-measured with countLines(): 1827, exact.
   // 2026-10-04 image attachments: app.ts submits ContentBlock content while keeping the title locale.
   // Measured: 2148, exact, no spare.
-  'packages/web/src/app': 2183,
+  // 2026-10-06 error notices move off #notice: the notification host mount, the showError split and
+  // the first-run guide's own dismiss path land here, while the interactive sites write through
+  // `notify`. Two rounds of review fixes on that work added the bfcache guards on all three pagehide
+  // listeners, the detached-notifier reset, the shared noticeHoldsPersistentContent predicate every
+  // notice writer now goes through, and the dismiss on submit. Measured: 2222, exact, no spare.
+  'packages/web/src/app': 2335, // Reviewed explicit session modes, pending controls and retry-key isolation, +37.
   // 2026-09-22 UI plugin management: inject the embedded pane's client runtime reconciler.
   // 2026-09-25 UI refactor: permission options now render through the React region contract.
   // Re-measured with countLines(): 215, exact, no spare.
@@ -476,7 +580,7 @@ const INITIAL_CEILING: Record<string, number> = {
   'packages/web/src/model-picker': 981,
   // 2026-09-25 UI refactor: settings-owned element construction uses the shared UI host boundary.
   // Re-measured with countLines(): 754, exact, no spare.
-  'packages/web/src/settings': 900,
+  'packages/web/src/settings': 917,
   // 2026-09-17 rebase 后的重新实测：timeline.ts 的详情弹窗管线已在 WEB-UI-ALIGN-DSH 中删除
   // （原 427 是旧实现的实测值），删码后未跟着收紧会留下 55 行富余，故收到实测精确值 372。
   // 2026-09-24 WEB-INCREMENTAL-PROJECTION-TRACE-INDEX C6 (Web incremental wiring) and its review fixes,
@@ -492,7 +596,7 @@ const INITIAL_CEILING: Record<string, number> = {
   // Approval reasons: the approval card label reads the decision reason (+10). Measured 796, exact cap.
   // 2026-10-05 the merge keeps both sides' additions, so neither number holds. Re-measured on the
   // merged tree: 807, exact, no spare.
-  'packages/web/src/timeline': 807,
+  'packages/web/src/timeline': 820,
   // 2026-09-17：navigation.ts 的 folderIcon 换成客户端 AgnesProjectFolderIcon 两态字形
   // （两条 path + folderSvg 构造器），展开/收起由 CSS 的 [aria-expanded] 切换。实测 108。
   // SESSION-ACTIONS integrated with b/main: exact increment +43.
@@ -624,7 +728,7 @@ const INITIAL_CEILING: Record<string, number> = {
   // so the packaged worker resolves its home the same way the daemon does. Re-measured on the tree
   // rebased onto 9a3d70ed (which itself reached 936): 937, exact cap.
   // 2026-09-22 Web Plugins parity: package asset and service BFF launcher integration. Exact.
-  'packages/cli/launch': 1110, // SKILL-INSTALL-CORE: preserve request-only port in packaged Host options.
+  'packages/cli/launch': 1218, // SKILL-INSTALL-CORE: preserve request-only port in packaged Host options.
   // 2026-09-14: whole-branch review fix wave (Finding 1), same as above. Measured 90, exact --
   // unaffected by the workspace-picker change (different file, same aggregate prefix).
   // 2026-09-14: Task 4 profile-command-plan wires packages.trustWorkspace into invoke()'s switch --
@@ -639,7 +743,7 @@ const INITIAL_CEILING: Record<string, number> = {
   // sub-key is the combined measurement: 104 (95 merge baseline plus the S14c skin lines).
   // 2026-09-18 web-client-modules P1a: private clientModules.read launcher connection.
   // Task 11 tree get/list/apply/rollback invoke cases. Re-measured: 132, exact.
-  'packages/cli/launch/package-admin': 303,
+  'packages/cli/launch/package-admin': 304,
   // 2026-09-15: theme work adds the blocking first-paint theme IIFE build step. 2026-09-15
   // (merge with origin/main, which adds the Windows runtime bundling). Combined exact
   // measured total: 184.
@@ -655,7 +759,7 @@ const INITIAL_CEILING: Record<string, number> = {
   // SEA reuses that exact directory. Measured build-local total: 203; exact cap.
   // W5a merges pinned XMarkdown CSS and ships its MIT license with the local Web assets.
   // Measured with countLines(): 287, exact cap.
-  'packages/cli/tools/build-local': 295,
+  'packages/cli/tools/build-local': 298,
   // The PM5 bootstrap fallback retains the existing scoped owner/data-dir contract when a selected
   // Profile has not yet been materialized. The final recovery retry admits only an explicit
   // E_LOCK_MISMATCH path and re-resolves with an empty package lock; this is exact compatibility
@@ -675,7 +779,7 @@ const INITIAL_CEILING: Record<string, number> = {
   // override a model's reasoning capability when the installed pi-ai catalogue is incomplete or
   // wrong), landing independently of WIN-12c's own +2. Re-measured on the merged tree directly
   // (never summed): 911; exact cap, no spare.
-  'packages/host/src/configuration': 1230,
+  'packages/host/src/configuration': 1277,
   'packages/host/src/configuration-lock': 39,
   'packages/daemon/src/supervisor/configuration': 45,
   // S5 service workers reload the profile hash and its immutable snapshot path as one value.
@@ -1033,7 +1137,8 @@ const INITIAL_CEILING: Record<string, number> = {
   // 2026-10-05 the two sides coexist on the merged tree, so neither side's number holds. Re-measured
   // with countLines() after the merge: 26102, exact, no spare.
   // 2026-10-06: reject oversized inbox records before durable append; 26424, exact.
-  'packages/core/src': 26546,
+  // Reviewed: bound multi-view selection by existing image/block caps; originals remain in the ledger.
+  'packages/core/src': 26610,
   // 2026-09-15: DeepSeek V4 Pro/Flash ship a known-thinking-corrections table (new file) so the
   // product corrects pi-ai's verified-wrong reasoning_effort data out of the box, instead of
   // requiring every deployment to hand-edit thinkingEfforts once they notice. Measured 3347.
@@ -1265,7 +1370,7 @@ const INITIAL_CEILING: Record<string, number> = {
   // The Kernel receives the spawned-child turn admission. Measured 4193, exact, no spare (+1).
   // A returning package must not be served a cached generation bound to revoked leases (+7), and the
   // full-access read-only roots reach the fence from the assembly (+7). Measured 4207, exact.
-  'packages/host/src/assemble': 4207,
+  'packages/host/src/assemble': 4242, // Reviewed recognition-only policy wiring; exact count.
   // P1: generated-schema validators and duplicate projection-name refusal; measured exact cap.
   // F1 adds Surface JSON/identity validation and lock snapshot validation.
   // PM4 adds strict management DTO validation and method permission/identity contracts; exact total.
@@ -1342,7 +1447,7 @@ const INITIAL_CEILING: Record<string, number> = {
   // TRACE-INSPECTION-20260925: readToolDetail method types; measured 2201, exact.
   // Response metadata on cost/ledger: ResponseMeta root type export. Re-measured on the rebased
   // tree: 2201, exact.
-  'packages/protocol/src': 2272,
+  'packages/protocol/src': 2472, // Reviewed endpoint metadata/type exports and formatter expansion; exact count.
   'packages/cli/src/tui': 4000,
   // 2026-09-16: first registration of packages/cli-tui — it matched none of the (then) 113 ratchet
   // keys, so the cli-progress-surface plan's Tasks 1-4 (Loader hide/restart/stop, formatTurnSummary,
@@ -1460,7 +1565,8 @@ const INITIAL_CEILING: Record<string, number> = {
   // exported as constants. Measured 981 (+3), exact, no spare.
   // Optional ExecResult.timedOut and the soft-deadline note on timeoutMs. Measured 987 (+6), exact cap.
   // Optional ToolContext.defaultTimeoutMs. Measured 988 (+1), exact cap.
-  'packages/extension-api/src': 997, // SKILL-INSTALL-CORE: optional request port and bounded DTO, no admin grant.
+  // AKA service ownership: one optional readonly Host-resolved session field (+1). No new authority.
+  'packages/extension-api/src': 1122, // Reviewed optional private media registration contract, +8.
   // Optional author fixture entry; no production runtime code belongs here.
   // B1-A: measured 229 lines on the shared tree; public transport contract, config and wiring/testkit.
   // B1 review repair: exact measured 246; startup cancellation / cwd contract coverage.
@@ -1533,7 +1639,7 @@ const INITIAL_CEILING: Record<string, number> = {
   // TRACE-INSPECTION-20260925: bounded, abortable paged detail read; measured 5127, exact.
   // 2026-10-04 image attachments: image blocks flow through the UI projection sync.
   // Measured: 5176, exact, no spare.
-  'packages/sdk/src': 5188,
+  'packages/sdk/src': 5227, // Reviewed owner endpoint metadata read/save wrappers, +6.
   'packages/sdk/src/extensions.node': 21,
   'packages/sdk/src/package-admin.node': 147,
   'packages/sdk/src/surface.browser': 3,
@@ -1896,7 +2002,7 @@ const INITIAL_CEILING: Record<string, number> = {
   // An approval request carries the tool's ACP kind and name. Measured 26542 (+6), exact cap.
   // Approval reasons: the prompter router answers with a reason (+18). Measured 26758 (combined tree), exact cap.
   // 2026-10-06: bound image transport byte totals and split oversized worker scan ranges; 26818, exact.
-  'packages/daemon/src': 26847,
+  'packages/daemon/src': 30170, // Reviewed same-round completed receipt accounting for unused detection recovery; exact count.
   'packages/daemon/src/packages/admin-session': 46,
   // 2026-09-14: whole-branch review fix wave (Finding 1) adds the two missing
   // 'pins/inspect'/'pins/release' entries to the ACTIONS BFF route allowlist, which had been left
@@ -1940,7 +2046,7 @@ const INITIAL_CEILING: Record<string, number> = {
   // SINGLE-EXTENSION-PATH: generation-qualified skin roster and pinned-snapshot gate. Exact count.
   // 2026-09-23 AUDIT-CONFIRMED-BUGFIXES group-05-3: callService/callEffect join the recoveryError gate.
   // Measured: 1509, exact.
-  'packages/daemon/src/packages/handler': 1509,
+  'packages/daemon/src/packages/handler': 1597, // Reviewed bounded read-only observations; exact count, mutation lane unchanged.
   // 2026-09-14 doctor activation-recovery report: the optional barrel re-export of
   // ACTIVATION_RECOVERY_FILENAME/ActivationRecoveryBreadcrumb/isActivationRecoveryBreadcrumb adds
   // two lines. Measured 42, exact.
@@ -1965,8 +2071,8 @@ const INITIAL_CEILING: Record<string, number> = {
   // 2026-09-15: reject not-yet-valid JWT nbf. Measured 336; exact.
   'packages/daemon/src/local/auth': 336,
   // CORDIS-C1b Task 6 binds public service calls to durable session ownership.
-  'packages/daemon/src/local/methods/extensions': 199,
-  'packages/daemon/src/supervisor/service-worker': 103,
+  'packages/daemon/src/local/methods/extensions': 241,
+  'packages/daemon/src/supervisor/service-worker': 104,
   // Includes the independently reviewed F6 deployment transaction from the activation lane.
   // 2026-09-16 (surface-boot-wiring plan, Tasks 2-5): deploy-dir.ts (resolveDeployDir),
   // deployment-policy.ts (buildDeploymentPolicy, defaulting every sourceId's grant ceiling to []
@@ -2148,7 +2254,11 @@ const INITIAL_CEILING: Record<string, number> = {
   // Approval reasons: the approval card label reads the decision reason (+22). Measured 16081 (combined tree), exact cap.
   // 2026-10-05 the merge keeps both sides' additions, so neither number holds. Re-measured on the
   // merged tree: 16861, exact, no spare.
-  'packages/web/src': 16908,
+  // 2026-10-06 the same notification migration, counted over the whole web source scope.
+  // Re-measured with countLines() after the review fixes on that work: 16947, exact, no spare.
+  // 2026-10-09 merge with main: main's own increments in this scope land on top of that 16947, so
+  // neither side's number holds. Re-measured with countLines() on the merged tree: 16967, exact.
+  'packages/web/src': 17843, // Reviewed old-session rebind with readback/epoch guards and parallel JS/CSS preparation; exact +94.
   // 2026-09-17 web-client-modules frontend track (rebased onto L0/permission-picker main): re-measured exact value below.
   // 2026-09-14: Task 7 orphaned-pin-cleanup adds the orphan-pins section to PluginAdminPage — the
   // #orphanPins/#orphanPinsList/#orphanPinsStatus/#orphanPinsReleaseAll element bindings, the
@@ -2630,8 +2740,12 @@ const INITIAL_CEILING: Record<string, number> = {
   // read-only under full file access: the fence guard, the roots helper and their wiring (+40).
   // Measured 38359, exact.
   // Approval reasons: the Prompter type may answer with a reason (+2). Measured 38398 (combined tree), exact cap.
-  'packages/host/src': 38398,
-  'packages/host/src/ext-host/service-invocation': 247,
+  // AKA service ownership: capture the validated session key, carry it through prepared invocation,
+  // and copy/freeze the identity against the invocation workspace. Reviewed with production Host
+  // multi-session, stale-session, retirement and compatibility tests. Exact measured growth +23,
+  // including +16 in service-invocation; no spare allocation or exclusion of production code.
+  'packages/host/src': 40903, // Reviewed recognition policy and corrected original age anchor; no spare budget.
+  'packages/host/src/ext-host/service-invocation': 351,
   // T5.2's permission projector is kept independently bounded so later extension-host work cannot
   // hide in the package-wide increment. Measured source: 86 lines.
   // 2026-09-15: project resume onto the capability fence. Measured 90.
@@ -2684,7 +2798,7 @@ const INITIAL_CEILING: Record<string, number> = {
   // 2026-09-20 appAccess and signed application identity policy. Measured 1116; exact cap.
   // 2026-09-21 AGH namespace rename (.agnes -> .agh): +1 counted line: inputs.ts imports AGH_DIR for <cwd>/.agh/profile.local.yaml.
   // Re-measured with this guard's countLines(): 1185, exact cap, no spare.
-  'packages/host/src/profile': 1187,
+  'packages/host/src/profile': 1218,
   // 2026-09-09: raised from 1100. 1071 of it was spent and the 29 left could not cover the deny-list
   // repair with anything to spare; the repair measures 1075. The remaining 100 are platform-win32
   // reaching parity with platform-posix - today its probe() asserts a fixed table where posix
@@ -2798,7 +2912,7 @@ const INITIAL_CEILING: Record<string, number> = {
   // The fence refuses writes to the installation's own state under full file access. Measured 5053,
   // exact, no spare (+19).
   // Approval reasons: the Prompter type may answer with a reason (+2). Measured 5055, exact cap.
-  'packages/host/src/adapters': 5055,
+  'packages/host/src/adapters': 5442, // Reviewed bundled CommonJS SDK export normalization; exact count.
 
   // C1b Task 5 persists child creation attempts and deferred recovery; exact total, no spare.
   // Task 17 review: sqlite_master scan + table-name refuse. Re-measured: 674, exact.
@@ -2909,3 +3023,43 @@ describe('ratchet counts code under a directory named `test` (regression: exclud
     }
   })
 })
+
+// Reviewed 2026-10-10 private device-media registration: row-owned credential data, stamped revision,
+// revocation and Host-only lookup. Exact countLines: extension-api 1024 (+8), Host 38751 (+66),
+// assemble 4212 (+2, already within Host); no exclusions, spare allocation or physical authority.
+
+// Reviewed private media production resolution: current row mapping, session continuity,
+// launcher-only RPC and bounded revalidation. Exact measured Protocol 2311, SDK 5210,
+// daemon 27625/handler 1575, CLI launch 1190; no spare allocation or new exclusions.
+
+// Reviewed owner recognition read RPC: redacted schema, SDK wrapper, fresh session owner checks.
+// Exact measured Protocol 2314 (+3), SDK 5213 (+3), daemon 27840 (+9); no exclusions or spare cap.
+
+// Reviewed owner recognition save coordinator, local token namespace, protocol and SDK save contracts.
+// Exact measured Host 38925 (+64), daemon 28049 (+209), Protocol 2320 (+6), SDK 5216 (+3).
+// No exclusions, spare allocation, network or inference authority added to config save.
+
+// Reviewed redacted recognition change notification and scoped readonly worker/Host lifetimes.
+// Exact measured Host 39007 (+82), daemon 28080 (+31), extension-api 1039 (+15); no exclusions/spare cap.
+// Worker-runtime has no ratchet key; measured source 3405, not a newly invented policy scope.
+// Recognition-only changes preserve connection-only video leases; neither lookup nor retention admits inference.
+
+// Reviewed durable device recognition rounds: CAS, bounded one-use reservations and SQLite restart persistence.
+// Exact guard countLines daemon 28247 (+167); no exclusions or spare allocation.
+// Reservations are budget admission, not evidence of cloud dispatch or billing; public runtime wiring remains pending.
+
+// Reviewed daemon-dispatched service effect continuity and private Host context correlation.
+// Earlier service-effect foundation count: daemon 28331 (+84), Host 39022/service-invocation 278 (+15, nested).
+// Reply/timeout/abort/session/link/write failure revoke scopes; no new inference grants, exclusions or spare allocation.
+
+// Reviewed private recognition budget request: actual dispatched scope, owner/workspace CAS,
+// restricted AKA services, bounded closed input and late-result revocation. Exact daemon +131,
+// Host +1 exports the existing pluginRowSource identity function; no new exclusions or spare budget.
+
+// Reviewed service-only recognition budget port: invoker admission fixes identity; closed
+// input/result, binding continuity and worker bridge. Exact Host +145 (assemble +1 nested),
+// extension-api +24; no exclusions or spare capacity.
+
+// Reviewed backend-only credential access: mandatory awaited authorization, real device-scoped
+// store reads, fresh config/owner checks and opaque closures with bounded in-flight consumption.
+// Exact daemon +175 counted source lines; no exclusions or spare budget. Not an RPC credential API.

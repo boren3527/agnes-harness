@@ -288,12 +288,16 @@ async function buildLocal(out: string, nativeOutput?: string): Promise<void> {
 
   // This is the normal package executable. SEA keeps its own build path and embedded-manifest
   // defines; sharing the source entry here keeps command routing and trusted loader behavior equal.
-  await bundle(join(cliRoot, 'src', 'bin.ts'), join(out, 'agnes.mjs'), defines)
-  await bundle(join(cliRoot, 'launch', 'daemon-entry.ts'), join(out, 'daemon.mjs'), defines)
   const workerSource = existsSync(join(cliRoot, 'launch', 'worker-entry.ts'))
     ? join(cliRoot, 'launch', 'worker-entry.ts')
     : join(repoPackages, 'daemon', 'src', 'worker', 'main.ts')
-  await bundle(workerSource, join(out, 'worker.mjs'), defines)
+  // Independent output files can build together. Drain every build before disposing staging on failure.
+  const bundles = await Promise.allSettled([
+    bundle(join(cliRoot, 'src', 'bin.ts'), join(out, 'agnes.mjs'), defines),
+    bundle(join(cliRoot, 'launch', 'daemon-entry.ts'), join(out, 'daemon.mjs'), defines),
+    bundle(workerSource, join(out, 'worker.mjs'), defines),
+  ])
+  for (const result of bundles) if (result.status === 'rejected') throw result.reason
   await copySystemRuntime(repoPackages, out, nativeOutput)
   if (isDarwin()) {
     execFileSync(

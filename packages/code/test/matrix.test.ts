@@ -98,7 +98,21 @@ describe('preset matrix through the host resolver', () => {
       core: ['read', 'write', 'edit', 'shell', 'grep', 'find', 'ls', 'todo', 'web_fetch'],
       timeout_ms: 120000,
       output_max_bytes: 32768,
-      timeouts: { web_fetch: 30000, skill_helper_import: 240000, shell: 600000 },
+      timeouts: {
+        web_fetch: 30000,
+        skill_helper_import: 240000,
+        shell: 600000,
+        aka_approach: 200000,
+        aka_transport: 200000,
+        aka_patrol: 200000,
+        aka_patrol_saved: 200000,
+        aka_mission: 200000,
+        aka_mission_saved: 200000,
+        aka_orbit_capture: 200000,
+        aka_prepare_subject: 200000,
+        agh_ortho_mesh_run: 600000,
+        aka_build_model: 900000,
+      },
     })
   })
 

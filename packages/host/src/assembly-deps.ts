@@ -78,6 +78,29 @@ export type AssembleDeps = HostPaths &
     mcpManage?: import('./resources/mcp-manage-port.js').McpManageBridge
     pluginManage?: import('./resources/plugin-manage-port.js').PluginManageBridge
     skillInstall?: import('./resources/skill-install-port.js').SkillInstallBridge
+    /** Trusted supervisor lookup; invocation ports validate the wire result and fix session identity. */
+    deviceSession?: (
+      sessionKey: string,
+      signal: AbortSignal,
+      view?: 'connection' | 'recognition',
+    ) => Promise<unknown>
+    deviceRecognitionBudget?: import('./ext-host/device-recognition-budget-port.js').DeviceRecognitionBudgetBridge
+    deviceRecognitionAuthorization?: import('./ext-host/device-recognition-authorization.js').DeviceRecognitionAuthorizationRegistrar
+    /** Private one-use frame admission/execute bridge; never exposes credentials to an author. */
+    deviceRecognitionExecute?: (
+      sessionKey: string,
+      callId: string,
+      input: unknown,
+      signal: AbortSignal,
+    ) => Promise<unknown>
+    /** Private capture journal and verified publication acknowledgement; fixes actual call identity. */
+    deviceCaptureSelection?: (
+      sessionKey: string,
+      callId: string,
+      input: unknown,
+      signal: AbortSignal,
+    ) => Promise<unknown>
+    deviceSessionRetain?: import('./ext-host/device-session-port.js').DeviceSessionRetainer
     /**
      * Cordis contribution port for the same registry that produced `skillResources`.
      * Plugins call it during apply; consumers keep using `skillResources`.

@@ -6,6 +6,7 @@ import type { ResolvedProfile } from '@agnes/host'
 import {
   type DaemonNotice,
   type EventEnvelope,
+  inspectJsonData,
   type McpStatus,
   rpcError,
   type WorkerGeneration,
@@ -24,7 +25,7 @@ import type { DaemonConfig } from '../config.js'
 import type { PreviewUpdate } from '../registry.js'
 import { assertWorkspaceBindingEnvelope, type WorkspaceBindingEnvelope } from '../storage/workspaces.js'
 import type { RequestFrame } from './frames.js'
-import { WorkerLink, type WorkerSessionChannel } from './worker-link.js'
+import { WorkerLink, type WorkerServiceEffectScope, type WorkerSessionChannel } from './worker-link.js'
 
 /**
  * The narrow shape this pool needs from daemon's notice sink. The real `NoticeSink` is
@@ -94,7 +95,23 @@ type Slot = {
  * between strikes, matching the daemon spec's §5.2 crash policy.
  */
 export class WorkerPool {
+  /** Trusted process-wide notification; resource-only workers do not own device lifetimes. */
+  deviceBindingChanged(binding: import('@agnes/protocol').DeviceWorkspaceBinding): void {
+    const slot = this.slots.get('@shared')
+    const link = slot?.link ?? slot?.initializingLink
+    if (link) link.deviceBindingChanged(binding)
+  }
   private readonly slots = new Map<string, Slot>()
+  deviceConnectionChanged(connection: import('@agnes/protocol').DeviceConnectionResult): void {
+    const slot = this.slots.get('@shared')
+    const link = slot?.link ?? slot?.initializingLink
+    if (link) link.deviceConnectionChanged(connection)
+  }
+  deviceRecognitionChanged(recognition: import('@agnes/protocol').DeviceRecognitionResult): void {
+    const slot = this.slots.get('@shared')
+    const link = slot?.link ?? slot?.initializingLink
+    if (link) link.deviceRecognitionChanged(recognition)
+  }
   private readonly pendingByToken = new Map<string, (link: WorkerLink) => void>()
   private readonly crashes = new Map<string, number[]>()
   private readonly quarantined = new Set<string>()
@@ -126,7 +143,12 @@ export class WorkerPool {
       onPreview?: (sessionKey: string, update: PreviewUpdate) => void
       /** Safe live resource observations are fenced by the resource adapter's active worker key. */
       onResourceStatus?: (input: { sessionKey: string; serverId: string; status: McpStatus }) => void
-      onRequest: (sessionKey: string, f: RequestFrame) => Promise<unknown>
+      onRequest: (
+        sessionKey: string,
+        f: RequestFrame,
+        effect?: WorkerServiceEffectScope,
+        link?: WorkerLink,
+      ) => Promise<unknown>
       onLog?: (input: {
         sessionKey: string
         level: 'debug' | 'info' | 'warn' | 'error'
@@ -159,7 +181,37 @@ export class WorkerPool {
       },
       onResourceStatus: (serverId, status) =>
         this.o.onResourceStatus?.({ sessionKey: workerKey, serverId, status }),
-      onRequest: (f) => this.o.onRequest(f.sessionKey, f),
+      onRequest: (f) => {
+        if (f.method === 'device-session-read' && !this.hosts(link, f.sessionKey))
+          return Promise.reject(new Error('Device session channel unavailable'))
+        if (
+          f.method === 'device-recognition-budget' ||
+          f.method === 'device-capture-selection' ||
+          f.method === 'device-recognition-execute'
+        ) {
+          const params = inspectJsonData(
+            f.params,
+            f.method === 'device-recognition-execute'
+              ? 4 * Math.ceil((2.5 * 1024 * 1024) / 3) + 4096
+              : f.method === 'device-capture-selection'
+                ? 8192
+                : 4096,
+          )
+          const callId =
+            params.ok && params.value && typeof params.value === 'object' && !Array.isArray(params.value)
+              ? (params.value as Record<string, unknown>).callId
+              : undefined
+          const scope = typeof callId === 'string' ? link.serviceEffect(f.sessionKey, callId) : undefined
+          if (!this.hosts(link, f.sessionKey) || !scope)
+            return Promise.reject(new Error('Device effect unavailable'))
+          return this.o.onRequest(f.sessionKey, f, scope, link).then((result) => {
+            if (!this.hosts(link, f.sessionKey) || scope.revoked.aborted)
+              throw new Error('Device effect unavailable')
+            return result
+          })
+        }
+        return this.o.onRequest(f.sessionKey, f)
+      },
       onLog: (sessionKey, level, message) => this.o.onLog?.({ sessionKey, level, message }),
       onActivity: (sessionKey) => this.touch(sessionKey),
       onSessionFailure: (sessionKey, error) => {
